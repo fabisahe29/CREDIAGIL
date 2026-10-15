@@ -16,3 +16,7 @@ Thumbs.db
 *.tmp
 *.swp
 .idea/
+
+# Preferencias personales de Claude Code (no se versionan)
+CLAUDE.local.md
+.claude/settings.local.json
