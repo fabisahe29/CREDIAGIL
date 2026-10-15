@@ -225,7 +225,7 @@ description: "Lista de tareas: guardarraíles del repositorio con hooks"
   - `git status`, para confirmar que no entra ningún `.env`, archivo temporal ni `node_modules/`;
   - la búsqueda de tokens del quickstart del #3.
 - [x] T034 Con confirmación del desarrollador: `git push -u origin 5-guardarrailes-del-repositorio-con-hooks` y `/ticket-abrir-pr 5`.
-- [ ] T035 Con confirmación del desarrollador: `/ticket-cerrar`.
+- [x] T035 Con confirmación del desarrollador: `/ticket-cerrar`.
 
 ---
 
