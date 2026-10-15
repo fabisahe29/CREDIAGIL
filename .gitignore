@@ -1,0 +1,18 @@
+# Secretos: el token de GitHub y las claves de API van solo en el entorno (constitución, Restricciones técnicas)
+.env
+.env.*
+!.env.example
+
+# Node.js / TypeScript
+node_modules/
+dist/
+build/
+coverage/
+*.log
+
+# Sistema y editores
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.idea/
