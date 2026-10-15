@@ -85,7 +85,7 @@ Fusiona y cierra el ticket en un solo paso (FR-008, FR-008a, FR-008b).
 **Flujo**:
 
 1. Leer el PR. Si ya está fusionado, saltar al paso 3 (↺, FR-008b). Si está cerrado sin fusionar, ⛔ "PR cerrado sin fusionar; el ticket no pasa a Done".
-2. Verificar fusionabilidad (R9): `mergeable`, checks en verde, sin `CHANGES_REQUESTED` y no borrador. Si falla, ⛔ con el motivo concreto; el ticket sigue en `In review`. Si pasa, fusionar con squash y título convencional `<tipo>: <resumen> (#<N>)`.
+2. Verificar fusionabilidad (R9): `mergeable_state` igual a `clean`, checks en verde (un `pending` sin statuses cuenta como verde), sin `CHANGES_REQUESTED` y no borrador. Si falla, ⛔ con el motivo concreto; el ticket sigue en `In review`. Si pasa, fusionar con squash y título convencional `<tipo>: <resumen> (#<N>)`.
 3. Status → `Done`. Confirmar que el issue quedó cerrado; si no se cerró (faltaba `Closes`), informarlo como ⛔. Este comando no cierra el issue a mano.
 4. Comentario `cierre`.
 5. Recordar al desarrollador que actualice su copia local (`git switch main && git pull`).

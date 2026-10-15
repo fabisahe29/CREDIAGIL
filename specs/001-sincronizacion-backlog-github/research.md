@@ -68,6 +68,6 @@ Cada decisión sigue el formato: Decisión · Motivo · Alternativas descartadas
 
 ## R9 Verificaciones antes de fusionar (FR-008a)
 
-- **Decisión**: `/ticket-cerrar` lee el pull request (`pull_request_read` · `get`, `get_status`, `get_check_runs` y `get_reviews`). Solo fusiona si cumple las cuatro condiciones: `mergeable` es verdadero, ningún check run falla ni está pendiente y el estado combinado no es `failure` ni `pending`, no hay revisiones con `CHANGES_REQUESTED` sin resolver y el pull request no es borrador. El método de fusión es `squash`, con un título en formato de commit convencional.
+- **Decisión**: `/ticket-cerrar` lee el pull request (`pull_request_read` · `get`, `get_status`, `get_check_runs` y `get_reviews`). Solo fusiona si cumple las cuatro condiciones: `mergeable_state` es `clean` (el MCP no expone el booleano `mergeable`), ningún check run falla ni está pendiente y el estado combinado no es `failure`, ni `pending` con statuses configurados (sin statuses, GitHub informa `pending` con `total_count: 0`, y eso cuenta como verde), no hay revisiones con `CHANGES_REQUESTED` sin resolver y el pull request no es borrador. El método de fusión es `squash`, con un título en formato de commit convencional.
 - **Motivo**: es la regla de la constitución "ningún cambio se integra con pruebas en rojo". El squash deja un commit convencional por ticket en `main`.
 - **Alternativas descartadas**: fusionar sin verificar, que viola la constitución; o `merge` con commit de merge, que deja en `main` los commits intermedios con mensajes no convencionales.

@@ -33,8 +33,15 @@ $ARGUMENTS
    - Si `state` es `closed` y no está fusionado, ⛔ "PR cerrado sin fusionar; el ticket no pasa a Done" y termina.
 2. **Verificar que se puede fusionar** (R9, FR-008a). Lee `get`, `get_status`, `get_check_runs` y `get_reviews` del PR. Se fusiona **solo si** se cumple todo esto:
    - `draft` es falso;
-   - `mergeable` es verdadero (si es `null`, GitHub aún lo está calculando: vuelve a leer `get` una vez; si sigue en `null`, ⛔ "fusionabilidad desconocida, reintenta");
-   - ningún check run tiene `conclusion` igual a `failure`, `cancelled` o `timed_out`, ninguno está pendiente (`status` distinto de `completed`) y el estado combinado no es `failure` ni `pending` (si no hay checks configurados, se considera en verde);
+   - `mergeable_state` es `clean`. Los demás valores bloquean:
+     - `unknown`: GitHub aún lo está calculando, sobre todo justo después de un push. Vuelve a leer `get` una vez; si sigue en `unknown`, ⛔ "fusionabilidad desconocida, reintenta".
+     - `dirty`: ⛔ por conflictos.
+     - `blocked`: ⛔ por protección de rama o revisión requerida.
+     - `behind`: ⛔ porque la rama está desactualizada respecto de `main`.
+     - `unstable`: ⛔ porque hay checks que no pasan.
+     - `draft`: ⛔ porque el PR es borrador.
+   - ningún check run (`get_check_runs`) tiene `conclusion` igual a `failure`, `cancelled` o `timed_out`, y ninguno está pendiente (`status` distinto de `completed`);
+   - el estado combinado (`get_status`) no es `failure`, y tampoco es `pending` con `total_count` mayor que 0. Si `total_count` es 0 no hay statuses configurados: GitHub informa `pending`, pero cuenta como en verde;
    - ningún revisor tiene como última revisión `CHANGES_REQUESTED`.
 
    Si algo falla, ⛔ con el motivo concreto y termina. El ticket sigue en `In review`.
