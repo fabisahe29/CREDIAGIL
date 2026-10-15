@@ -4,6 +4,82 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-15 · Memoria y convenciones del equipo: dónde vive cada cosa
+
+**Issue**: [#4 — Memoria y convenciones del equipo](https://github.com/fabisahe29/CREDIAGIL/issues/4)
+
+**Detalle**: [specs/002-memoria-convenciones-equipo/research.md](specs/002-memoria-convenciones-equipo/research.md), decisiones R1, R2, R3, R4, R7 y R8
+
+### Decisión 1: memoria del proyecto en `./CLAUDE.md`
+
+Las convenciones del equipo están en `CLAUDE.md`, en la raíz, en menos de 60 líneas.
+
+**Motivo**: Claude Code lo carga al iniciar sin configuración, y quien abre el repositorio lo ve sin buscarlo.
+
+**Alternativa descartada**: `.claude/CLAUDE.md`. Funciona igual, pero queda escondido entre la configuración de herramientas.
+
+**Consecuencias**: lo específico de una zona no va aquí, va a su regla por ruta, para que la memoria siga siendo corta.
+
+### Decisión 2: `@import` de la constitución
+
+`CLAUDE.md` importa la constitución con `@.specify/memory/constitution.md`. Es el uso justificado de importación que pide el ticket.
+
+**Motivo**: las reglas no negociables deben estar siempre en contexto, y con la importación se mantiene una sola fuente de verdad, sin duplicar contenido. La ruta está dentro del repositorio, así que no aparece el diálogo de aprobación de importaciones externas.
+
+**Alternativas descartadas**:
+
+- **Copiar un resumen de los principios**: se desincroniza en cada enmienda de la constitución.
+- **Poner solo un enlace en texto**: Claude no lo carga salvo que alguien lo pida.
+- **Un `CLAUDE.md` por subdirectorio**: también se carga bajo demanda, igual que las reglas por ruta, y tener dos mecanismos para lo mismo hace difícil saber qué se carga y cuándo.
+
+**Consecuencias**: la constitución, de unas 150 líneas, se carga en cada sesión. Es un costo aceptado, porque es el contenido de mayor riesgo si se omite.
+
+### Decisión 3: cuatro reglas por ruta en `.claude/rules/`
+
+Hay una regla para cada zona:
+
+- `tests.md`: `**/*.test.ts`
+- `politica.md`: `src/politica/**`
+- `servidor-mcp.md`: `src/mcp/**`
+- `specs.md`: `specs/**`
+
+Cada una tiene solo la clave `paths` en el frontmatter. Solo cuenta como test un archivo con sufijo `.test`; los `.spec` y los fixtures no, según la aclaración Q3 de la spec.
+
+**Motivo**: cada zona carga su contexto solo cuando se trabaja en ella, y al definir el alcance por patrón la regla cubre también las carpetas que todavía no existen.
+
+**Alternativas descartadas**:
+
+- **Reglas sin `paths`**: se cargarían siempre.
+- **Una sola regla para todo**: mezclaría zonas.
+- **Incluir `.spec` y `fixtures/` en la regla de tests**: sumaría una segunda convención de nombre. Los fixtures ya quedan protegidos por la constitución importada (Principio II).
+
+**Consecuencias**: `src/politica/` y `src/mcp/` se fijan antes de existir. El issue #7 debe usar esas rutas o ajustar los `paths`. Además, un YAML inválido haría que la regla se cargue siempre, así que la validación comprueba que ninguna regla se cargue al iniciar.
+
+### Decisión 4: memoria personal en `CLAUDE.local.md`
+
+Las preferencias personales del proyecto van en `CLAUDE.local.md`, que está en `.gitignore`. Las preferencias que valen para todos los proyectos van en `~/.claude/CLAUDE.md`.
+
+**Motivo**: es el mecanismo documentado para memoria personal por proyecto. Claude Code no lo ignora de forma automática, por eso se declara en `.gitignore`.
+
+**Alternativas descartadas**:
+
+- **Importar `@~/.claude/…` desde el `CLAUDE.md` compartido**: mostraría a todo el equipo un diálogo de aprobación por un archivo que solo existe en una máquina.
+- **Una sección "personal" dentro de `CLAUDE.md`**: se versionaría para todos.
+
+### Decisión 5: configuración compartida y configuración personal separadas
+
+- `.claude/settings.json` está versionado y habilita el MCP `github` del proyecto (`enabledMcpjsonServers`), que necesitan los comandos `/ticket-*`.
+- `.claude/settings.local.json` es personal y está en `.gitignore`.
+
+**Motivo**: la configuración local tiene prioridad y las listas se combinan, así que lo personal se suma sin modificar lo compartido. Claude Code solo ignora el archivo local de forma automática cuando él mismo lo crea, y lo hace en el *exclude* global, no en `.gitignore`; por eso se declara aquí de forma explícita.
+
+**Alternativas descartadas**:
+
+- **No versionar ninguna configuración**: cada persona tendría que aprobar el MCP por su cuenta.
+- **Permisos amplios en la configuración compartida**: impondría a todos lo que es preferencia de cada uno.
+
+---
+
 ## 2026-10-15 · Sincronización del backlog: comandos propios por MCP y hooks de Spec Kit
 
 **Issue**: [#3 — Sincronización autónoma del backlog con GitHub](https://github.com/fabisahe29/CREDIAGIL/issues/3)
