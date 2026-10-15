@@ -1,0 +1,16 @@
+# Hooks de Spec Kit del flujo de tickets (specs/001-sincronizacion-backlog-github, research R2).
+# Al terminar /speckit.specify y /speckit.plan se publica el comentario de avance en el issue de origen.
+# Spec Kit convierte "ticket.avance" en /ticket-avance (puntos → guiones).
+hooks:
+  after_specify:
+    - extension: crediagil-flujo
+      command: ticket.avance
+      description: Comenta en el issue de origen que la especificación terminó
+      prompt: Ejecutar /ticket-avance especificacion
+      optional: false
+  after_plan:
+    - extension: crediagil-flujo
+      command: ticket.avance
+      description: Comenta en el issue de origen las decisiones del plan
+      prompt: Ejecutar /ticket-avance plan
+      optional: false
