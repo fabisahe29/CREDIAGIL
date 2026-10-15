@@ -4,6 +4,139 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-15 · Guardarraíles del repositorio con hooks
+
+**Issue**: [#5 — Guardarraíles del repositorio con hooks](https://github.com/fabisahe29/CREDIAGIL/issues/5)
+
+**Detalle**: [specs/003-guardarrailes-hooks/research.md](specs/003-guardarrailes-hooks/research.md), decisiones R1, R2, R3, R4, R5, R7, R8 y R10; riesgos en R9
+
+### Decisión 1: hooks de Claude Code en la configuración compartida
+
+Los controles son dos hooks `command` declarados en `.claude/settings.json`:
+
+- el guardián (`PreToolUse`), que bloquea antes de ejecutar;
+- el formateador (`PostToolUse`), que actúa después de cada edición.
+
+**Motivo**: se ejecutan de forma determinista en cada acción del modelo, sin depender de que alguien los recuerde, y llegan a todos al clonar.
+
+**Alternativas descartadas**:
+
+- **Solo reglas en `CLAUDE.md` o `.claude/rules/`**: el modelo puede ignorarlas.
+- **Hooks de Git (`pre-commit`)**: actúan cuando el dato ya se escribió y no cubren la lectura de secretos.
+
+### Decisión 2: un solo guardián que agrega todos los motivos
+
+`.claude/hooks/guardian.ts` ejecuta los tres controles (`secretos`, `datos-reales` y `spec-primero`) y devuelve un único *deny* con todos los motivos.
+
+**Motivo**: el modelo recibe en un solo mensaje todo lo que tiene que corregir. Además, Node arranca una sola vez por acción.
+
+**Alternativas descartadas**:
+
+- **Un hook por control**: los hooks corren en paralelo, así que el modelo recibiría mensajes fragmentados, y Node arrancaría N veces por acción.
+- **Matcher `.*`**: ejecutaría el guardián también en herramientas sin riesgo.
+
+### Decisión 3: datos con forma real y convención ficticia "prefijo `000`"
+
+**Qué se detecta**:
+
+- **Tarjetas**: por dígito de control Luhn, en cualquier contexto.
+- **Cédulas, NIT y cuentas**: solo cuando hay una palabra clave en la misma línea.
+- **Convención ficticia**: todo identificador ficticio empieza por `000`. Su fuente única es `.claude/hooks/lib/convencion-ficticia.ts`, y [docs/datos-ficticios.md](docs/datos-ficticios.md) es su versión para personas; una prueba mantiene ambos sincronizados.
+
+**Dónde se revisa**: el contenido escrito, el texto completo de los comandos y los textos de las herramientas MCP.
+
+**Motivo**:
+
+- Luhn distingue una tarjeta de un monto.
+- Para los demás tipos, la palabra clave es la única señal simple que los separa de un monto.
+- Ningún identificador real empieza por `000`.
+
+**Alternativas descartadas**:
+
+- **Detección por longitud**: bloquea montos.
+- **Marcador textual** (`FICTICIO-…`): rompe los campos numéricos.
+- **Lista blanca de valores**: hay que mantenerla en cada ticket.
+- **Revisar solo los comandos que escriben**: no se puede decidir con certeza qué comando escribe.
+
+**Consecuencias**: un monto de 10 o más dígitos en la misma línea que la palabra "cuenta" se bloquea, y hay que reformular la línea. La propia implementación lo encontró en tres líneas de la documentación del ticket, que se reescribieron.
+
+### Decisión 4: secretos en dos capas
+
+1. **El guardián** bloquea:
+   - las herramientas de archivos sobre `.env` y `.env.*`;
+   - los comandos que nombran esos archivos o los alcanzan con un comodín;
+   - los comandos recursivos que los alcanzan sin excluirlos.
+2. **`permissions.deny`** en `.claude/settings.json` bloquea `Read` y `Edit` de esos archivos, con una negación para `.env.example`.
+
+**Motivo**: el guardián cubre la shell, que las reglas de permisos no cubren. Las reglas `deny` siguen activas aunque alguien apague los hooks.
+
+**Alternativas descartadas**:
+
+- **Solo `permissions.deny`**: no cubre Bash ni PowerShell.
+- **Reglas `Bash(cat .env)`**: la documentación advierte que no son un límite de seguridad.
+- **Sandbox**: va más allá de lo que pide el ticket.
+- **Confiar en `.gitignore`**: Read y Glob no lo respetan.
+
+### Decisión 5: fallar cerrado
+
+El guardián convierte cualquier error en un *deny* con su causa. Además, el hook declara `onFailure: "block"` y `timeout: 10`.
+
+**Motivo**: por defecto, un hook que falla deja pasar la acción. `onFailure` cubre lo que el `try/catch` no alcanza: que falte Node, un error de sintaxis o un tiempo agotado.
+
+**Alternativa descartada**: el comportamiento por defecto (*fail-open*).
+
+**Consecuencias**: requiere Claude Code v2.1.295 o posterior.
+
+### Decisión 6: spec primero, por rama e `Issue de origen`
+
+El número del ticket sale de la rama `<N>-slug`. Escribir bajo `src/` exige una spec cuya línea `**Issue de origen**` apunte al #N.
+
+- Los tests bajo `src/` también cuentan como código de producción (aclaración Q1).
+- Se revisan también las escrituras por shell hacia `src/`.
+
+**Motivo**: reutiliza la convención de ramas de `/ticket-tomar` y la línea obligatoria de las specs, sin estado adicional.
+
+**Alternativas descartadas**:
+
+- **La feature activa de `.specify/feature.json`**: no ata la edición al ticket de la rama.
+- **"Cualquier spec"**: casi nunca bloquea.
+
+### Decisión 7: TypeScript ejecutado por Node, sin compilar ni dependencias en el bloqueo
+
+Los hooks están en TypeScript `strict` y se ejecutan con `node` directamente (Node 22.18 o superior). Las pruebas usan `node --test`. La entrada se valida con guardas de tipo propias en lugar de Zod.
+
+**Motivo**: es el stack de la constitución, y los bloqueos funcionan al clonar, sin `npm install`.
+
+**Alternativas descartadas**:
+
+- **Scripts Bash o PowerShell**: no son portables.
+- **`tsx` o Zod**: suman dependencias al camino del bloqueo.
+- **Vitest**: no hace falta para probar funciones puras.
+
+### Decisión 8: Prettier en `PostToolUse`, solo para código
+
+El formateador aplica Prettier a los archivos `.ts`, `.tsx`, `.js`, `.mjs`, `.cjs` y `.json` editados. Si falla, conserva la edición y avisa al modelo.
+
+**Motivo**: es el formateador estándar del stack, y Markdown queda fuera para no reescribir specs.
+
+**Alternativas descartadas**:
+
+- **Biome**: menos extendido.
+- **Formatear en un hook de commit**: no cumple "después de cada edición".
+- **Incluir Markdown**: reescribiría las specs.
+
+**Consecuencias**: el formateador necesita `npm install`; los bloqueos no.
+
+### Riesgos residuales aceptados
+
+- **`disableAllHooks`** en la configuración local o de usuario apaga los hooks. Las reglas `deny` siguen protegiendo `.env`, y bloquearlo de verdad requiere configuración gestionada.
+- **Comandos ofuscados** (nombres armados en tiempo de ejecución, `eval`): el análisis estático no los detecta.
+- **Ediciones fuera de Claude Code**: fuera del alcance de este ticket.
+- **Falso positivo: texto que nombra `.env`**. El control de secretos trata como ruta cualquier palabra de un comando que coincide con un archivo protegido, también dentro de un heredoc o del mensaje de un commit. Por ejemplo, `git commit -F - <<'EOF' … archivos .env … EOF` se bloquea. Se acepta porque bloquea de más y nunca de menos. Mientras tanto, se reformula el texto (por ejemplo, "archivos de entorno"). Detectado en la validación manual T032.
+- **Falso positivo: búsqueda recursiva en una carpeta que no existe**. `alcance()` descarta las rutas inexistentes y, si no queda ninguna, toma la raíz como alcance. Por eso `grep -r cuota src/` se bloquea mientras `src/` no exista, aunque nunca leería un `.env`. Con una carpeta existente pasa (`grep -r cuota specs/`). Se acepta porque bloquea de más y desaparece cuando se cree `src/` (issue #7). Detectado en la validación manual T032.
+
+---
+
 ## 2026-10-15 · Memoria y convenciones del equipo: dónde vive cada cosa
 
 **Issue**: [#4 — Memoria y convenciones del equipo](https://github.com/fabisahe29/CREDIAGIL/issues/4)
