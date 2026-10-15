@@ -217,9 +217,10 @@ description: "Lista de tareas: guardarraíles del repositorio con hooks"
 - [X] T029 Comprobar que `npm test`, `npm run typecheck` y `npm run format:check` están en verde. Medir el tiempo del guardián con `Measure-Command`, o `time` en Git Bash, sobre un Write típico: el objetivo es menos de 300 ms.
 - [X] T030 Declarar los hooks en `.claude/settings.json`: el bloque `hooks` exacto de [contracts/hooks.md](contracts/hooks.md), con PreToolUse del guardián (`timeout: 10`, `onFailure: "block"`) y PostToolUse del formateador (`timeout: 30`). Conservar `enabledMcpjsonServers` y `permissions`, y validar el JSON. **Se hace al final**, con las pruebas en verde (riesgos del plan).
 - [X] T031 Validación manual en una **sesión nueva** de Claude Code (los hooks se leen al iniciar): prerrequisitos y Escenarios 1, 3, 4 y 5 de [quickstart.md](quickstart.md). Borrar al final los archivos y la rama `99-prueba` temporales.
-- [ ] T032 Validación manual del Escenario 2 de [quickstart.md](quickstart.md), secretos, con un `.env` temporal creado a mano.
+- [x] T032 Validación manual del Escenario 2 de [quickstart.md](quickstart.md), secretos, con un `.env` temporal creado a mano.
   - Si la negación `!` de `permissions.deny` no deja leer `.env.example`, aplicar la alternativa de [contracts/hooks.md](contracts/hooks.md) y registrarla en `DECISIONES.md`.
   - Al final, borrar el `.env`.
+  - Resultado (2026-10-15): 9 de 10 vías como se esperaba. Read y Edit de `.env` los bloquea `deny`; `cat`, `cp`, `Get-Content` y `grep -r` sin exclusión los bloquea el guardián; `--exclude='.env*'` y `.env.example` pasan (la negación `!` funciona). `grep -r cuota src/` se bloquea porque `src/` aún no existe; se registra con otro falso positivo como riesgo residual en `DECISIONES.md`.
 - [x] T033 Commit convencional en `5-guardarrailes-del-repositorio-con-hooks`, por ejemplo `feat: guardarraíles del repositorio con hooks (#5)`. Antes:
   - `git status`, para confirmar que no entra ningún `.env`, archivo temporal ni `node_modules/`;
   - la búsqueda de tokens del quickstart del #3.

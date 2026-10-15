@@ -132,6 +132,8 @@ El formateador aplica Prettier a los archivos `.ts`, `.tsx`, `.js`, `.mjs`, `.cj
 - **`disableAllHooks`** en la configuración local o de usuario apaga los hooks. Las reglas `deny` siguen protegiendo `.env`, y bloquearlo de verdad requiere configuración gestionada.
 - **Comandos ofuscados** (nombres armados en tiempo de ejecución, `eval`): el análisis estático no los detecta.
 - **Ediciones fuera de Claude Code**: fuera del alcance de este ticket.
+- **Falso positivo: texto que nombra `.env`**. El control de secretos trata como ruta cualquier palabra de un comando que coincide con un archivo protegido, también dentro de un heredoc o del mensaje de un commit. Por ejemplo, `git commit -F - <<'EOF' … archivos .env … EOF` se bloquea. Se acepta porque bloquea de más y nunca de menos. Mientras tanto, se reformula el texto (por ejemplo, "archivos de entorno"). Detectado en la validación manual T032.
+- **Falso positivo: búsqueda recursiva en una carpeta que no existe**. `alcance()` descarta las rutas inexistentes y, si no queda ninguna, toma la raíz como alcance. Por eso `grep -r cuota src/` se bloquea mientras `src/` no exista, aunque nunca leería un `.env`. Con una carpeta existente pasa (`grep -r cuota specs/`). Se acepta porque bloquea de más y desaparece cuando se cree `src/` (issue #7). Detectado en la validación manual T032.
 
 ---
 
