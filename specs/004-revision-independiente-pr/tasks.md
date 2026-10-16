@@ -248,11 +248,16 @@ description: "Lista de tareas: revisión independiente y de cumplimiento antes d
   - el matcher del guardián ampliado con `Glob|Agent|WebFetch|WebSearch`.
 
   Conservar lo demás y validar el JSON. **Se hace al final**, con las pruebas en verde (riesgos del plan).
-- [ ] T038 Validación manual en una **sesión nueva** de Claude Code: Escenarios 0, 1 y 2 de [quickstart.md](quickstart.md).
+- [X] T038 Validación manual en una **sesión nueva** de Claude Code: Escenarios 0, 1 y 2 de [quickstart.md](quickstart.md).
   - El Escenario 0 se ejecuta con el paquete **real** del ticket y anota los turnos que usa cada revisor. Si alguno agota `maxTurns` o queda cerca del límite, subirlo en `.claude/agents/revisor-codigo.md` y `.claude/agents/revisor-cumplimiento.md` y registrarlo en `DECISIONES.md` antes de T041 (R8).
   - Si el Escenario 0 falla, aplicar la alternativa de R3 en `.claude/skills/ticket-abrir-pr/SKILL.md` y registrarla en `DECISIONES.md` antes de seguir.
   - Al final, borrar la rama local `6-prueba-cumplimiento` y los paquetes de prueba de `.git/crediagil/revisiones/`.
-- [ ] T039 Validación manual del Escenario 3, pasos 2 y 3, de [quickstart.md](quickstart.md): crear el PR o escribir `decision.json` directamente se niega.
+  - Resultado (2026-10-16):
+    - **Escenario 0** (sesión nueva, commit `4b14c57`, 49 archivos): las dos skills corrieron en sus revisores, en el mismo turno, y el hook `SubagentStop` guardó ambos informes. No hizo falta la alternativa de R3. Ninguna salida quedó marcada como parcial, así que ningún revisor agotó `maxTurns: 40`; el número exacto de turnos no quedó anotado. `maxTurns` se mantiene. La revisión de código encontró 1 hallazgo alto, 1 medio y 2 bajos, corregidos en `385e297`.
+    - **Escenario 1**: `revisor-codigo` solo tiene Read, Grep y Glob. No pudo crear `prueba.txt`, ejecutar `git status` ni comentar en GitHub, y no conoce la conversación de la sesión que lo lanzó.
+    - **Escenario 2**: en la rama local `6-prueba-cumplimiento` (50 archivos en el diff), las 5 reglas salieron `incumplida` con archivo y línea, junto con el orden de evaluación y 8 restricciones; `decidir` bloquea (SC-003). Rama y paquete de prueba borrados.
+- [X] T039 Validación manual del Escenario 3, pasos 2 y 3, de [quickstart.md](quickstart.md): crear el PR o escribir `decision.json` directamente se niega.
+  - Resultado (2026-10-16): Write sobre `decision.json` → negado por `puerta-pr`. `create_pull_request` directo → negado: sin la rama publicada, falla cerrado al no poder leer el head remoto. Los casos con la rama publicada los cubren las pruebas de `puerta-pr`.
 - [X] T040 Commit convencional en `6-revision-independiente-y-de-cumplimiento`, por ejemplo `feat: revisión independiente y de cumplimiento antes del PR (#6)`. Antes:
   - `git status`, para confirmar que no entra ningún `.env`, archivo temporal, `.git/crediagil/` ni `node_modules/`;
   - la búsqueda de tokens del quickstart del #3.
