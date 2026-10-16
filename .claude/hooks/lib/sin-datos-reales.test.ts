@@ -18,7 +18,13 @@ function archivos(carpeta: string, extension: string): string[] {
 
 const REVISADOS = [
   ...archivos(".claude/hooks", ".ts"),
+  ...archivos(".claude/revision", ".ts"),
+  ...archivos(".claude/agents", ".md"),
+  ".claude/skills/revisar-codigo/SKILL.md",
+  ".claude/skills/revisar-cumplimiento/SKILL.md",
+  ".claude/skills/ticket-abrir-pr/SKILL.md",
   ...archivos("specs/003-guardarrailes-hooks", ".md"),
+  ...archivos("specs/004-revision-independiente-pr", ".md"),
   ...archivos(".claude/rules", ".md"),
   "docs/datos-ficticios.md",
   "DECISIONES.md",

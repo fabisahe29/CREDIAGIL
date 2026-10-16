@@ -4,6 +4,117 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-16 · Revisión independiente y de cumplimiento antes del pull request
+
+**Issue**: [#6 — Revisión independiente y de cumplimiento antes del pull request](https://github.com/fabisahe29/CREDIAGIL/issues/6)
+
+**Detalle**: [specs/004-revision-independiente-pr/research.md](specs/004-revision-independiente-pr/research.md), decisiones R1 a R7 y R9; tiempo y reintentos en R8
+
+### Decisión 1: dos revisores como subagentes propios
+
+`.claude/agents/revisor-codigo.md` revisa el diff y entrega hallazgos con severidad. `.claude/agents/revisor-cumplimiento.md` audita el diff contra las 5 reglas de negocio de la constitución y entrega el estado de cada una, con evidencia o motivo.
+
+**Motivo**: son dos roles con criterios y formatos distintos. Separados, cada uno tiene su propio contexto aislado y un prompt más corto. Cumplen el mínimo de 2 subagentes.
+
+**Alternativas descartadas**:
+
+- **Un solo revisor que hace las dos revisiones**: mezcla criterios y no cumple el mínimo.
+- **Subagente `general-purpose` con instrucciones en la skill**: no permite fijar herramientas por rol.
+
+**Consecuencias**: los revisores no ven la conversación de la sesión autora (lo garantiza la plataforma) y reciben todo en un paquete de revisión (Decisión 4).
+
+### Decisión 2: solo lectura en tres capas
+
+1. **Subagente**: `tools: Read, Grep, Glob` y `disallowedTools` con las herramientas de escritura, shell, `Agent` y `mcp__*`.
+2. **Skill**: `disallowed-tools` con la misma lista y `allowed-tools: Read, Grep, Glob`.
+3. **Guardián**: el control `revisores` niega cualquier otra herramienta cuando `agent_type` es un revisor.
+
+**Motivo**: un revisor con shell podría escribir aunque no tenga Edit ni Write. La tercera capa es determinista y tiene pruebas.
+
+**Alternativas descartadas**:
+
+- **Bash con especificadores** (`Bash(git diff:*)`): no está documentado para `tools`.
+- **Solo `allowed-tools`**: solo preaprueba herramientas; no restringe.
+
+### Decisión 3: dos skills `context: fork` que solo dispara el flujo
+
+`revisar-codigo` y `revisar-cumplimiento` usan `context: fork`, `agent:` (su revisor), `background: false`, `argument-hint`, `allowed-tools`, `disallowed-tools` y `user-invocable: false`. `/ticket-abrir-pr` las invoca con la herramienta Skill antes de crear el PR.
+
+**Motivo**: cumplen el mínimo de 2 skills con los tres campos que pide el enunciado. Con `background: false`, el resultado vuelve en el mismo turno. Ocultas del menú, no son comandos del desarrollador (aclaración Q3).
+
+**Alternativas descartadas**:
+
+- **Skills invocables por el desarrollador**: contradicen la aclaración Q3.
+- **Skills sin `context: fork`**: correrían en la sesión autora, sin aislamiento.
+
+**Consecuencias**: la documentación no confirma que una skill reciba el resultado de otra con `context: fork`. Se valida primero (quickstart, Escenario 0); el respaldo es lanzar los subagentes con la herramienta Agent.
+
+### Decisión 4: paquete de revisión determinista
+
+`revision.ts preparar` escribe en `.git/crediagil/revisiones/<sha>/` el `paquete.json` (rama, issue, `sha` de `origin/<rama>`, base, archivos cambiados, spec y constitución) y el `diff.patch`.
+
+**Motivo**: el alcance queda fijado por un `sha` (aclaración Q2) y el revisor no necesita shell. `.git/` no se versiona, así que el paquete nunca entra en un commit.
+
+**Alternativas descartadas**:
+
+- **El diff en el mensaje de la tarea**: ocupa el prompt y lo copiaría la sesión a mano.
+- **Carpeta temporal del sistema**: fuera del proyecto y con rutas distintas por plataforma.
+
+### Decisión 5: el informe lo captura un hook `SubagentStop`
+
+Cada revisor termina con un bloque JSON. `.claude/revision/capturar.ts` lo extrae de `last_assistant_message` y lo valida (V1 a V8: las 5 reglas exactamente una vez, evidencia obligatoria, alcance del diff y sin datos con forma real). Si es inválido, el revisor lo corrige una vez; si vuelve a fallar, queda un `fallo-<tipo>.json`.
+
+**Motivo**: la decisión de abrir el PR depende del informe. Que la sesión principal lo copie a mano sería un paso no determinista y alterable (Principio III).
+
+**Alternativas descartadas**:
+
+- **La sesión principal escribe el informe con Write**: paso manual y alterable.
+- **El revisor escribe su archivo**: necesitaría Write.
+- **Validar con Zod**: obligaría a `npm install` antes de poder abrir un PR.
+
+### Decisión 6: la decisión por gravedad es código
+
+`revision.ts decidir` bloquea si hay una regla `incumplida`, un hallazgo o restricción `alta` o `critica`, o una revisión fallida (aclaración Q1). Escribe `decision.json`.
+
+**Motivo**: el modelo clasifica, pero la regla que decide se aplica en código con pruebas: la misma entrada da siempre la misma decisión.
+
+**Alternativa descartada**: que `/ticket-abrir-pr` decida leyendo los informes, que es el modelo aplicando la regla a criterio.
+
+### Decisión 7: registro en el issue, reutilizable y enlazado desde el PR
+
+Cada revisión deja un comentario con marcador `<!-- crediagil:revision=<tipo>;commit=<sha> -->` y el informe embebido (aclaración Q4; Regla 7 de `.claude/flujo-github.md`). Al reintentar sobre el mismo commit, `revision.ts reutilizar` reconstruye la decisión desde esos comentarios sin lanzar los revisores. El cuerpo del PR resume ambas revisiones y enlaza los registros.
+
+**Motivo**: es el mismo mecanismo idempotente del #3, y el registro queda autosuficiente para auditar y reutilizar desde cualquier clon.
+
+**Alternativas descartadas**:
+
+- **Comentarios en el PR**: el PR no existe si la decisión bloquea.
+- **Archivo versionado de revisiones**: ensucia el diff del ticket y pasa a ser parte de lo revisado.
+
+### Decisión 8: la puerta del PR en dos capas
+
+1. **Flujo**: `/ticket-abrir-pr` ejecuta preparar → revisores → decidir antes de crear el PR.
+2. **Guardián**: el control `puerta-pr` niega `mcp__github__create_pull_request` sin un `decision.json` favorable para el head de `origin/<head>`, y niega escribir a mano bajo `.git/crediagil/`. También niega publicar en el issue un registro de revisión distinto del que generó `revision.ts` (guardado como `registro-<tipo>.md`) y editar uno ya publicado.
+
+**Corregido tras la primera revisión real** (commit `4b14c57`): el propio revisor de código encontró que `puerta-pr` se podía esquivar con rutas como `src/../.git/crediagil/…` (alta) y que `reutilizar` aceptaba registros del issue escritos a mano (media). `normalizarRuta` ahora resuelve `.` y `..`, la comparación ignora mayúsculas, y los registros deben coincidir con los generados.
+
+**Motivo**: «no se abre un PR sin revisión» no puede depender solo de que el modelo siga la skill (Principio IV, defensa en profundidad). El guardián lee un archivo local: sin red en el camino del bloqueo.
+
+**Alternativas descartadas**:
+
+- **Solo el flujo**: el modelo podría crear el PR saltándose los pasos.
+- **El guardián consulta el issue en GitHub**: red y credenciales en el camino del bloqueo.
+- **Protección de rama en GitHub**: fuera de alcance.
+
+### Riesgos residuales aceptados
+
+- **Redirecciones de shell sobre `.git/crediagil/`**: `puerta-pr` niega Write, Edit y MultiEdit, pero una redirección en un comando de shell no se puede analizar con certeza, como los comandos ofuscados del #5.
+- **Calidad de la clasificación**: la severidad y el estado de cada regla los decide el modelo. La validación impide informes incompletos, pero no un juicio equivocado. La revisión humana del PR sigue disponible.
+- **Matcher cerrado del guardián**: el control `revisores` solo ve las herramientas que lista el matcher de `PreToolUse`. Una herramienta nueva fuera de la lista no pasaría por el guardián. Se acepta porque las capas 1 y 2 (subagente y skill) no se la dan al revisor, y un matcher `.*` haría correr el guardián en cada herramienta, lo que el #5 descartó.
+- **Tiempo y reintentos** (R8): no hay tiempo límite de reloj para subagentes; lo sustituye `maxTurns: 40`, que se mide con el paquete real del ticket antes del primer PR. Hay un único reintento por revisión, sin backoff, porque las fallas que cubre no son transitorias.
+
+---
+
 ## 2026-10-15 · Guardarraíles del repositorio con hooks
 
 **Issue**: [#5 — Guardarraíles del repositorio con hooks](https://github.com/fabisahe29/CREDIAGIL/issues/5)

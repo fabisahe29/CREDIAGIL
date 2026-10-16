@@ -157,3 +157,55 @@ describe("guardián: datos con forma real (US1)", () => {
     assert.equal(r.salida, "");
   });
 });
+
+describe("guardián: revisores de solo lectura (spec 004, US1)", () => {
+  const raiz = mkdtempSync(join(tmpdir(), "guardian-revisores-"));
+  after(() => rmSync(raiz, { recursive: true, force: true }));
+
+  it("niega un Write de un revisor", () => {
+    const r = ejecutarGuardian(
+      {
+        tool_name: "Write",
+        tool_input: { file_path: "a.ts", content: "x" },
+        agent_type: "revisor-codigo",
+      },
+      raiz,
+    );
+    assert.match(r.motivo ?? "", /\[revisores\] el subagente revisor-codigo/);
+  });
+
+  it("permite un Read de un revisor", () => {
+    const r = ejecutarGuardian(
+      { tool_name: "Read", tool_input: { file_path: "a.ts" }, agent_type: "revisor-codigo" },
+      raiz,
+    );
+    assert.equal(r.salida, "");
+  });
+});
+
+describe("guardián: puerta del PR (spec 004, US3)", () => {
+  const raiz = mkdtempSync(join(tmpdir(), "guardian-puerta-"));
+  after(() => rmSync(raiz, { recursive: true, force: true }));
+
+  it("niega crear un PR sin decisión de revisión (sin remoto, falla cerrado)", () => {
+    const r = ejecutarGuardian(
+      {
+        tool_name: "mcp__github__create_pull_request",
+        tool_input: { owner: "o", repo: "r", head: "6-x", base: "main", title: "t" },
+      },
+      raiz,
+    );
+    assert.match(r.motivo ?? "", /\[puerta-pr\] .*origin\/6-x/);
+  });
+
+  it("niega escribir a mano la decisión", () => {
+    const r = ejecutarGuardian(
+      {
+        tool_name: "Write",
+        tool_input: { file_path: ".git/crediagil/revisiones/x/decision.json", content: "{}" },
+      },
+      raiz,
+    );
+    assert.match(r.motivo ?? "", /\[puerta-pr\] Write sobre \.git\/crediagil/);
+  });
+});

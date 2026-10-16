@@ -86,8 +86,28 @@ PR #{pr} fusionado en `main` ({sha corto}). El ticket pasa a **Done**.
 - Issue: Closes #{N}
 - Especificación: [`{specs/NNN-slug}/`]({url})
 
+## Revisiones
+Commit revisado: `{sha corto}` · Decisión: ✅ no bloquea
+
+| Revisión | Resultado | Registro |
+|----------|-----------|----------|
+| Código | crítica {n} · alta {n} · media {n} · baja {n} | [comentario]({url}) |
+| Cumplimiento | reglas ✅ {n} · ⛔ {n} · ➖ {n} | [comentario]({url}) |
+
 ## Verificación
 {cómo se validó; referencia a quickstart.md}
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+```
+
+La sección `## Revisiones` la agregó el #6. Sus valores salen de la decisión de `revision.ts` y de los enlaces a los registros de revisión del issue.
+
+## Registro de revisión — `/ticket-abrir-pr`
+
+Lo agregó el #6. Hay uno por `(tipo, sha)`: `tipo` es `codigo` o `cumplimiento` y `sha` es el commit revisado. Su cuerpo lo genera `node .claude/revision/revision.ts decidir <sha>`; la sesión no lo redacta. La plantilla completa, con el informe embebido en `<details>`, está en [specs/004-revision-independiente-pr/contracts/informe.md](../../004-revision-independiente-pr/contracts/informe.md#comentario-de-registro).
+
+```markdown
+<!-- crediagil:revision={tipo};commit={sha} -->
+🔎 **Revisión de {código | cumplimiento}** · commit `{sha corto}` · {✅ no bloquea | ⛔ bloquea | ⛔ revisión fallida} · {fecha}
+…
 ```

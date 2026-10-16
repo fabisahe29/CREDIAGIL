@@ -13,7 +13,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Bash|PowerShell|mcp__.*",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Read|Grep|Glob|Bash|PowerShell|Agent|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -32,6 +32,18 @@
             "type": "command",
             "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/formatear.ts\"",
             "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "revisor-codigo|revisor-cumplimiento",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/revision/capturar.ts\"",
+            "timeout": 15
           }
         ]
       }

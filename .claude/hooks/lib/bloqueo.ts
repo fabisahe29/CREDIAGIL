@@ -1,6 +1,7 @@
 // Bloqueo de un control y mensaje para el modelo (contracts/hooks.md, "Mensaje de bloqueo"; FR-014).
 
-export type Control = "secretos" | "datos-reales" | "spec-primero" | "error-interno";
+export type Control =
+  "secretos" | "datos-reales" | "spec-primero" | "revisores" | "puerta-pr" | "error-interno";
 
 export interface Bloqueo {
   control: Control;
@@ -10,7 +11,14 @@ export interface Bloqueo {
   correccion: string;
 }
 
-const ORDEN: readonly Control[] = ["secretos", "datos-reales", "spec-primero", "error-interno"];
+const ORDEN: readonly Control[] = [
+  "secretos",
+  "datos-reales",
+  "spec-primero",
+  "revisores",
+  "puerta-pr",
+  "error-interno",
+];
 
 /** Deja visibles solo los últimos 4 dígitos, para que el dato no llegue al contexto ni a los logs. */
 export function enmascarar(valor: string): string {

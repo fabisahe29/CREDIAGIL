@@ -6,7 +6,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node --test \".claude/hooks/**/*.test.ts\"",
+    "test": "node --test \".claude/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

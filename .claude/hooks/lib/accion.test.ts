@@ -1,10 +1,25 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { EntradaInvalida, normalizarAccion } from "./accion.ts";
+import { EntradaInvalida, normalizarAccion, normalizarRuta } from "./accion.ts";
 
 const RAIZ = "C:\\repo\\crediagil";
 
 describe("normalizarAccion", () => {
+  it("conserva el agent_type de un subagente como agente", () => {
+    const accion = normalizarAccion(
+      { tool_name: "Read", tool_input: { file_path: "a.md" }, agent_type: "revisor-codigo" },
+      RAIZ,
+    );
+    assert.equal(accion.agente, "revisor-codigo");
+  });
+
+  it("no define agente en la sesión principal ni con un agent_type vacío", () => {
+    const principal = normalizarAccion({ tool_name: "Read", tool_input: {} }, RAIZ);
+    const vacio = normalizarAccion({ tool_name: "Read", tool_input: {}, agent_type: "" }, RAIZ);
+    assert.equal("agente" in principal, false);
+    assert.equal("agente" in vacio, false);
+  });
+
   it("rechaza una entrada sin tool_name", () => {
     assert.throws(() => normalizarAccion({ tool_input: {} }, RAIZ), EntradaInvalida);
   });
@@ -25,6 +40,23 @@ describe("normalizarAccion", () => {
     assert.equal(accion.herramienta, "Write");
     assert.deepEqual(accion.rutas, ["src/a.ts"]);
     assert.deepEqual(accion.textos, [{ origen: "src/a.ts", texto: "hola" }]);
+  });
+
+  it("resuelve los segmentos . y .. de la ruta", () => {
+    for (const [ruta, esperada] of [
+      [`${RAIZ}/src/../.git/x.json`, ".git/x.json"],
+      ["src/../.git/x.json", ".git/x.json"],
+      ["./a/./b.ts", "a/b.ts"],
+      [".", "."],
+      [RAIZ, "."],
+    ]) {
+      assert.equal(normalizarRuta(ruta!, RAIZ), esperada, ruta);
+    }
+  });
+
+  it("deja absoluta una ruta que sale de la raíz con ..", () => {
+    assert.ok(!normalizarRuta("../fuera.txt", RAIZ).startsWith(".."));
+    assert.ok(normalizarRuta("../fuera.txt", RAIZ).endsWith("/fuera.txt"));
   });
 
   it("extrae new_string de Edit y cada edits[].new_string de MultiEdit", () => {
