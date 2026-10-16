@@ -29,6 +29,7 @@ const NOMBRE: Readonly<Record<TipoRevision, string>> = {
 };
 const NOMBRE_SEVERIDAD = { critica: "crítica", alta: "alta", media: "media", baja: "baja" };
 const ICONO_ESTADO = { cumplida: "✅", incumplida: "⛔", no_aplicable: "➖" };
+const DETALLE = "<details><summary>Informe completo</summary>";
 const MARCADOR = /^<!-- crediagil:revision=(codigo|cumplimiento);commit=([0-9a-f]{40}) -->$/;
 
 export function marcador(tipo: TipoRevision, sha: string): string {
@@ -114,10 +115,12 @@ export function renderComentario({ tipo, sha, informe, fallo, fecha }: Registro)
     "",
     ...cuerpo,
     "",
-    "<details><summary>Informe completo</summary>",
+    DETALLE,
     "",
     "```json",
-    JSON.stringify(informe, null, 2),
+    // Las comillas invertidas van como ` (escape JSON válido): ningún texto del informe
+    // puede cerrar el bloque antes de tiempo, y JSON.parse las restituye.
+    JSON.stringify(informe, null, 2).replaceAll("`", "\\u0060"),
     "```",
     "",
     "</details>",
@@ -132,8 +135,12 @@ export function parsearComentario(
   const primera = cuerpo.split(/\r?\n/, 1)[0]?.trim() ?? "";
   const coincidencia = MARCADOR.exec(primera);
   if (coincidencia === null) return null;
+  // Solo cuenta el bloque del detalle: la parte legible repite textos del informe, que pueden
+  // contener bloques de código propios.
+  const detalle = cuerpo.lastIndexOf(DETALLE);
+  if (detalle < 0) return null;
   try {
-    const informe = extraerBloqueJson(cuerpo);
+    const informe = extraerBloqueJson(cuerpo.slice(detalle));
     return { tipo: coincidencia[1] as TipoRevision, sha: coincidencia[2]!, informe };
   } catch (error) {
     if (error instanceof BloqueJsonInvalido) return null;

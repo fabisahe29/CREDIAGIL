@@ -123,6 +123,24 @@ describe("puerta-pr: escribir a mano el paquete o la decisión", () => {
     });
   }
 
+  // Rutas armadas a mano: `join` resolvería el `..` antes de llegar al guardián.
+  for (const ruta of [
+    `src/../.git/crediagil/revisiones/${SHA}/decision.json`,
+    `./.git/./crediagil/revisiones/${SHA}/decision.json`,
+    `.GIT/Crediagil/revisiones/${SHA}/decision.json`,
+    `.git\\crediagil\\revisiones\\${SHA}\\decision.json`,
+  ]) {
+    it(`niega Write con una ruta no normalizada: ${ruta}`, () => {
+      for (const archivo of [`${raiz}/${ruta}`, ruta]) {
+        const accion = normalizarAccion(
+          { tool_name: "Write", tool_input: { file_path: archivo, content: "{}" } },
+          raiz,
+        );
+        assert.equal(puertaPr(accion, { raiz, obtenerHeadRemoto: () => SHA }).length, 1, archivo);
+      }
+    });
+  }
+
   it("permite leer el paquete", () => {
     assert.deepEqual(escribir("Read", `.git/crediagil/revisiones/${SHA}/paquete.json`), []);
   });

@@ -23,6 +23,9 @@ export const archivoFallo = (raiz: string, sha: string, tipo: TipoRevision) =>
   join(rutaPaquete(raiz, sha), `fallo-${tipo}.json`);
 export const archivoDecision = (raiz: string, sha: string) =>
   join(rutaPaquete(raiz, sha), "decision.json");
+/** Cuerpo exacto del registro: `puerta-pr` solo deja publicar en el issue este texto. */
+export const archivoRegistro = (raiz: string, sha: string, tipo: TipoRevision) =>
+  join(rutaPaquete(raiz, sha), `registro-${tipo}.md`);
 
 function escribirJson(archivo: string, valor: unknown): void {
   mkdirSync(join(archivo, ".."), { recursive: true });
@@ -50,6 +53,17 @@ export function guardarFallo(
 
 export function guardarDecision(raiz: string, sha: string, decision: unknown): void {
   escribirJson(archivoDecision(raiz, sha), decision);
+}
+
+export function guardarRegistro(
+  raiz: string,
+  sha: string,
+  tipo: TipoRevision,
+  cuerpo: string,
+): void {
+  const archivo = archivoRegistro(raiz, sha, tipo);
+  mkdirSync(join(archivo, ".."), { recursive: true });
+  writeFileSync(archivo, cuerpo);
 }
 
 /** Lee un JSON del paquete; `undefined` si no existe o no se puede parsear. */

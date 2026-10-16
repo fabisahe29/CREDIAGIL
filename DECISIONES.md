@@ -94,7 +94,9 @@ Cada revisión deja un comentario con marcador `<!-- crediagil:revision=<tipo>;c
 ### Decisión 8: la puerta del PR en dos capas
 
 1. **Flujo**: `/ticket-abrir-pr` ejecuta preparar → revisores → decidir antes de crear el PR.
-2. **Guardián**: el control `puerta-pr` niega `mcp__github__create_pull_request` sin un `decision.json` favorable para el head de `origin/<head>`, y niega escribir a mano bajo `.git/crediagil/`.
+2. **Guardián**: el control `puerta-pr` niega `mcp__github__create_pull_request` sin un `decision.json` favorable para el head de `origin/<head>`, y niega escribir a mano bajo `.git/crediagil/`. También niega publicar en el issue un registro de revisión distinto del que generó `revision.ts` (guardado como `registro-<tipo>.md`) y editar uno ya publicado.
+
+**Corregido tras la primera revisión real** (commit `4b14c57`): el propio revisor de código encontró que `puerta-pr` se podía esquivar con rutas como `src/../.git/crediagil/…` (alta) y que `reutilizar` aceptaba registros del issue escritos a mano (media). `normalizarRuta` ahora resuelve `.` y `..`, la comparación ignora mayúsculas, y los registros deben coincidir con los generados.
 
 **Motivo**: «no se abre un PR sin revisión» no puede depender solo de que el modelo siga la skill (Principio IV, defensa en profundidad). El guardián lee un archivo local: sin red en el camino del bloqueo.
 
@@ -108,6 +110,7 @@ Cada revisión deja un comentario con marcador `<!-- crediagil:revision=<tipo>;c
 
 - **Redirecciones de shell sobre `.git/crediagil/`**: `puerta-pr` niega Write, Edit y MultiEdit, pero una redirección en un comando de shell no se puede analizar con certeza, como los comandos ofuscados del #5.
 - **Calidad de la clasificación**: la severidad y el estado de cada regla los decide el modelo. La validación impide informes incompletos, pero no un juicio equivocado. La revisión humana del PR sigue disponible.
+- **Matcher cerrado del guardián**: el control `revisores` solo ve las herramientas que lista el matcher de `PreToolUse`. Una herramienta nueva fuera de la lista no pasaría por el guardián. Se acepta porque las capas 1 y 2 (subagente y skill) no se la dan al revisor, y un matcher `.*` haría correr el guardián en cada herramienta, lo que el #5 descartó.
 - **Tiempo y reintentos** (R8): no hay tiempo límite de reloj para subagentes; lo sustituye `maxTurns: 40`, que se mide con el paquete real del ticket antes del primer PR. Hay un único reintento por revisión, sin backoff, porque las fallas que cubre no son transitorias.
 
 ---

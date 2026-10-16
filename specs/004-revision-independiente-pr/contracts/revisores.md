@@ -89,7 +89,11 @@ Se agregan a `CONTROLES` en `.claude/hooks/guardian.ts`. Mismo formato de bloque
 | `mcp__github__create_pull_request`, sin `decision.json` para el head de `origin/<head>` | **deny**: «el PR se abre con `/ticket-abrir-pr`, que ejecuta las revisiones» |
 | Igual, con `decision.json` de otro `sha` o con `permite: false` | **deny**, con los motivos de la decisión |
 | Igual, con `decision.json` del `sha` actual, `permite: true` y las dos revisiones `valida` | pasa |
-| `Write`, `Edit` o `MultiEdit` con ruta bajo `.git/crediagil/` | **deny**: «el paquete y la decisión los escribe solo `revision.ts`» |
+| `Write`, `Edit`, `MultiEdit` o `NotebookEdit` con ruta bajo `.git/crediagil/` (sin distinguir mayúsculas y con los segmentos `.` y `..` ya resueltos, por ejemplo `src/../.git/crediagil/…`) | **deny**: «el paquete y la decisión los escribe solo `revision.ts`» |
 | No se puede leer el head remoto o `decision.json` no valida | **deny** (falla cerrado, FR-015 del #5) |
+| `mcp__github__add_issue_comment` cuyo cuerpo trae el marcador `crediagil:revision=<tipo>;commit=<sha>` y **no** coincide con `registro-<tipo>.md` del paquete de ese `sha` (o no existe) | **deny**: «publica tal cual el cuerpo que generó `revision.ts decidir`» |
+| `mcp__github__update_issue_comment` con ese marcador | **deny**: un registro de revisión no se edita |
 
-El matcher actual del guardián (`…|mcp__.*`) ya cubre `create_pull_request`. Para que `revisores` cubra todas las herramientas de un revisor, el matcher se amplía con `Glob|Agent|WebFetch|WebSearch` (las que un revisor mal configurado podría tener).
+**Registros auténticos**: `revision.ts decidir` guarda el cuerpo exacto de cada registro en `registro-<tipo>.md`, dentro del paquete. Así `reutilizar` solo puede encontrar en el issue registros que generó el código, no informes escritos a mano (hallazgo de la primera revisión real, commit `4b14c57`).
+
+El matcher actual del guardián (`…|mcp__.*`) ya cubre `create_pull_request`. Para que `revisores` cubra todas las herramientas de un revisor, el matcher se amplía con `Glob|Agent|WebFetch|WebSearch` (las que un revisor mal configurado podría tener). La lista sigue siendo cerrada: una herramienta nueva fuera de ella no pasa por el guardián, pero las capas 1 y 2 (R2) no se la dan al revisor. Es un riesgo residual registrado en `DECISIONES.md`.

@@ -4,7 +4,13 @@
 // 3 (solo reutilizar) los registros no sirven y hay que revisar de nuevo.
 
 import { fileURLToPath } from "node:url";
-import { TIPOS, guardarDecision, guardarInforme, leerEntradas } from "./lib/almacen.ts";
+import {
+  TIPOS,
+  guardarDecision,
+  guardarInforme,
+  guardarRegistro,
+  leerEntradas,
+} from "./lib/almacen.ts";
 import { decidir, type Decision, type Entradas } from "./lib/decision.ts";
 import { validarInforme, type TipoRevision } from "./lib/informe.ts";
 import { leerPaquete, prepararPaquete, PaqueteInexistente, type Paquete } from "./lib/paquete.ts";
@@ -50,6 +56,7 @@ function decidirYRegistrar(
       ...(informe !== undefined ? { informe } : {}),
       ...(fallo !== undefined ? { fallo } : {}),
     });
+    guardarRegistro(raiz, paquete.sha, tipo, comentarios[tipo]);
   }
   return { ...decision, comentarios };
 }

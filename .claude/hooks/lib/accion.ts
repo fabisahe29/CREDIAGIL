@@ -1,5 +1,6 @@
 // Entrada normalizada del guardián (data-model.md, "Acción"; research.md, R6).
 // Se valida con guardas de tipo propias, sin Zod, para no depender de node_modules.
+import { posix } from "node:path";
 
 /** Texto que revisan los controles, con el origen que se cita en el mensaje. */
 export interface TextoRevisable {
@@ -33,11 +34,18 @@ function esObjeto(valor: unknown): valor is Record<string, unknown> {
   return typeof valor === "object" && valor !== null && !Array.isArray(valor);
 }
 
-/** Ruta relativa a la raíz, con `/` y sin `./` inicial. Las rutas fuera de la raíz quedan absolutas. */
+/**
+ * Ruta relativa a la raíz, con `/` y con los segmentos `.` y `..` resueltos, para que
+ * `src/../.git/x` no esquive un control que compara prefijos. Las rutas fuera de la raíz
+ * quedan absolutas.
+ */
 export function normalizarRuta(ruta: string, raiz: string): string {
-  let normalizada = ruta.replace(/\\/g, "/");
   const base = raiz.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (normalizada.toLowerCase().startsWith(`${base.toLowerCase()}/`)) {
+  let normalizada = ruta.replace(/\\/g, "/");
+  if (base !== "" && !/^(?:[A-Za-z]:)?\//.test(normalizada)) normalizada = `${base}/${normalizada}`;
+  normalizada = posix.normalize(normalizada);
+  if (base !== "" && normalizada.toLowerCase() === base.toLowerCase()) return ".";
+  if (base !== "" && normalizada.toLowerCase().startsWith(`${base.toLowerCase()}/`)) {
     normalizada = normalizada.slice(base.length + 1);
   }
   while (normalizada.startsWith("./")) normalizada = normalizada.slice(2);

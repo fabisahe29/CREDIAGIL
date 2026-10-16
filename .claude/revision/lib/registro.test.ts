@@ -101,6 +101,15 @@ describe("parsearComentario", () => {
     }
   });
 
+  it("ida y vuelta con un texto que contiene un bloque de código con comillas invertidas", () => {
+    const informe = codigo({
+      resumen: "El revisor cita ```json\n{}\n``` dentro de su resumen.",
+      hallazgos: [hallazgo({ descripcion: "Usa `x` y ``` en el texto." })],
+    });
+    const cuerpo = renderComentario({ tipo: "codigo", sha: SHA, informe, fecha: FECHA });
+    assert.deepEqual(parsearComentario(cuerpo), { tipo: "codigo", sha: SHA, informe });
+  });
+
   it("un cuerpo sin marcador da null", () => {
     assert.equal(parsearComentario("Un comentario cualquiera."), null);
   });

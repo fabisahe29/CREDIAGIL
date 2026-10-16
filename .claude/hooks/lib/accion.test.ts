@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { EntradaInvalida, normalizarAccion } from "./accion.ts";
+import { EntradaInvalida, normalizarAccion, normalizarRuta } from "./accion.ts";
 
 const RAIZ = "C:\\repo\\crediagil";
 
@@ -40,6 +40,23 @@ describe("normalizarAccion", () => {
     assert.equal(accion.herramienta, "Write");
     assert.deepEqual(accion.rutas, ["src/a.ts"]);
     assert.deepEqual(accion.textos, [{ origen: "src/a.ts", texto: "hola" }]);
+  });
+
+  it("resuelve los segmentos . y .. de la ruta", () => {
+    for (const [ruta, esperada] of [
+      [`${RAIZ}/src/../.git/x.json`, ".git/x.json"],
+      ["src/../.git/x.json", ".git/x.json"],
+      ["./a/./b.ts", "a/b.ts"],
+      [".", "."],
+      [RAIZ, "."],
+    ]) {
+      assert.equal(normalizarRuta(ruta!, RAIZ), esperada, ruta);
+    }
+  });
+
+  it("deja absoluta una ruta que sale de la raíz con ..", () => {
+    assert.ok(!normalizarRuta("../fuera.txt", RAIZ).startsWith(".."));
+    assert.ok(normalizarRuta("../fuera.txt", RAIZ).endsWith("/fuera.txt"));
   });
 
   it("extrae new_string de Edit y cada edits[].new_string de MultiEdit", () => {
