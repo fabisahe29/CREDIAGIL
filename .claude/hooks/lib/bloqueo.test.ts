@@ -39,4 +39,21 @@ describe("componerMensaje", () => {
     assert.match(mensaje, /\(2 motivos\)/);
     assert.ok(mensaje.indexOf("[secretos]") < mensaje.indexOf("[datos-reales]"));
   });
+
+  it("ordena revisores y puerta-pr después de spec-primero y antes de error-interno", () => {
+    const de = (control: Bloqueo["control"]): Bloqueo => ({ ...datos, control });
+    const mensaje = componerMensaje([
+      de("error-interno"),
+      de("puerta-pr"),
+      de("revisores"),
+      de("spec-primero"),
+    ]);
+    const posiciones = ["[spec-primero]", "[revisores]", "[puerta-pr]", "[error-interno]"].map(
+      (etiqueta) => mensaje.indexOf(etiqueta),
+    );
+    assert.deepEqual(
+      posiciones,
+      [...posiciones].sort((a, b) => a - b),
+    );
+  });
 });

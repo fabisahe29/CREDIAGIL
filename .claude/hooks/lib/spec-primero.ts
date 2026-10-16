@@ -36,23 +36,29 @@ export function ticketDeRama(rama: string): number | undefined {
   return coincidencia ? Number(coincidencia[1]) : undefined;
 }
 
-/** Verdadero si alguna specs/<carpeta>/spec.md declara el ticket como su issue de origen. */
-export function existeSpec(raiz: string, ticket: number): boolean {
+/** Ruta relativa (`specs/<carpeta>/spec.md`) de la spec que declara el ticket como su issue de origen. */
+export function specDeTicket(raiz: string, ticket: number): string | undefined {
   const prefijo = `**Issue de origen**: [fabisahe29/CREDIAGIL#${ticket} `;
   let carpetas: string[];
   try {
-    carpetas = readdirSync(join(raiz, "specs"));
+    carpetas = readdirSync(join(raiz, "specs")).sort();
   } catch {
-    return false;
+    return undefined;
   }
-  return carpetas.some((carpeta) => {
+  const carpeta = carpetas.find((nombre) => {
     try {
-      const spec = readFileSync(join(raiz, "specs", carpeta, "spec.md"), "utf8");
+      const spec = readFileSync(join(raiz, "specs", nombre, "spec.md"), "utf8");
       return spec.split(/\r?\n/).some((linea) => linea.startsWith(prefijo));
     } catch {
       return false;
     }
   });
+  return carpeta === undefined ? undefined : `specs/${carpeta}/spec.md`;
+}
+
+/** Verdadero si alguna specs/<carpeta>/spec.md declara el ticket como su issue de origen. */
+export function existeSpec(raiz: string, ticket: number): boolean {
+  return specDeTicket(raiz, ticket) !== undefined;
 }
 
 /** Destinos de escritura de un comando de shell. */

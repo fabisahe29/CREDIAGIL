@@ -55,20 +55,22 @@ Publica un comentario de avance de los hitos `especificacion` o `plan` (FR-011, 
 
 ## `/ticket-abrir-pr`
 
-Abre el pull request del ticket en un solo paso (FR-007, FR-009).
+Revisa el ticket y, solo si las revisiones lo permiten, abre el pull request en un solo paso (FR-007, FR-009). Las revisiones previas las agregó el #6: [specs/004-revision-independiente-pr/contracts/ticket-abrir-pr.md](../../004-revision-independiente-pr/contracts/ticket-abrir-pr.md).
 
 | | |
 |---|---|
 | **Argumentos** | opcional: `<N>`. Por defecto, el issue se resuelve con R3. |
-| **Lecturas** | `list_branches` / `list_commits` (la rama existe en el remoto y tiene commits respecto de `main`) · `list_pull_requests` (`head: <owner>:<rama>`, `state: open`) · `issue_read` · `get_comments` |
-| **Escrituras** | `create_pull_request` · `update_project_item` (Status → `In review`) · `add_issue_comment` (hito `pr`) |
+| **Lecturas** | `list_branches` / `list_commits` (la rama existe en el remoto y tiene commits respecto de `main`) · `issue_read` · `get_comments` (registros de revisión del `sha`, Regla 7, y marcador `pr`) · `list_pull_requests` (`head: <owner>:<rama>`, `state: open`) |
+| **Locales** | `node .claude/revision/revision.ts preparar` · `reutilizar <sha>` · `decidir <sha>` · skills `revisar-codigo` y `revisar-cumplimiento` (subagentes revisores) |
+| **Escrituras** | `add_issue_comment` (registros de revisión) · `create_pull_request` (vigilado por el control `puerta-pr` del guardián) · `update_project_item` (Status → `In review`) · `add_issue_comment` (hito `pr`) |
 
 **Flujo**:
 
 1. Verificar la rama remota. Si no existe o no tiene cambios, ⛔ con el motivo (por ejemplo, "publica la rama con `git push -u origin <rama>`") y terminar sin cambios.
-2. Si ya hay un PR abierto para la rama, reutilizarlo (↺). Si no, crearlo: base `main`, título convencional, cuerpo según la plantilla PR de [comentarios.md](comentarios.md) con `Closes #<N>`.
-3. Status → `In review`.
-4. Comentario `pr` con el enlace al PR y lo pendiente. Lo pendiente sale de las tareas sin marcar en `tasks.md`, si existe, y de lo diferido en la spec y el plan; si no queda nada, se dice explícitamente.
+2. **Revisiones** sobre el head de `origin/<rama>` (pasos R1 a R7 del contrato del #6): buscar registros previos del `sha` y reutilizarlos, o preparar el paquete y ejecutar las dos revisiones con un reintento acotado; decidir por gravedad; publicar los registros en el issue. Si la decisión bloquea, ⛔ «PR no abierto» con los motivos, el Status sigue en `In Progress` y el comando termina.
+3. Si ya hay un PR abierto para la rama, reutilizarlo (↺). Si no, crearlo: base `main`, título convencional, cuerpo según la plantilla PR de [comentarios.md](comentarios.md) con `Closes #<N>` y la sección `## Revisiones`.
+4. Status → `In review`.
+5. Comentario `pr` con el enlace al PR y lo pendiente. Lo pendiente sale de las tareas sin marcar en `tasks.md`, si existe, y de lo diferido en la spec y el plan; si no queda nada, se dice explícitamente.
 
 ---
 

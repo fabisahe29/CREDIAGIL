@@ -5,6 +5,21 @@ import { EntradaInvalida, normalizarAccion } from "./accion.ts";
 const RAIZ = "C:\\repo\\crediagil";
 
 describe("normalizarAccion", () => {
+  it("conserva el agent_type de un subagente como agente", () => {
+    const accion = normalizarAccion(
+      { tool_name: "Read", tool_input: { file_path: "a.md" }, agent_type: "revisor-codigo" },
+      RAIZ,
+    );
+    assert.equal(accion.agente, "revisor-codigo");
+  });
+
+  it("no define agente en la sesión principal ni con un agent_type vacío", () => {
+    const principal = normalizarAccion({ tool_name: "Read", tool_input: {} }, RAIZ);
+    const vacio = normalizarAccion({ tool_name: "Read", tool_input: {}, agent_type: "" }, RAIZ);
+    assert.equal("agente" in principal, false);
+    assert.equal("agente" in vacio, false);
+  });
+
   it("rechaza una entrada sin tool_name", () => {
     assert.throws(() => normalizarAccion({ tool_input: {} }, RAIZ), EntradaInvalida);
   });

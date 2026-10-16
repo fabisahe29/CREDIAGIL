@@ -15,6 +15,7 @@ Diseño: [specs/001-sincronizacion-backlog-github/](../specs/001-sincronizacion-
 | Opciones de Status | `Todo` · `In Progress` · `In review` · `Done` (exactas, con estas mayúsculas) |
 | Rama base | `main` |
 | Prefijo de marcador | `crediagil:hito=` |
+| Prefijo de registro de revisión | `crediagil:revision=` (Regla 7) |
 | Hitos | `inicio` · `especificacion` · `plan` · `pr` · `cierre` |
 
 ## Regla 1: solo el servidor MCP de GitHub
@@ -68,3 +69,10 @@ Todo comando termina con una línea por efecto:
 - `⛔ <efecto> — <motivo>`: no aplicado.
 
 Los enlaces al issue, al PR y a la carpeta de la spec se incluyen cuando existen.
+
+## Regla 7: registros de revisión
+
+- Los comentarios con marcador `<!-- crediagil:revision=<tipo>;commit=<sha> -->` (`tipo`: `codigo` o `cumplimiento`) son únicos por `(tipo, sha)`, no por hito. Un mismo issue puede tener varios, uno por commit revisado.
+- Se buscan y se publican igual que los de la Regla 4: antes de publicar se leen todos los comentarios del issue, y si el marcador ya existe no se publica (↺).
+- Su cuerpo lo genera `node .claude/revision/revision.ts decidir <sha>`. La sesión no lo redacta ni lo edita.
+- Los publica `/ticket-abrir-pr` (#6). Diseño: [specs/004-revision-independiente-pr/](../specs/004-revision-independiente-pr/).

@@ -14,6 +14,10 @@ export interface Accion {
   textos: TextoRevisable[];
   /** Comando de Bash o PowerShell, si la herramienta es una shell. */
   comando?: string;
+  /** `agent_type` del subagente que llama a la herramienta; ausente en la sesión principal. */
+  agente?: string;
+  /** `tool_input` original, para los controles que necesitan un parámetro concreto (p. ej. `head`). */
+  parametros?: Record<string, unknown>;
 }
 
 /** La entrada del hook no cumple el esquema mínimo: se bloquea, no se adivina. */
@@ -94,7 +98,9 @@ export function normalizarAccion(entrada: unknown, raiz: string): Accion {
     }
   }
 
-  return comando === undefined
-    ? { herramienta, rutas, textos }
-    : { herramienta, rutas, textos, comando };
+  const accion: Accion = { herramienta, rutas, textos, parametros: datos };
+  if (comando !== undefined) accion.comando = comando;
+  const agente = entrada["agent_type"];
+  if (typeof agente === "string" && agente !== "") accion.agente = agente;
+  return accion;
 }
