@@ -4,7 +4,7 @@
 
 import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import { aResultadoMcp, type Respuesta } from "../compartido/errores.ts";
+import { aResultadoMcp, fallo, transitorioAgotado, type Respuesta } from "../compartido/errores.ts";
 import { registrar } from "../compartido/logs.ts";
 import type { ClienteCore } from "./cliente-core.ts";
 import { conReintentos } from "./reintentos.ts";
@@ -66,6 +66,8 @@ export function crearAdaptador({
     herramienta: string,
     operacion: () => Promise<Respuesta<T>>,
   ): Promise<Respuesta<T>> {
+    // Con la conversación ya escalada, insistir solo gasta esperas: el resultado final es la escalada.
+    if (estado.escalamiento !== null) return fallo(transitorioAgotado());
     const resultado = await conReintentos(operacion, {
       dormir,
       azar,

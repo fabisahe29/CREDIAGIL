@@ -34,7 +34,7 @@ function validarEntrada(
       : String(problema?.path[0] ?? "entrada");
   return fallo(
     errorValidacion(
-      "entrada_invalida",
+      "formato_invalido",
       `La entrada de consultar_solicitud no es válida en el campo ${campo}.`,
       campo,
     ),
@@ -52,8 +52,16 @@ export function crearServidor(core: Core): McpServer {
         "Consulta el estado de una solicitud de crédito del core de Crediágil por su identificador. Devuelve solicitud: null si no existe.",
       inputSchema: z
         .object({
-          idSolicitud: z.unknown().describe("Identificador de la solicitud: SOL- y 10 dígitos."),
-          correlationId: z.unknown().describe("UUID de la conversación, para trazabilidad."),
+          // Opcionales solo aquí: así un campo faltante llega a validarEntrada y devuelve el
+          // contrato `validacion`, en lugar del error -32602 genérico del SDK.
+          idSolicitud: z
+            .unknown()
+            .optional()
+            .describe("Obligatorio. Identificador de la solicitud: SOL- y 10 dígitos."),
+          correlationId: z
+            .unknown()
+            .optional()
+            .describe("Obligatorio. UUID de la conversación, para trazabilidad."),
         })
         .passthrough(),
       outputSchema: {

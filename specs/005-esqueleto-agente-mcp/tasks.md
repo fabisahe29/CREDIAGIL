@@ -200,7 +200,17 @@ description: "Lista de tareas: esqueleto del agente y del servidor MCP de origin
 - [X] T040 Commit convencional en `7-esqueleto-del-agente-y-del-servidor-mcp`, por ejemplo `feat: esqueleto del agente y del servidor MCP de originación (#7)`. Antes:
   - `git status`, para confirmar que no entra ningún `.env`, archivo temporal ni `node_modules/`, y que sí entra `package-lock.json`;
   - la búsqueda de tokens del quickstart del #3.
-- [ ] T041 Con confirmación del desarrollador: `git push -u origin 7-esqueleto-del-agente-y-del-servidor-mcp` y `/ticket-abrir-pr 7`. Es la primera revisión de cumplimiento con código en `src/`: se espera que las 5 reglas salgan no aplicables. Cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
+- [X] T041 Con confirmación del desarrollador: `git push -u origin 7-esqueleto-del-agente-y-del-servidor-mcp` y `/ticket-abrir-pr 7`. Es la primera revisión de cumplimiento con código en `src/`: se espera que las 5 reglas salgan no aplicables. Cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
+  - Resultado (2026-10-16): PR #25 sobre `2f4d43b`; no bloquea, cumplimiento con las 5 reglas ➖. Se corrigieron los 7 hallazgos de código (4 medios y 3 bajos):
+    - escalar si el core no arranca;
+    - la prueba del saludo cuenta de verdad las llamadas al core;
+    - prueba nueva del tiempo límite de la conversación;
+    - `formato_invalido` también ante un campo faltante, que antes cortaba el SDK con -32602;
+    - sin rama muerta en `conversar`;
+    - el adaptador no vuelve a llamar al core tras escalar;
+    - el tiempo agotado se detecta por `ErrorCode.RequestTimeout`.
+
+    Las 2 restricciones de cumplimiento (reglas 4 y 5) quedan para el #15 y el #16.
 - [ ] T042 Con confirmación del desarrollador: `/ticket-cerrar`.
 
 ---

@@ -48,6 +48,8 @@ export interface OpcionesConversar {
   correlationId?: string;
   ejecutarConsulta?: QueryFn;
   core?: ClienteCore;
+  /** Conecta con el core cuando no se pasa `core`; inyectable para probar que no arranque. */
+  conectarCore?: () => Promise<ClienteCore>;
   modelo?: string;
   dormir?: (ms: number) => Promise<void>;
   azar?: () => number;
@@ -72,6 +74,8 @@ const REGLAS: Readonly<Record<Motivo, string>> = {
   limite_de_turnos: "FR-003 · límite de seguridad del ciclo",
   falla_del_agente: "constitución, Principio VI · reintento del modelo agotado",
 };
+
+const REGLA_CORE_NO_ARRANCO = "constitución, Principio VI · el core no arrancó";
 
 interface Intento {
   /** El mensaje `result` del SDK, si llegó. */
@@ -105,16 +109,69 @@ export async function conversar(
     correlationId = randomUUID(),
     ejecutarConsulta = query as unknown as QueryFn,
     core,
+    conectarCore = () => crearClienteCore(),
     modelo = process.env["CREDIAGIL_MODELO"] || MODELO_POR_DEFECTO,
     dormir = dormirDeVerdad,
     azar = Math.random,
     tiempoLimiteMs = TIEMPO_LIMITE_CONVERSACION_MS,
   }: OpcionesConversar = {},
 ): Promise<ResultadoConversacion> {
-  const coreEnUso = core ?? (await crearClienteCore());
   const estado = crearEstado(correlationId);
-  const adaptador = crearAdaptador({ core: coreEnUso, estado, dormir, azar });
   let turnos = 0;
+
+  function escalar(
+    motivo: Motivo,
+    ultimoError: string,
+    intentos?: number,
+    regla: string = REGLAS[motivo],
+  ): ResultadoConversacion {
+    const senal: SenalEscalamiento = estado.escalamiento ?? {
+      motivo,
+      regla,
+      resultado: "escalada",
+      correlationId,
+      ts: new Date().toISOString(),
+      ultimoError,
+      ...(intentos !== undefined ? { intentos } : {}),
+    };
+    if (estado.escalamiento === null) registrar("escalamiento", { ...senal });
+    return {
+      correlationId,
+      respuesta: `${AVISOS[senal.motivo]} Referencia: ${correlationId.slice(0, 8)}.`,
+      tipo: "escalada",
+      escalamiento: senal,
+      turnos,
+    };
+  }
+
+  function cerrarCon(r: ResultadoConversacion, intento: Intento): ResultadoConversacion {
+    registrar("resultado", {
+      correlationId,
+      subtype: intento.resultado?.subtype ?? null,
+      stop_reason: intento.resultado?.stop_reason ?? null,
+      tipo: r.tipo,
+      turnos: r.turnos,
+    });
+    return r;
+  }
+
+  // Sin core no hay respuesta posible: se escala en lugar de lanzar (FR-012; Principio VI).
+  let coreEnUso: ClienteCore;
+  try {
+    coreEnUso = core ?? (await conectarCore());
+  } catch (error) {
+    const causa = error instanceof Error ? error.message : String(error);
+    return cerrarCon(
+      escalar(
+        "falla_transitoria_persistente",
+        `core_no_arranco: ${causa}`,
+        undefined,
+        REGLA_CORE_NO_ARRANCO,
+      ),
+      {},
+    );
+  }
+  const adaptador = crearAdaptador({ core: coreEnUso, estado, dormir, azar });
 
   async function intentar(): Promise<Intento> {
     const abortController = new AbortController();
@@ -157,37 +214,6 @@ export async function conversar(
     }
   }
 
-  function escalar(motivo: Motivo, ultimoError: string, intentos?: number): ResultadoConversacion {
-    const senal: SenalEscalamiento = estado.escalamiento ?? {
-      motivo,
-      regla: REGLAS[motivo],
-      resultado: "escalada",
-      correlationId,
-      ts: new Date().toISOString(),
-      ultimoError,
-      ...(intentos !== undefined ? { intentos } : {}),
-    };
-    if (estado.escalamiento === null) registrar("escalamiento", { ...senal });
-    return {
-      correlationId,
-      respuesta: `${AVISOS[senal.motivo]} Referencia: ${correlationId.slice(0, 8)}.`,
-      tipo: "escalada",
-      escalamiento: senal,
-      turnos,
-    };
-  }
-
-  function cerrarCon(r: ResultadoConversacion, intento: Intento): ResultadoConversacion {
-    registrar("resultado", {
-      correlationId,
-      subtype: intento.resultado?.subtype ?? null,
-      stop_reason: intento.resultado?.stop_reason ?? null,
-      tipo: r.tipo,
-      turnos: r.turnos,
-    });
-    return r;
-  }
-
   try {
     let intento = await intentar();
     let clase = clasificar(intento);
@@ -195,22 +221,23 @@ export async function conversar(
       await dormir(ESPERA_REINTENTO_MODELO_MS * (1 + (azar() * 2 - 1) * VARIACION));
       intento = await intentar();
       clase = clasificar(intento);
-      if (clase.tipo === "reintentar") {
-        return cerrarCon(escalar("falla_del_agente", clase.ultimoError, 2), intento);
-      }
     }
+    // La señal del adaptador prevalece sobre cualquier result (contracts/agente.md).
     if (estado.escalamiento !== null) {
       return cerrarCon(escalar(estado.escalamiento.motivo, ""), intento);
     }
-    if (clase.tipo === "respuesta") {
-      return cerrarCon(
-        { correlationId, respuesta: clase.texto, tipo: "respuesta", escalamiento: null, turnos },
-        intento,
-      );
+    switch (clase.tipo) {
+      case "respuesta":
+        return cerrarCon(
+          { correlationId, respuesta: clase.texto, tipo: "respuesta", escalamiento: null, turnos },
+          intento,
+        );
+      case "escalar":
+        return cerrarCon(escalar(clase.motivo, clase.ultimoError), intento);
+      default:
+        // "reintentar" tras el reintento: el primer "reintentar" sin señal siempre reintenta.
+        return cerrarCon(escalar("falla_del_agente", clase.ultimoError, 2), intento);
     }
-    if (clase.tipo === "escalar")
-      return cerrarCon(escalar(clase.motivo, clase.ultimoError), intento);
-    return cerrarCon(escalar("falla_del_agente", clase.ultimoError, 1), intento);
   } finally {
     if (core === undefined) await coreEnUso.cerrar();
   }

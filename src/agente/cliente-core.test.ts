@@ -1,6 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
 import { ID_EN_ESTUDIO, ID_INEXISTENTE } from "../mcp/datos-ejemplo.ts";
 
@@ -75,13 +76,27 @@ describe("cliente del core: respuestas fuera de contrato y fallas de transporte 
   it("un tiempo límite agotado es transitorio tiempo_agotado", async () => {
     const core = await crearClienteCore({
       llamador: llamadorFalso(async () => {
-        throw new Error("Request timed out");
+        throw new McpError(ErrorCode.RequestTimeout, "Request timed out");
       }),
     });
     const respuesta = await core.consultarSolicitud(ID_EN_ESTUDIO, randomUUID());
     assert.equal(respuesta.ok, false);
     if (!respuesta.ok) {
       assert.equal(respuesta.error.codigo, "tiempo_agotado");
+      assert.equal(respuesta.error.reintentable, true);
+    }
+  });
+
+  it("otro error del transporte es transitorio core_no_disponible, aunque su texto diga timeout", async () => {
+    const core = await crearClienteCore({
+      llamador: llamadorFalso(async () => {
+        throw new Error("socket timeout");
+      }),
+    });
+    const respuesta = await core.consultarSolicitud(ID_EN_ESTUDIO, randomUUID());
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) {
+      assert.equal(respuesta.error.codigo, "core_no_disponible");
       assert.equal(respuesta.error.reintentable, true);
     }
   });

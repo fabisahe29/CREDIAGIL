@@ -42,6 +42,29 @@ describe("adaptador: servidor MCP en el mismo proceso del agente", () => {
     assert.deepEqual(resultado.structuredContent, respuesta);
     assert.equal(resultado.isError, false);
   });
+
+  it("con la conversación ya escalada no vuelve a llamar al core y devuelve transitorio_agotado", async () => {
+    const correlationId = randomUUID();
+    const estado = crearEstado(correlationId);
+    estado.escalamiento = {
+      motivo: "falla_transitoria_persistente",
+      regla: "constitución, Principio VI · reintentos agotados",
+      resultado: "escalada",
+      correlationId,
+      ts: new Date().toISOString(),
+    };
+    const esperas: number[] = [];
+    const { core, llamadas } = coreFalso([exito({ solicitud: null })]);
+    const adaptador = crearAdaptador({ core, estado, dormir: async (ms) => void esperas.push(ms) });
+    const resultado = await adaptador.herramientas.consultar_solicitud.manejar({
+      idSolicitud: ID_EN_ESTUDIO,
+    });
+    const contenido = resultado.structuredContent as { error: { codigo: string } };
+    assert.equal(llamadas.length, 0);
+    assert.deepEqual(esperas, []);
+    assert.equal(resultado.isError, true);
+    assert.equal(contenido.error.codigo, "transitorio_agotado");
+  });
 });
 
 describe("adaptador: reintentos y escalamiento contra el servidor real (US3)", () => {

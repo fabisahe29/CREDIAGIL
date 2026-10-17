@@ -52,13 +52,14 @@ Se evalúa en este orden; gana la primera fila que aplica. Toda conversación qu
 
 | Condición | `tipo` | Motivo de la señal | `respuesta` |
 |-----------|--------|--------------------|-------------|
+| El core no arranca (falla `conectarCore`), antes de llamar al modelo | `escalada` | `falla_transitoria_persistente`, con `regla` `constitución, Principio VI · el core no arrancó` y `ultimoError` `core_no_arranco: <causa>` | El mismo aviso de la fila siguiente |
 | El adaptador emitió una señal (core caído tras reintentos) | `escalada` | `falla_transitoria_persistente` | «No pude consultar el sistema de originación en este momento. Tu caso pasa a un analista, que te contactará. Referencia: `<correlationId corto>`.» |
 | `success` y `stop_reason` `end_turn` | `respuesta` | — | Texto del modelo |
 | `success` con **cualquier otro** `stop_reason` (`max_tokens`, `refusal`, `null` o un valor desconocido) | `escalada` | `respuesta_incompleta` | «No pude completar tu respuesta. Tu caso pasa a un analista. Referencia: `<…>`.» |
 | `error_max_turns` | `escalada` | `limite_de_turnos` | «No pude completar tu consulta. Tu caso pasa a un analista. Referencia: `<…>`.» |
 | `error_during_execution`, otro `subtype` de error, ausencia de `result` o tiempo agotado: **tras un reintento** de la conversación (1 s ±20%) que también falla | `escalada` | `falla_del_agente` | «Tuve un problema al atender tu consulta. Tu caso pasa a un analista. Referencia: `<…>`.» |
 
-**Reintento del modelo** (FR-013): ante la última fila, `conversar` vuelve a ejecutar `query()` una sola vez con el mismo mensaje y el mismo `correlationId`, tras 1 s ±20% (`dormir` y `azar` inyectables). Si el reintento termina en cualquier otra fila, esa es la que vale.
+**Reintento del modelo** (FR-013): ante la última fila, `conversar` vuelve a ejecutar `query()` una sola vez con el mismo mensaje y el mismo `correlationId`, tras 1 s ±20% (`dormir` y `azar` inyectables). Si el reintento termina en cualquier otra fila, esa es la que vale. Una vez emitida la señal, el adaptador ya no vuelve a llamar al core: responde `transitorio_agotado` de inmediato.
 
 **Señal de escalamiento** (auditoría): `{ "evento": "escalamiento", "motivo", "regla", "resultado": "escalada", "correlationId", "ts", "herramienta"?, "intentos"?, "ultimoError"? }`. `regla` cita la norma que lo exige (por ejemplo, `constitución, Principio VI · reintentos agotados` o `FR-004 · razón de parada inesperada`).
 

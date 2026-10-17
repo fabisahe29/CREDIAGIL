@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   errorTransitorio,
   esquemaRespuesta,
@@ -58,8 +59,9 @@ async function conectarPorStdio(env: Record<string, string>): Promise<LlamadorMc
   return cliente as unknown as LlamadorMcp;
 }
 
+/** El SDK de MCP señala el tiempo límite con McpError y el código RequestTimeout, no con el texto. */
 function esTiempoAgotado(error: unknown): boolean {
-  return error instanceof Error && /timed? ?out|timeout/i.test(`${error.name} ${error.message}`);
+  return error instanceof McpError && error.code === ErrorCode.RequestTimeout;
 }
 
 export async function crearClienteCore({

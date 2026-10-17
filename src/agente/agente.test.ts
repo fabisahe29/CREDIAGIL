@@ -113,19 +113,44 @@ describe("agente: interpretación del resultado", () => {
     assert.equal(llamadas.length, 1);
   });
 
-  it("un saludo sin herramientas → respuesta en un turno", async (t) => {
+  it("un saludo sin herramientas → respuesta en un turno, sin llamar al core", async (t) => {
     capturarLogs(t);
-    let usadas = 0;
-    const { fn } = consultaFalsa([
-      async () => {
-        usadas = 0;
-        return [resultado("success", "end_turn", "¡Hola! ¿En qué te ayudo?", 1)];
+    let llamadasAlCore = 0;
+    const coreContado: ClienteCore = {
+      async consultarSolicitud() {
+        llamadasAlCore++;
+        return exito({ solicitud: null });
       },
+      async cerrar() {},
+    };
+    const { fn } = consultaFalsa([
+      [resultado("success", "end_turn", "¡Hola! ¿En qué te ayudo?", 1)],
     ]);
-    const r = await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const r = await conversar("Hola", { ejecutarConsulta: fn, core: coreContado, ...sinEspera });
     assert.equal(r.tipo, "respuesta");
     assert.equal(r.turnos, 1);
-    assert.equal(usadas, 0);
+    assert.equal(llamadasAlCore, 0);
+  });
+
+  it("si el core no arranca → escalada con aviso fijo, sin llamar al modelo ni lanzar", async (t) => {
+    const logs = capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([
+      [resultado("success", "end_turn", "No debería verse")],
+    ]);
+    const r = await conversar("¿Estado?", {
+      ejecutarConsulta: fn,
+      conectarCore: async () => {
+        throw new Error("Connection closed");
+      },
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "falla_transitoria_persistente");
+    assert.match(String(r.escalamiento?.ultimoError), /^core_no_arranco/);
+    assert.match(r.respuesta, /analista/);
+    assert.equal(llamadas.length, 0);
+    assert.ok(logs().some((l) => l["evento"] === "escalamiento"));
+    assert.ok(logs().some((l) => l["evento"] === "resultado" && l["tipo"] === "escalada"));
   });
 });
 
@@ -149,6 +174,29 @@ describe("agente: reintento de la llamada al modelo", () => {
     assert.equal(llamadas.length, 2);
     assert.equal(esperas.length, 1);
     assert.ok(esperas[0]! >= 800 && esperas[0]! <= 1200, String(esperas[0]));
+  });
+
+  it("si la conversación agota su tiempo límite dos veces → escalada por falla del agente", async (t) => {
+    capturarLogs(t);
+    let llamadas = 0;
+    // Como el SDK real: espera hasta que se aborta la conversación y entonces lanza.
+    const fn: QueryFn = async function* (params) {
+      llamadas++;
+      const senal = params.options.abortController!.signal;
+      await new Promise<void>((resolver) => senal.addEventListener("abort", () => resolver()));
+      throw new Error("Operation aborted");
+    };
+    const r = await conversar("¿Estado?", {
+      ejecutarConsulta: fn,
+      core,
+      tiempoLimiteMs: 10,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "falla_del_agente");
+    assert.equal(r.escalamiento?.intentos, 2);
+    assert.equal(r.escalamiento?.ultimoError, "tiempo_agotado");
+    assert.equal(llamadas, 2);
   });
 
   for (const [nombre, intento] of [

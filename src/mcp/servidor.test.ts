@@ -124,6 +124,14 @@ describe("servidor MCP del core: contrato de errores por MCP (US2)", () => {
     assert.equal(r.contenido.error?.campo, "extra");
   });
 
+  it("un campo faltante es validación formato_invalido de ese campo", async () => {
+    const r = await llamar({ correlationId: randomUUID() });
+    assert.equal(r.isError, true);
+    assert.equal(r.contenido.error?.categoria, "validacion");
+    assert.equal(r.contenido.error?.codigo, "formato_invalido");
+    assert.equal(r.contenido.error?.campo, "idSolicitud");
+  });
+
   it("un correlationId que no es UUID es validación de ese campo", async () => {
     const r = await llamar({ idSolicitud: ID_EN_ESTUDIO, correlationId: "no-uuid" });
     assert.equal(r.contenido.error?.campo, "correlationId");
