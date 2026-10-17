@@ -496,3 +496,60 @@ describe("core simulado: consultarIdentidad (US4)", () => {
     assert.equal(otra.ok && otra.datos.identidad.verificada, true);
   });
 });
+describe("core simulado: cambio de solicitante en la conversación (caso borde de la spec)", () => {
+  const HOY = new Date("2026-10-17T12:00:00.000Z");
+  const CID = "00000000-0000-4000-8000-00000000c001";
+  const verificar = (
+    core: ReturnType<typeof crearCore>,
+    idSolicitante: string,
+    fechaExpedicion: string,
+    idIntento: string,
+  ) =>
+    core.verificarIdentidad({
+      idSolicitante,
+      fechaExpedicion,
+      idIntento,
+      correlationId: CID,
+    });
+  const verificada = (core: ReturnType<typeof crearCore>) => {
+    const r = core.consultarIdentidad(CID);
+    return r.ok ? r.datos.identidad : null;
+  };
+
+  it("un intento sobre otro solicitante invalida la verificación anterior", () => {
+    const core = crearCore({ ahora: () => HOY });
+    verificar(core, ID_HOMONIMO_1, solicitante(ID_HOMONIMO_1).fechaExpedicion, "c-1");
+    assert.equal(verificada(core)?.verificada, true);
+    const r = verificar(core, ID_HOMONIMO_2, "2001-01-01", "c-2");
+    assert.equal(r.respuesta.ok, false);
+    assert.deepEqual(verificada(core), {
+      correlationId: CID,
+      verificada: false,
+      idSolicitante: null,
+      verificadaEn: null,
+    });
+  });
+
+  it("tras invalidar, el nuevo solicitante se verifica desde cero", () => {
+    const core = crearCore({ ahora: () => HOY });
+    verificar(core, ID_HOMONIMO_1, solicitante(ID_HOMONIMO_1).fechaExpedicion, "c-3");
+    verificar(core, ID_HOMONIMO_2, "2001-01-01", "c-4");
+    verificar(core, ID_HOMONIMO_2, solicitante(ID_HOMONIMO_2).fechaExpedicion, "c-5");
+    assert.equal(verificada(core)?.idSolicitante, ID_HOMONIMO_2);
+  });
+
+  it("un intento mal formado o sobre un solicitante inexistente no invalida nada", () => {
+    const core = crearCore({ ahora: () => HOY });
+    verificar(core, ID_HOMONIMO_1, solicitante(ID_HOMONIMO_1).fechaExpedicion, "c-6");
+    verificar(core, ID_HOMONIMO_2, "2020-13-40", "c-7");
+    verificar(core, "CLI-0009999999", "2001-01-01", "c-8");
+    assert.equal(verificada(core)?.idSolicitante, ID_HOMONIMO_1);
+  });
+
+  it("un intento fallido sobre el mismo solicitante verificado no invalida la verificación", () => {
+    const core = crearCore({ ahora: () => HOY });
+    verificar(core, ID_HOMONIMO_1, solicitante(ID_HOMONIMO_1).fechaExpedicion, "c-9");
+    verificar(core, ID_HOMONIMO_1, "2001-01-01", "c-10");
+    assert.equal(verificada(core)?.verificada, true);
+  });
+});

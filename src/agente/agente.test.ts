@@ -745,7 +745,7 @@ describe("agente: desambiguación de homónimos (#9, US2)", () => {
     const prompt = String(llamadas[0]!.options["systemPrompt"]);
     assert.match(
       prompt,
-      /Cuando el solicitante quiera iniciar una solicitud, pídele primero su número de documento o su nombre completo y búscalo con buscar_solicitante\. Las preguntas generales se responden sin identificar\./,
+      /cuando el solicitante quiera iniciar una solicitud, pídele primero su número de documento o su nombre completo y búscalo con buscar_solicitante\. Las preguntas generales se responden sin identificar\./,
     );
     assert.match(prompt, /Si hay varias coincidencias, no elijas: pide el número de documento\./);
   });
@@ -844,5 +844,80 @@ describe("agente: control de identidad registrado como hook (#9, US4)", () => {
       { signal: new AbortController().signal },
     );
     assert.deepEqual(salida, {});
+  });
+});
+
+describe("agente: orden de evaluación 4 → 5 → 1 en el systemPrompt (#9, revisión de cumplimiento)", () => {
+  async function promptDelSistema(t: { mock: { method: Function } }) {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    return String(llamadas[0]!.options["systemPrompt"]);
+  }
+
+  it("pide escalar sin buscar ni pedir datos si el solicitante pide una persona (Regla 4)", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(
+      prompt,
+      /Si el solicitante pide hablar con una persona, no lo busques ni le pidas datos: dile de inmediato que su caso pasa a un analista\./,
+    );
+  });
+
+  it("pide escalar sin identificar si el caso no está cubierto por la política (Regla 5)", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(
+      prompt,
+      /Si el caso no está cubierto por la política, por ejemplo ingresos en moneda extranjera o un documento no soportado, tampoco lo identifiques: dile que su caso pasa a un analista\./,
+    );
+  });
+
+  it("las reglas 4 y 5 van antes de la instrucción de identificar (Regla 1)", async (t) => {
+    const prompt = await promptDelSistema(t);
+    const regla4 = prompt.indexOf("Si el solicitante pide hablar con una persona");
+    const regla5 = prompt.indexOf("Si el caso no está cubierto por la política");
+    const regla1 = prompt.indexOf("cuando el solicitante quiera iniciar una solicitud");
+    assert.ok(regla4 >= 0 && regla5 >= 0 && regla1 >= 0, "faltan instrucciones");
+    assert.ok(regla4 < regla5 && regla5 < regla1, "el orden debe ser 4 → 5 → 1");
+    assert.match(
+      prompt,
+      /En cualquier otro caso, cuando el solicitante quiera iniciar una solicitud/,
+    );
+  });
+});
+
+describe("agente: idempotencia de la verificación al repetir el turno del modelo (#9, revisión de código)", () => {
+  it("el intento repetido tras una falla del modelo usa el mismo idIntento", async (t) => {
+    capturarLogs(t);
+    const claves: string[] = [];
+    const coreQueAnota: ClienteCore = {
+      ...CORE_NO_SIMULADO,
+      async consultarSolicitud() {
+        return exito({ solicitud: null });
+      },
+      async verificarIdentidad(_id, _fecha, idIntento) {
+        claves.push(idIntento);
+        return fallo(errorNegocio("dato_no_coincide", "No coincide."));
+      },
+      async cerrar() {},
+    };
+    const verificar = (contexto: ContextoConsulta) =>
+      contexto.herramientas.verificar_identidad.manejar({
+        idSolicitante: "CLI-0001000001",
+        fechaExpedicion: "2001-01-01",
+      });
+    const { fn, llamadas } = consultaFalsa([
+      async (contexto) => {
+        await verificar(contexto);
+        return [resultado("error_during_execution", null)];
+      },
+      async (contexto) => {
+        await verificar(contexto);
+        return [resultado("success", "end_turn", "No coincide.")];
+      },
+    ]);
+    await conversar("Es 2001-01-01", { ejecutarConsulta: fn, core: coreQueAnota, ...sinEspera });
+    assert.equal(llamadas.length, 2);
+    assert.equal(claves.length, 2);
+    assert.equal(claves[0], claves[1], "el reintento del turno debe repetir la clave");
   });
 });

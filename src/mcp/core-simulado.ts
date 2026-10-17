@@ -218,6 +218,11 @@ export function crearCore({
         errorNegocio("solicitante_inexistente", "No hay un solicitante con ese identificador."),
       );
     }
+    // Cambio de solicitante: la verificación de otra persona no se transfiere (caso borde de la spec).
+    const verificadoAntes = identidades.get(correlationId);
+    if (verificadoAntes?.verificada && verificadoAntes.idSolicitante !== id.data) {
+      identidades.delete(correlationId);
+    }
     if (contador.bloqueada) {
       auditar({
         resultado: "bloqueada",

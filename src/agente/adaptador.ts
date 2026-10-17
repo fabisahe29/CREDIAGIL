@@ -56,6 +56,8 @@ export interface EstadoConversacion {
   eventos: EventoNegocio[];
   /** Búsquedas con varias coincidencias; la segunda escala (specs/007-verificacion-identidad, R6). */
   busquedasAmbiguas: number;
+  /** Si ya contó una búsqueda ambigua en este turno: dentro de un turno cuenta una sola. */
+  ambiguaEnTurno: boolean;
 }
 
 export const crearEstado = (correlationId: string): EstadoConversacion => ({
@@ -63,6 +65,7 @@ export const crearEstado = (correlationId: string): EstadoConversacion => ({
   escalamiento: null,
   eventos: [],
   busquedasAmbiguas: 0,
+  ambiguaEnTurno: false,
 });
 
 export const REGLA_AMBIGUA = "Regla 1 · coincidencias sin desambiguar";
@@ -167,6 +170,11 @@ export function crearAdaptador({
   generarIdIntento = randomUUID,
 }: OpcionesAdaptador) {
   const senal = (campos: Parameters<typeof dejarSenal>[1]) => dejarSenal(estado, campos);
+  /**
+   * Clave de idempotencia por dato dentro del turno. El adaptador vive todo el turno, incluido el
+   * reintento del modelo: el mismo dato repetido conserva su clave y el core no cuenta dos fallos.
+   */
+  const clavesPorDato = new Map<string, string>();
 
   /** Avisa al observador sin que su falla afecte la llamada; la falla se registra (Principio VI). */
   function avisarObservador(info: InfoHerramienta): void {
@@ -253,10 +261,13 @@ export function crearAdaptador({
   }
 
   /**
-   * Homónimos: la primera vez se pide el número de documento; la segunda se escala (FR-005, FR-006).
-   * Lo decide el código, nunca el modelo (R6).
+   * Homónimos: la primera vez se pide el número de documento; si la ambigüedad sigue en un turno
+   * posterior, se escala (FR-005, FR-006). Dentro de un turno cuenta una sola búsqueda ambigua: el
+   * solicitante todavía no pudo responder. Lo decide el código, nunca el modelo (R6).
    */
   function desambiguar(coincidencias: number): void {
+    if (estado.ambiguaEnTurno) return;
+    estado.ambiguaEnTurno = true;
     estado.busquedasAmbiguas++;
     if (estado.busquedasAmbiguas === 1) {
       emitirEvento(estado, {
@@ -285,8 +296,11 @@ export function crearAdaptador({
     idSolicitante: string;
     fechaExpedicion: string;
   }) {
-    // Una clave por llamada del modelo: sus reintentos la repiten y el core no cuenta dos veces (R4).
-    const idIntento = generarIdIntento();
+    // Una clave por dato del turno: sus reintentos y su repetición (también si el modelo repite el
+    // turno) la reusan y el core no cuenta dos veces (R4).
+    const dato = JSON.stringify([idSolicitante, fechaExpedicion]);
+    const idIntento = clavesPorDato.get(dato) ?? generarIdIntento();
+    clavesPorDato.set(dato, idIntento);
     const respuesta = await llamarConReintentos("verificar_identidad", () =>
       core.verificarIdentidad(idSolicitante, fechaExpedicion, idIntento, estado.correlationId),
     );

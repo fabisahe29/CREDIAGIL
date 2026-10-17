@@ -60,8 +60,9 @@ Ambos o ninguno → error `validacion`, `campo: "criterio"`.
 ```text
 no verificada ──verificar_identidad ok (A)──▶ verificada (A)
 verificada (A) ──verificar_identidad ok (A)──▶ verificada (A)   # idempotente: misma verificadaEn
-verificada (A) ──verificar_identidad ok (B)──▶ verificada (B)   # otro solicitante reemplaza
-cualquiera     ──verificar_identidad error──▶ sin cambio
+verificada (A) ──verificar_identidad sobre B (existe)──▶ no verificada   # no se transfiere
+no verificada  ──verificar_identidad ok (B)──▶ verificada (B)
+cualquiera     ──verificar_identidad mal formado o inexistente──▶ sin cambio
 ```
 
 Una conversación sin registro en el core responde `verificada: false`, como estado inicial.
@@ -86,7 +87,7 @@ Un `idIntento` repetido devuelve la `respuesta` guardada sin contar otro intento
 
 ## DecisionRegla1 — `src/politica/identidad.ts`
 
-Resultado de `evaluarRegla1(estado: EstadoIdentidad)`, una función pura (R5):
+Resultado de `evaluarRegla1(estado: EstadoIdentidad, idSolicitanteAccion?: string)`, una función pura (R5). Con `idSolicitanteAccion`, también exige que coincida con el verificado; si no coincide, `permitido: false` y `valores.identidad: "verificada para otro solicitante"`.
 
 | Campo | Tipo | Valor |
 |-------|------|-------|
@@ -102,7 +103,8 @@ Resultado de `evaluarRegla1(estado: EstadoIdentidad)`, una función pura (R5):
 
 | Campo | Tipo | Uso |
 |-------|------|-----|
-| `busquedasAmbiguas` | entero ≥ 0 | la segunda búsqueda ambigua escala con el motivo `identidad_ambigua` (R6) |
+| `busquedasAmbiguas` | entero ≥ 0 | la segunda búsqueda ambigua seguida escala con el motivo `identidad_ambigua`; una búsqueda con una sola coincidencia lo reinicia (R6) |
+| `ambiguaEnTurno` | boolean | si ya contó una búsqueda ambigua en el turno; `conversar` lo reinicia en cada intento (R6) |
 
 `SenalEscalamiento.motivo` suma `identidad_ambigua` e `identidad_no_verificable`. `SenalEscalamiento` suma el campo opcional `coincidencias` (entero ≥ 2), que solo se usa con `identidad_ambigua`.
 

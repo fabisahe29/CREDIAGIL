@@ -25,7 +25,27 @@ export interface DecisionRegla1 {
 
 export const REGLA_1 = "Regla 1 · identidad verificada antes de registrar";
 
-export function evaluarRegla1(estado: EstadoIdentidad): DecisionRegla1 {
+/**
+ * Con `idSolicitanteAccion`, además exige que la acción sea sobre el solicitante verificado: la
+ * verificación de una persona no se transfiere a otra (caso borde de la spec del #9).
+ */
+export function evaluarRegla1(
+  estado: EstadoIdentidad,
+  idSolicitanteAccion?: string,
+): DecisionRegla1 {
+  if (
+    estado.verificada &&
+    idSolicitanteAccion !== undefined &&
+    idSolicitanteAccion !== estado.idSolicitante
+  ) {
+    return {
+      regla: REGLA_1,
+      permitido: false,
+      motivo: "La identidad verificada en el core es de otro solicitante; no se transfiere.",
+      valores: { identidad: "verificada para otro solicitante" },
+      versionPolitica: VERSION_POLITICA,
+    };
+  }
   if (estado.verificada) {
     return {
       regla: REGLA_1,

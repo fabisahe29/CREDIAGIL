@@ -44,7 +44,23 @@ Un hook del Agent SDK consulta `consultar_identidad` en el core antes de las her
 
 ### Decisión 5: desambiguación y escalamiento decididos por el adaptador
 
-Ante homónimos, el código emite `solicitud_de_dato` pidiendo el número de documento. Una segunda búsqueda ambigua seguida escala con el motivo `identidad_ambigua`, y una verificación bloqueada, con `identidad_no_verificable`. Una búsqueda con una sola coincidencia reinicia el contador, porque el modelo repite la búsqueda en cada turno; sin el reinicio, repetirla por nombre después de dar el documento escalaba por error.
+Ante homónimos, el código emite `solicitud_de_dato` pidiendo el número de documento. Una segunda búsqueda ambigua seguida escala con el motivo `identidad_ambigua`, y una verificación bloqueada, con `identidad_no_verificable`. Una búsqueda con una sola coincidencia reinicia el contador, porque el modelo repite la búsqueda en cada turno; sin el reinicio, repetirla por nombre después de dar el documento escalaba por error. Dentro de un turno cuenta una sola búsqueda ambigua, porque el solicitante todavía no pudo responder.
+
+### Decisión 6: el orden 4 → 5 → 1 va primero en el system prompt
+
+Antes de pedir la identificación, el prompt indica escalar sin buscar ni pedir datos si el solicitante pide una persona o si su caso no está cubierto por la política.
+
+**Motivo**: la revisión de cumplimiento de `d37d3a7` bloqueó el PR porque el prompt pedía identificar «primero», sin precedencia para las reglas 4 y 5 (constitución, orden de evaluación obligatorio).
+
+**Alternativa descartada**: detectar por código la petición de una persona en este ticket. Es el alcance del #15 y el #16, y hacerlo aquí exigiría interpretar texto libre sin su diseño.
+
+### Decisión 7: la verificación no se transfiere a otro solicitante
+
+Un intento de verificación sobre otro solicitante invalida la verificación anterior de la conversación. `evaluarRegla1` puede recibir el solicitante de la acción y exigir que sea el verificado.
+
+**Motivo**: es el caso borde de la spec, y evita que el #13 herede un control que permita registrar a nombre de quien no se verificó.
+
+**Alternativa descartada**: guardar varias identidades verificadas por conversación (no lo pide la spec y complica la Regla 1).
 
 **Motivo**: los eventos y los escalamientos los decide el código, nunca el modelo (Decisión 2 del #8; Principio III).
 

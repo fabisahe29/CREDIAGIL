@@ -30,6 +30,7 @@ export interface OpcionesControlIdentidad {
 const PREFIJO = `mcp__${CLAVE_SERVIDOR}__`;
 const MOTIVO_SIN_IDENTIDAD = "Regla 1: la identidad del solicitante no está verificada.";
 const MOTIVO_SIN_RESPUESTA = "No se pudo comprobar la identidad; no se continúa.";
+const MOTIVO_OTRO_SOLICITANTE = "Regla 1: la identidad verificada es de otro solicitante.";
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
@@ -48,13 +49,17 @@ export function crearControlIdentidad({
   dormir = dormirDeVerdad,
   azar = Math.random,
 }: OpcionesControlIdentidad): HookCallback {
-  function bloquear(herramienta: string, motivo: string): SyncHookJSONOutput {
+  function bloquear(
+    herramienta: string,
+    motivo: string,
+    identidad = "no verificada",
+  ): SyncHookJSONOutput {
     emitirEvento(estado, {
       tipo: "bloqueo_por_regla",
       descripcion: "Para continuar necesito verificar tu identidad.",
       motivo: "identidad_no_verificada",
       regla: REGLA_1,
-      valores: { identidad: "no verificada", herramienta },
+      valores: { identidad, herramienta },
       siguientePaso: "Indícame tu número de documento para buscarte y verificarte.",
     });
     registrar("control_identidad", {
@@ -67,7 +72,10 @@ export function crearControlIdentidad({
   }
 
   /** Decide sin lanzar nunca: cualquier falla al consultar bloquea (ante la duda, bloquear). */
-  async function decidir(herramienta: string): Promise<SyncHookJSONOutput> {
+  async function decidir(
+    herramienta: string,
+    idSolicitanteAccion: string | undefined,
+  ): Promise<SyncHookJSONOutput> {
     let resultado;
     try {
       resultado = await conReintentos(() => core.consultarIdentidad(estado.correlationId), {
@@ -98,8 +106,16 @@ export function crearControlIdentidad({
     }
     const respuesta = resultado.respuesta;
     if (!respuesta.ok) return bloquear(herramienta, MOTIVO_SIN_RESPUESTA);
-    const decision = evaluarRegla1(respuesta.datos.identidad);
-    if (!decision.permitido) return bloquear(herramienta, MOTIVO_SIN_IDENTIDAD);
+    const decision = evaluarRegla1(respuesta.datos.identidad, idSolicitanteAccion);
+    if (!decision.permitido) {
+      const identidad = decision.valores["identidad"] ?? "no verificada";
+      const deOtro = respuesta.datos.identidad.verificada;
+      return bloquear(
+        herramienta,
+        deOtro ? MOTIVO_OTRO_SOLICITANTE : MOTIVO_SIN_IDENTIDAD,
+        identidad,
+      );
+    }
     registrar("control_identidad", {
       correlationId: estado.correlationId,
       herramienta,
@@ -113,6 +129,9 @@ export function crearControlIdentidad({
     if (!entrada.tool_name.startsWith(PREFIJO)) return {};
     const herramienta = entrada.tool_name.slice(PREFIJO.length);
     if (!herramientas.includes(herramienta)) return {};
-    return decidir(herramienta);
+    // Si la herramienta actúa sobre un solicitante concreto (p. ej. el registro del #13), debe ser
+    // el verificado: la verificación no se transfiere a otra persona.
+    const idSolicitante = (entrada.tool_input as { idSolicitante?: unknown } | null)?.idSolicitante;
+    return decidir(herramienta, typeof idSolicitante === "string" ? idSolicitante : undefined);
   };
 }

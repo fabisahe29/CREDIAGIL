@@ -66,3 +66,20 @@ describe("política: evaluarRegla1", () => {
     assert.ok(decision.motivo.length > 0);
   });
 });
+
+describe("política: evaluarRegla1 con el solicitante de la acción (cambio de identidad)", () => {
+  it("permite la acción sobre el mismo solicitante verificado", () => {
+    assert.equal(evaluarRegla1(verificada, "CLI-0001000001").permitido, true);
+  });
+
+  it("no permite la acción sobre otro solicitante: la verificación no se transfiere", () => {
+    const decision = evaluarRegla1(verificada, "CLI-0001000002");
+    assert.equal(decision.permitido, false);
+    assert.deepEqual(decision.valores, { identidad: "verificada para otro solicitante" });
+    assert.match(decision.motivo, /otro solicitante/);
+  });
+
+  it("sin identidad verificada tampoco permite la acción sobre ningún solicitante", () => {
+    assert.equal(evaluarRegla1(sinVerificar, "CLI-0001000001").permitido, false);
+  });
+});

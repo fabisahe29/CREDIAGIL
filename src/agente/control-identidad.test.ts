@@ -202,3 +202,30 @@ describe("control de identidad (#9, US4)", () => {
     assert.equal(llamadas(), 0);
   });
 });
+
+describe("control de identidad: solicitante de la acción (cambio de identidad)", () => {
+  const conEntrada = (toolInput: Record<string, unknown>): HookInput =>
+    ({ ...entrada(), tool_input: toolInput }) as HookInput;
+
+  it("bloquea si la herramienta actúa sobre otro solicitante que el verificado", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado } = preparar((cid) => [identidad(cid, true)]);
+    const salida = await invocar(conEntrada({ idSolicitante: "CLI-0001000002" }));
+    assert.equal(decision(salida), "deny");
+    assert.equal(
+      (salida as { hookSpecificOutput: { permissionDecisionReason: string } }).hookSpecificOutput
+        .permissionDecisionReason,
+      "Regla 1: la identidad verificada es de otro solicitante.",
+    );
+    assert.deepEqual(estado.eventos[0]?.valores, {
+      identidad: "verificada para otro solicitante",
+      herramienta: HERRAMIENTA,
+    });
+  });
+
+  it("deja seguir si la herramienta actúa sobre el solicitante verificado", async (t) => {
+    capturarStderr(t);
+    const { invocar } = preparar((cid) => [identidad(cid, true)]);
+    assert.deepEqual(await invocar(conEntrada({ idSolicitante: "CLI-0001000001" })), {});
+  });
+});

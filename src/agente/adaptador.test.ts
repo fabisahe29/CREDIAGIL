@@ -408,13 +408,32 @@ describe("adaptador: desambiguación de homónimos por código (#9, US2)", () =>
     );
   });
 
-  it("la segunda búsqueda ambigua escala con identidad_ambigua y el número de coincidencias", async (t) => {
+  /** Lo que `conversar` hace al empezar cada turno (y cada intento del modelo). */
+  const nuevoTurno = (estado: ReturnType<typeof crearEstado>) => {
+    estado.ambiguaEnTurno = false;
+  };
+  const porNombre = { nombre: "Elena Martínez Inventada" };
+
+  it("dos búsquedas ambiguas en el mismo turno cuentan una sola vez y no escalan", async (t) => {
     capturarStderr(t);
     const { core } = coreIdentidad({ busquedas: [HOMONIMOS, HOMONIMOS] });
     const estado = crearEstado(randomUUID());
     const adaptador = crearAdaptador({ core, estado });
-    await adaptador.herramientas.buscar_solicitante.manejar({ nombre: "Elena Martínez Inventada" });
-    await adaptador.herramientas.buscar_solicitante.manejar({ nombre: "Elena Martínez Inventada" });
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+    assert.equal(estado.busquedasAmbiguas, 1);
+    assert.equal(estado.escalamiento, null);
+    assert.equal(estado.eventos.length, 1, "no vuelve a pedir el dato en el mismo turno");
+  });
+
+  it("la búsqueda ambigua del turno siguiente escala con identidad_ambigua y las coincidencias", async (t) => {
+    capturarStderr(t);
+    const { core } = coreIdentidad({ busquedas: [HOMONIMOS, HOMONIMOS] });
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+    nuevoTurno(estado);
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
     assert.equal(estado.busquedasAmbiguas, 2);
     assert.equal(estado.eventos.length, 1, "la segunda no vuelve a pedir el dato");
     const senal = estado.escalamiento;
@@ -431,23 +450,23 @@ describe("adaptador: desambiguación de homónimos por código (#9, US2)", () =>
     const { core } = coreIdentidad({ busquedas: [HOMONIMOS, UNA, HOMONIMOS] });
     const estado = crearEstado(randomUUID());
     const adaptador = crearAdaptador({ core, estado });
-    await adaptador.herramientas.buscar_solicitante.manejar({ nombre: "Elena Martínez Inventada" });
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+    nuevoTurno(estado);
     await adaptador.herramientas.buscar_solicitante.manejar({ documento: "0002020202" });
     assert.equal(estado.busquedasAmbiguas, 0);
-    await adaptador.herramientas.buscar_solicitante.manejar({ nombre: "Elena Martínez Inventada" });
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
     assert.equal(estado.escalamiento, null, "no escala: ya se había desambiguado");
     assert.equal(estado.busquedasAmbiguas, 1);
   });
 
-  it("sin coincidencias no reinicia el contador: dos ambiguas seguidas igual escalan", async (t) => {
+  it("sin coincidencias no reinicia el contador: dos ambiguas en turnos seguidos escalan", async (t) => {
     capturarStderr(t);
     const { core } = coreIdentidad({ busquedas: [HOMONIMOS, NINGUNA, HOMONIMOS] });
     const estado = crearEstado(randomUUID());
     const adaptador = crearAdaptador({ core, estado });
     for (let i = 0; i < 3; i++) {
-      await adaptador.herramientas.buscar_solicitante.manejar({
-        nombre: "Elena Martínez Inventada",
-      });
+      nuevoTurno(estado);
+      await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
     }
     assert.equal(estado.escalamiento?.motivo, "identidad_ambigua");
   });
@@ -507,12 +526,12 @@ describe("adaptador: verificar_identidad (#9, US3)", () => {
     assert.equal(resultado.isError, false);
   });
 
-  it("los reintentos repiten el idIntento y dos llamadas del modelo usan dos distintos", async (t) => {
+  it("los reintentos repiten el idIntento y un dato distinto usa otro", async (t) => {
     capturarStderr(t);
     const correlationId = randomUUID();
     const caido = fallo<never>(errorTransitorio("tiempo_agotado", "Sin respuesta."));
     const { core, llamadas } = coreIdentidad({
-      verificaciones: [caido, identidadOk(correlationId), negocio("dato_no_coincide")],
+      verificaciones: [caido, negocio("dato_no_coincide"), negocio("dato_no_coincide")],
     });
     const adaptador = crearAdaptador({
       core,
@@ -520,15 +539,37 @@ describe("adaptador: verificar_identidad (#9, US3)", () => {
       dormir: async () => {},
       generarIdIntento: generador(),
     });
-    const entrada = {
+    await adaptador.herramientas.verificar_identidad.manejar({
       idSolicitante: ID_SOLICITANTE_UNICO,
       fechaExpedicion: FECHA,
-    };
+    });
+    await adaptador.herramientas.verificar_identidad.manejar({
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      fechaExpedicion: "2001-01-02",
+    });
+    assert.deepEqual(
+      llamadas.map((l) => l.argumentos[2]),
+      ["intento-1", "intento-1", "intento-2"],
+    );
+  });
+
+  it("el mismo dato repetido en el turno reutiliza el idIntento: el core no cuenta dos fallos", async (t) => {
+    capturarStderr(t);
+    const correlationId = randomUUID();
+    const { core, llamadas } = coreIdentidad({
+      verificaciones: [negocio("dato_no_coincide")],
+    });
+    const adaptador = crearAdaptador({
+      core,
+      estado: crearEstado(correlationId),
+      generarIdIntento: generador(),
+    });
+    const entrada = { idSolicitante: ID_SOLICITANTE_UNICO, fechaExpedicion: FECHA };
     await adaptador.herramientas.verificar_identidad.manejar(entrada);
     await adaptador.herramientas.verificar_identidad.manejar(entrada);
     assert.deepEqual(
       llamadas.map((l) => l.argumentos[2]),
-      ["intento-1", "intento-1", "intento-2"],
+      ["intento-1", "intento-1"],
     );
   });
 

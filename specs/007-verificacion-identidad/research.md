@@ -73,7 +73,7 @@ El tercer fallo responde directamente `verificacion_bloqueada`, no `dato_no_coin
 **Idempotencia** (Principio VI):
 - La entrada suma `idIntento`, un string de 1 a 64 caracteres. El core guarda la respuesta de cada `(correlationId, idIntento)`.
 - Si el `idIntento` se repite, el core devuelve la misma respuesta sin volver a contar el intento ni auditarlo.
-- El adaptador usa como `idIntento` un UUID que genera una vez por llamada del modelo, antes de `llamarConReintentos`, así que todos los reintentos llevan el mismo.
+- El adaptador usa como `idIntento` un UUID por **dato del turno** (`idSolicitante` + `fechaExpedicion`), memorizado mientras dura el turno. Lo repiten los reintentos del adaptador, una llamada repetida con el mismo dato y el reintento del turno completo cuando falla el modelo (corrección tras la revisión de código de `d37d3a7`). Un dato nuevo, o el mismo dato en otro turno, lleva otra clave.
 
 Esto evita que un reintento tras un tiempo agotado cuente dos fallos.
 
@@ -99,7 +99,8 @@ La usan el core, para el límite de intentos, y el control del agente (R7). El #
 
 **Decisión**: el adaptador expone al modelo `buscar_solicitante` y `verificar_identidad`, con los mismos reintentos del #7. No expone `consultar_identidad`: el modelo no la necesita, y así no puede "comprobar" su propia identidad. Según la respuesta del core, el **código** del manejador:
 - **Varias coincidencias**: emite `solicitud_de_dato`, con `dato: "número de documento de identidad"`, la `regla` («Regla 1 · coincidencias sin desambiguar») y `valores.coincidencias`. Marca en el estado de la conversación que hubo una búsqueda ambigua.
-- **Una segunda búsqueda ambigua seguida** en la misma conversación: deja la señal de escalamiento con el motivo nuevo `identidad_ambigua` y el número de coincidencias (FR-006).
+- **Una búsqueda ambigua por turno**: dentro de un turno solo cuenta la primera, porque el solicitante todavía no pudo responder al pedido de documento (corrección tras la revisión de código de `d37d3a7`).
+- **Una segunda búsqueda ambigua seguida**, en un turno posterior: deja la señal de escalamiento con el motivo nuevo `identidad_ambigua` y el número de coincidencias (FR-006).
 - **Una búsqueda con exactamente una coincidencia** reinicia el contador: el solicitante ya desambiguó. Hace falta porque el modelo repite `buscar_solicitante` en cada turno, ya que el historial solo lleva textos (visto con `--demo` en la validación manual, T044). Sin el reinicio, repetir la búsqueda por nombre después de dar el documento escalaba por error. Una búsqueda sin coincidencias no reinicia el contador.
 - **`verificacion_bloqueada`**: deja la señal de escalamiento con el motivo nuevo `identidad_no_verificable` (FR-009).
 - **Cero coincidencias, `dato_no_coincide` o una verificación exitosa**: no emite eventos; el modelo informa con su texto.
@@ -118,7 +119,7 @@ La usan el core, para el límite de intentos, y el control del agente (R7). El #
 - `HERRAMIENTAS_CON_IDENTIDAD`: los nombres de las herramientas que exigen identidad. Hoy está vacía; el #10 (extracción de documentos) y el #13 (registro) agregarán las suyas.
 - `crearControlIdentidad({ core, estado })`: crea el callback del hook `PreToolUse`. Cuando la herramienta está en la lista:
   1. llama a `core.consultarIdentidad(correlationId)`, directamente y sin pasar por el modelo, con `conReintentos` del #7 (2 reintentos con backoff);
-  2. evalúa `evaluarRegla1`;
+  2. evalúa `evaluarRegla1`; si la herramienta trae `idSolicitante`, además exige que sea el verificado. La verificación no se transfiere: el core también la invalida cuando hay un intento de verificación sobre otro solicitante (caso borde de la spec; corrección tras la revisión de código de `d37d3a7`);
   3. si no está permitido, responde `permissionDecision: "deny"` y emite `bloqueo_por_regla`;
   4. si la consulta falla, responde `deny` y emite `bloqueo_por_regla`. Si el error era transitorio y se agotaron los reintentos, deja además la señal `falla_transitoria_persistente` con `herramienta: "consultar_identidad"`, y la conversación escala (Principio VI: nunca se decide sin respuesta). Un error no transitorio (validación o fuera de contrato) no se reintenta. Ante la duda, bloquea.
 
@@ -137,7 +138,7 @@ La usan el core, para el límite de intentos, y el control del agente (R7). El #
 
 ## R8. Momento de identificar: instrucción del sistema y control por código
 
-**Decisión**: el system prompt suma tres instrucciones:
+**Decisión**: el system prompt antepone el orden de evaluación 4 → 5 → 1. Si el solicitante pide una persona, o el caso no está cubierto (moneda extranjera, documento no soportado), no se lo busca ni se le piden datos: se le dice que su caso pasa a un analista. Esta instrucción la exigió la revisión de cumplimiento de `d37d3a7`, y el #15 y el #16 la harán cumplir por código. Después suma tres instrucciones:
 - pedir número de documento o nombre en cuanto el solicitante quiera iniciar una solicitud;
 - con varias coincidencias, pedir el número de documento;
 - verificar con la fecha de expedición del documento, y no pedir ni usar documentos de soporte antes de verificar.

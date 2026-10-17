@@ -13,12 +13,13 @@ Extiende el adaptador y `conversar` del [#7](../../005-esqueleto-agente-mcp/cont
 | `verificar_identidad` | `core.verificarIdentidad` | sí | — |
 | — | `core.consultarIdentidad` | **no**: solo el control de identidad | — |
 
-`verificar_identidad` genera un `idIntento` (UUID) una vez por llamada del modelo, antes de `llamarConReintentos`, y todos los reintentos lo repiten; el modelo no lo ve ni lo envía. Las tres pasan por `llamarConReintentos` (2 reintentos ante un error transitorio; si se agotan, escalan con el motivo `falla_transitoria_persistente`). El esquema que ve el modelo para `buscar_solicitante` tiene `documento` y `nombre` opcionales; la regla «exactamente uno» la aplica el core.
+`verificar_identidad` usa un `idIntento` (UUID) por dato del turno (`idSolicitante` + `fechaExpedicion`). Lo repiten los reintentos, una llamada repetida con el mismo dato y el reintento del turno cuando falla el modelo. El modelo no lo ve ni lo envía. Las tres pasan por `llamarConReintentos` (2 reintentos ante un error transitorio; si se agotan, escalan con el motivo `falla_transitoria_persistente`). El esquema que ve el modelo para `buscar_solicitante` tiene `documento` y `nombre` opcionales; la regla «exactamente uno» la aplica el core.
 
 ## Efectos deterministas del manejador (R6)
 
 | Respuesta del core | Efecto en código |
 |--------------------|------------------|
+| `buscar_solicitante` con ≥ 2 coincidencias, y ya hubo una ambigua en este mismo turno | ninguno: dentro de un turno cuenta una sola (`ambiguaEnTurno`) |
 | `buscar_solicitante` con ≥ 2 coincidencias, primera vez en la conversación | `busquedasAmbiguas += 1`; emite `solicitud_de_dato` (ver abajo) |
 | `buscar_solicitante` con ≥ 2 coincidencias, y ya hubo una ambigua sin desambiguar después | señal de escalamiento `identidad_ambigua` |
 | `buscar_solicitante` con exactamente 1 coincidencia | `busquedasAmbiguas = 0`: ya se desambiguó |
@@ -71,7 +72,8 @@ El callback solo actúa sobre `PreToolUse` cuyo `tool_name` es `mcp__originacion
 
 | Situación | Respuesta del hook | Evento |
 |-----------|--------------------|--------|
-| `consultarIdentidad` ok y `evaluarRegla1` permitido | `{}` | — |
+| `consultarIdentidad` ok y `evaluarRegla1` permitido (si la herramienta trae `idSolicitante`, debe ser el verificado) | `{}` | — |
+| Identidad verificada, pero la herramienta trae otro `idSolicitante` | `deny`, motivo: «Regla 1: la identidad verificada es de otro solicitante.» | `bloqueo_por_regla` con `valores.identidad: "verificada para otro solicitante"` |
 | `evaluarRegla1` no permitido | `permissionDecision: "deny"`, motivo: «Regla 1: la identidad del solicitante no está verificada.» | `bloqueo_por_regla` |
 | `consultarIdentidad` con un error transitorio, reintentos agotados (`conReintentos`, 2 reintentos con backoff) | `deny`, motivo: «No se pudo comprobar la identidad; no se continúa.» | `bloqueo_por_regla` y señal `falla_transitoria_persistente` con `herramienta: "consultar_identidad"` → la conversación escala |
 | `consultarIdentidad` con un error no transitorio (validación o fuera de contrato) | `deny`, el mismo motivo, sin reintentar | `bloqueo_por_regla` |
@@ -97,8 +99,10 @@ hooks: { PreToolUse: [{ matcher: `mcp__${CLAVE_SERVIDOR}__.*`, hooks: [controlId
 
 ## System prompt (R8)
 
-Se suman estas instrucciones, sin quitar las existentes:
+Se suman estas instrucciones, sin quitar las existentes, en este orden (4 → 5 → 1):
 
-- «Cuando el solicitante quiera iniciar una solicitud, pídele primero su número de documento o su nombre completo y búscalo con buscar_solicitante. Las preguntas generales se responden sin identificar.»
+- «Si el solicitante pide hablar con una persona, no lo busques ni le pidas datos: dile de inmediato que su caso pasa a un analista.»
+- «Si el caso no está cubierto por la política, por ejemplo ingresos en moneda extranjera o un documento no soportado, tampoco lo identifiques: dile que su caso pasa a un analista.»
+- «En cualquier otro caso, cuando el solicitante quiera iniciar una solicitud, pídele primero su número de documento o su nombre completo y búscalo con buscar_solicitante. Las preguntas generales se responden sin identificar.»
 - «Si hay varias coincidencias, no elijas: pide el número de documento.»
 - «Verifica la identidad con verificar_identidad y la fecha de expedición del documento. No pidas ni uses documentos de soporte antes de verificar. Si el dato no coincide, no reveles el correcto.»

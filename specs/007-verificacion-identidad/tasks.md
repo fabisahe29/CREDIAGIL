@@ -292,6 +292,13 @@ Cada `caso.json` sigue el formato de `casos/demo-consulta/caso.json`: `nombre` (
   - `git status`, para confirmar que no entran `logs/`, ningún `.env` ni archivos temporales;
   - la búsqueda de tokens del quickstart del #3.
 - [ ] T046 Con confirmación del desarrollador: `git push -u origin 9-identificacion-y-verificacion-del-solici` y `/ticket-abrir-pr 9`. Se espera que la revisión de cumplimiento dé la Regla 1 ✅ y las demás no aplicables. Cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
+  - Primera revisión (2026-10-17) sobre `d37d3a7`: ⛔ bloquea. Cumplimiento: Regla 1 ✅, reglas 2 y 3 ➖, reglas 4 y 5 ⛔ por una restricción crítica: el prompt pedía identificar «primero» sin precedencia para las reglas 4 y 5. Código: 0 críticos, 0 altos, 3 medios y 2 bajos. Registros en el issue: [código](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6241873596) y [cumplimiento](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6241879418).
+  - Corregido en un commit nuevo, cada punto con su prueba (806 pruebas en verde):
+    - **Crítico**: el prompt antepone las reglas 4 y 5 a la identificación, y una prueba fija el orden (DECISIONES.md, Decisión 6).
+    - **Idempotencia**: el `idIntento` es por dato del turno, así que el reintento del turno del modelo ya no cuenta dos fallos.
+    - **Homónimos**: dentro de un turno cuenta una sola búsqueda ambigua (`ambiguaEnTurno`).
+    - **Cambio de solicitante**: el core invalida la verificación anterior y `evaluarRegla1` puede exigir el solicitante de la acción (Decisión 7).
+  - Quedan pendientes los hallazgos bajos: la fecha «hoy» en UTC frente a Bogotá; los fallos sobre un solicitante ya verificado (el bloqueo convive con la verificación); `/nueva` reinicia el contador de intentos; y que el adaptador acepte verificar mientras la última búsqueda es ambigua. También quedan para el #10 y el #13 la lista vacía de herramientas protegidas y FR-011a por código.
 
 ---
 
