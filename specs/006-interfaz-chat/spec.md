@@ -88,7 +88,7 @@ Como solicitante, quiero pegar el contenido de un documento (certificado laboral
 
 **Acceptance Scenarios**:
 
-1. **Given** una conversación en curso, **When** el solicitante pega un texto de varias líneas, **Then** el texto llega completo al agente como un solo mensaje, respetando los saltos de línea.
+1. **Given** una conversación en curso, **When** el solicitante pega un texto de varias líneas con el comando de pegado (`/pegar` … `/fin`), **Then** el texto llega completo al agente como un solo mensaje, respetando los saltos de línea.
 2. **Given** una conversación en curso, **When** el solicitante adjunta un archivo `.txt` o `.md` legible, **Then** su contenido llega al agente identificado como documento adjunto con su nombre, y la conversación muestra que se adjuntó ese archivo.
 3. **Given** una conversación en curso, **When** el solicitante adjunta un archivo de otro formato (imagen, PDF u otro) o uno que no se puede leer como texto, **Then** la interfaz no lee su contenido y le informa al agente que se adjuntó un documento no soportado, con su nombre y tipo, para que el agente aplique la regla 5 (escalar).
 4. **Given** un documento entregado, **When** se revisan los logs, **Then** solo aparecen sus metadatos (nombre, tipo, tamaño), nunca su contenido completo.
@@ -120,6 +120,7 @@ Como persona que prepara la demo, quiero iniciar la interfaz con un solo comando
 - **Varios eventos en un mismo turno** (por ejemplo, se pide un documento y luego se escala): se muestran todos, en el orden en que se emitieron. El primero que lleva a un estado final lo fija, y los siguientes no lo cambian (FR-007a).
 - **Evento de tipo desconocido o incompleto**: se muestra como «evento no reconocido» y se registra; no se descarta en silencio ni cambia el estado (US3, escenario 2).
 - **Texto del agente que contradice los eventos**: manda el evento; el estado visible sale solo de los eventos (US2, escenario 7).
+- **Varias líneas pegadas sin `/pegar`**: la primera se envía como mensaje y las demás llegan mientras el agente trabaja, así que se descartan con el aviso de FR-003.
 - **Archivo adjunto vacío**: se informa al solicitante que el archivo está vacío y no se envía como documento.
 - **Archivo con extensión `.txt` o `.md` pero contenido no legible como texto**: se trata como documento no soportado (US4, escenario 3).
 - **Caso de prueba que referencia un documento inexistente**: la carga falla antes de enviar nada (US5, escenario 4).
@@ -156,7 +157,7 @@ Como persona que prepara la demo, quiero iniciar la interfaz con un solo comando
 
 **Documentos**
 
-- **FR-012**: El solicitante MUST poder pegar texto de varias líneas como un solo mensaje, que llega completo al agente.
+- **FR-012**: El solicitante MUST poder pegar texto de varias líneas como un solo mensaje, que llega completo al agente, mediante el comando de pegado (`/pegar` … `/fin`, research R8). La ayuda y el README MUST advertir que, sin ese comando, solo se envía la primera línea.
 - **FR-013**: El solicitante MUST poder adjuntar archivos `.txt` o `.md`. Su contenido MUST llegar al agente identificado como documento adjunto con su nombre, y la conversación MUST mostrar que se adjuntó.
 - **FR-014**: Un archivo de otro formato, o que no se puede leer como texto, MUST NOT leerse; la interfaz MUST informar al agente que se adjuntó un documento no soportado (nombre y tipo) para que aplique la regla 5. La interfaz MUST NOT decidir por su cuenta sobre la solicitud.
 - **FR-015**: Los logs MUST registrar solo metadatos de los documentos (nombre, tipo, tamaño), nunca su contenido completo (constitución, Principio VI).

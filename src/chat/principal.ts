@@ -9,24 +9,10 @@ import { fileURLToPath } from "node:url";
 import { conversar } from "../agente/agente.ts";
 import { crearClienteCore } from "../agente/cliente-core.ts";
 import { fijarDestino, registrar } from "../compartido/logs.ts";
+import { arrancarCore, leerOpciones, USO, verificarConfiguracion } from "./arranque.ts";
 import { iniciarChat, type Terminal } from "./chat.ts";
 
-const USO = "Uso: npm run chat [-- --demo] [-- --caso <ruta>]";
 const CARPETA_LOGS = fileURLToPath(new URL("../../logs/", import.meta.url));
-
-type Opciones = { demo: boolean; caso?: string };
-
-function leerOpciones(argumentos: string[]): Opciones | null {
-  const opciones: Opciones = { demo: false };
-  for (let i = 0; i < argumentos.length; i++) {
-    const argumento = argumentos[i];
-    if (argumento === "--demo") opciones.demo = true;
-    else if (argumento === "--caso" && argumentos[i + 1] !== undefined)
-      opciones.caso = argumentos[++i];
-    else return null;
-  }
-  return opciones;
-}
 
 const dosDigitos = (n: number) => String(n).padStart(2, "0");
 const marcaDeTiempo = (d: Date) =>
@@ -40,10 +26,9 @@ async function principal(): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  if (!process.env["ANTHROPIC_API_KEY"]) {
-    process.stderr.write(
-      "Falta ANTHROPIC_API_KEY en el entorno de la sesión. Defínela antes de iniciar (ver .env.example).\n",
-    );
+  const faltante = verificarConfiguracion(process.env);
+  if (faltante !== null) {
+    process.stderr.write(`${faltante}\n`);
     process.exitCode = 1;
     return;
   }
@@ -57,17 +42,14 @@ async function principal(): Promise<void> {
     closeSync(descriptor);
   };
 
-  let core;
-  try {
-    core = await crearClienteCore({ stderr: descriptor });
-  } catch (error) {
-    const causa = error instanceof Error ? error.message : String(error);
-    registrar("error_arranque", { causa }, { nivel: "error" });
+  const arranque = await arrancarCore(() => crearClienteCore({ stderr: descriptor }));
+  if (!arranque.ok) {
     cerrarLogs();
-    process.stderr.write(`No pude arrancar el core de originación: ${causa}\n`);
+    process.stderr.write(`No pude arrancar el core de originación: ${arranque.causa}\n`);
     process.exitCode = 1;
     return;
   }
+  const { core } = arranque;
 
   const salida = process.stdout;
   const esTerminal = Boolean(process.stdin.isTTY && salida.isTTY);

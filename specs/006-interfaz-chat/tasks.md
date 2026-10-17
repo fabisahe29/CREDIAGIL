@@ -268,7 +268,24 @@ description: "Lista de tareas: interfaz de chat"
 - [X] T048 Commit convencional en `8-interfaz-de-chat`, por ejemplo `feat: interfaz de chat con eventos de negocio y casos de prueba (#8)`. Antes:
   - `git status`, para confirmar que no entra `logs/`, ningún `.env` ni archivo temporal;
   - la búsqueda de tokens del quickstart del #3.
-- [ ] T049 Con confirmación del desarrollador: `git push -u origin 8-interfaz-de-chat` y `/ticket-abrir-pr 8`. Se espera que la revisión de cumplimiento dé las 5 reglas como no aplicables; cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
+- [X] T049 Con confirmación del desarrollador: `git push -u origin 8-interfaz-de-chat` y `/ticket-abrir-pr 8`. Se espera que la revisión de cumplimiento dé las 5 reglas como no aplicables; cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
+  - Resultado (2026-10-17): PR #26 sobre `6673dee`; no bloquea. Cumplimiento: las 5 reglas ➖ y 1 restricción baja (la preaprobación solo se emitirá tras la confirmación del servidor MCP; queda para el ticket que la implemente). Código: 4 hallazgos medios y 2 bajos, pendientes de corregir en este mismo PR:
+    - escapar los delimitadores del prompt y del documento;
+    - no acumular eventos entre el intento fallido y el reintento del modelo;
+    - que `escalar` no pueda lanzar;
+    - pruebas del arranque (`principal.ts`);
+    - sanear `tipoArchivo`;
+    - rechazar `--caso --demo`.
+
+    Corregidos los 6, cada uno con su prueba:
+    - `neutralizarEtiquetas` (`src/compartido/etiquetas.ts`) en el prompt, en el contenido de los documentos y en los mensajes escritos;
+    - los eventos de un intento fallido se descartan, y un turno escalado devuelve solo su escalamiento;
+    - `escalar` registra `error_evento_escalamiento` en lugar de lanzar;
+    - `src/chat/arranque.ts` con pruebas de opciones, configuración, falla del core y códigos de salida de `principal.ts`;
+    - `tipoDeArchivo` saneado;
+    - `--caso --demo` → uso y código 2.
+
+    También se ajustaron US4-1 y FR-012 de la spec (hallazgo I1 del análisis) y el contrato de eventos. `npm test` 668/668.
 
 ---
 

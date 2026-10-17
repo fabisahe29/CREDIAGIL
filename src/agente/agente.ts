@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { registrar } from "../compartido/logs.ts";
+import { ETIQUETAS_CONVERSACION, neutralizarEtiquetas } from "../compartido/etiquetas.ts";
 import type { EventoNegocio } from "../compartido/eventos.ts";
 import {
   CLAVE_SERVIDOR,
@@ -39,15 +40,23 @@ export interface TurnoHistorial {
   texto: string;
 }
 
-/** Antepone el historial al mensaje; sin historial, el mensaje va tal cual (compatibilidad con el #7). */
+/**
+ * Antepone el historial al mensaje; sin historial, el mensaje va solo (compatibilidad con el #7).
+ * Ningún texto puede abrir ni cerrar las etiquetas de la conversación: se neutralizan.
+ */
 export function componerPrompt(mensaje: string, historial: readonly TurnoHistorial[]): string {
-  if (historial.length === 0) return mensaje;
+  const seguro = (texto: string) => neutralizarEtiquetas(texto, ETIQUETAS_CONVERSACION);
+  if (historial.length === 0) return seguro(mensaje);
   return [
     "<historial>",
-    ...historial.flatMap((turno) => [`<turno autor="${turno.autor}">`, turno.texto, "</turno>"]),
+    ...historial.flatMap((turno) => [
+      `<turno autor="${turno.autor}">`,
+      seguro(turno.texto),
+      "</turno>",
+    ]),
     "</historial>",
     "<mensaje_nuevo>",
-    mensaje,
+    seguro(mensaje),
     "</mensaje_nuevo>",
   ].join("\n");
 }
@@ -172,13 +181,25 @@ export async function conversar(
       ...(senal.herramienta !== undefined ? { herramienta: senal.herramienta } : {}),
       ...(senal.intentos !== undefined ? { intentos: senal.intentos } : {}),
     };
-    emitirEvento(estado, {
-      tipo: "escalamiento",
-      descripcion: AVISOS[senal.motivo],
-      motivo: senal.motivo,
-      regla: senal.regla,
-      ...(Object.keys(valores).length > 0 ? { valores } : {}),
-    });
+    // Un turno escalado no produjo una respuesta válida: muestra solo su escalamiento. Los eventos
+    // descartados ya quedaron en los logs como evento_negocio.
+    estado.eventos.length = 0;
+    // Escalar nunca puede fallar (Principio VI): si el evento no valida, se registra y se escala igual.
+    try {
+      emitirEvento(estado, {
+        tipo: "escalamiento",
+        descripcion: AVISOS[senal.motivo],
+        motivo: senal.motivo,
+        regla: senal.regla,
+        ...(Object.keys(valores).length > 0 ? { valores } : {}),
+      });
+    } catch (error) {
+      registrar(
+        "error_evento_escalamiento",
+        { correlationId, causa: error instanceof Error ? error.message : String(error) },
+        { nivel: "error" },
+      );
+    }
     return {
       correlationId,
       respuesta: `${AVISOS[senal.motivo]} Referencia: ${correlationId.slice(0, 8)}.`,
@@ -226,6 +247,8 @@ export async function conversar(
   const prompt = componerPrompt(mensaje, historial);
 
   async function intentar(): Promise<Intento> {
+    // Solo cuentan los eventos del intento que se clasifica: los de un intento fallido se descartan.
+    estado.eventos.length = 0;
     const abortController = new AbortController();
     const reloj = setTimeout(() => abortController.abort(), tiempoLimiteMs);
     const options: Options = {

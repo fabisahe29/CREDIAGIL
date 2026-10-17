@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import type { OpcionesConversar, ResultadoConversacion } from "../agente/agente.ts";
 import type { ClienteCore } from "../agente/cliente-core.ts";
+import { ETIQUETAS_DOCUMENTO, neutralizarEtiquetas } from "../compartido/etiquetas.ts";
 import { validarEvento } from "../compartido/eventos.ts";
 import { registrar } from "../compartido/logs.ts";
 import { cargarCaso } from "./casos.ts";
@@ -201,7 +202,8 @@ export function iniciarChat({
 
   async function enviarMensaje(texto: string): Promise<void> {
     escribir(formatearSolicitante(texto, color));
-    await turno(texto);
+    // Un mensaje escrito no puede hacerse pasar por un documento adjunto.
+    await turno(neutralizarEtiquetas(texto, ETIQUETAS_DOCUMENTO));
   }
 
   async function adjuntar(ruta: string, base: string): Promise<void> {

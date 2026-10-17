@@ -4,6 +4,7 @@
 
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
+import { neutralizarEtiquetas } from "../compartido/etiquetas.ts";
 
 export const TAMANO_MAXIMO_BYTES = 256 * 1024;
 const EXTENSIONES_SOPORTADAS = new Set([".txt", ".md"]);
@@ -25,7 +26,16 @@ export type DocumentoLeido =
 export type DocumentoEnviable = Extract<DocumentoLeido, { tipo: "soportado" | "no_soportado" }>;
 
 /** Nombre base sin caracteres que rompan el bloque <documento nombre="…">. */
-export const nombreSeguro = (ruta: string) => basename(ruta).replace(/["<>]/g, "_");
+/** Quita comillas y ángulos, que romperían un atributo del bloque <documento …>. */
+const sinCaracteresDeBloque = (texto: string) => texto.replace(/["<>]/g, "_");
+
+export const nombreSeguro = (ruta: string) => sinCaracteresDeBloque(basename(ruta));
+
+/** Extensión en minúsculas, sin el punto y sin caracteres que rompan el bloque. */
+export function tipoDeArchivo(ruta: string): string {
+  const extension = extname(ruta).toLowerCase();
+  return extension === "" ? "sin extensión" : sinCaracteresDeBloque(extension.slice(1));
+}
 
 export async function leerDocumento(ruta: string, directorioBase: string): Promise<DocumentoLeido> {
   const completa = resolve(directorioBase, ruta);
@@ -34,7 +44,7 @@ export async function leerDocumento(ruta: string, directorioBase: string): Promi
 
   const nombre = nombreSeguro(completa);
   const extension = extname(completa).toLowerCase();
-  const tipoArchivo = extension === "" ? "sin extensión" : extension.slice(1);
+  const tipoArchivo = tipoDeArchivo(completa);
   const noSoportado = (motivo: MotivoNoSoportado): DocumentoLeido => ({
     tipo: "no_soportado",
     nombre,
@@ -59,13 +69,16 @@ export async function leerDocumento(ruta: string, directorioBase: string): Promi
   return { tipo: "soportado", nombre, contenido, bytes: bytes.length };
 }
 
-/** Mensaje que recibe el agente: el contenido va delimitado y nunca puede cerrar el bloque. */
+/**
+ * Mensaje que recibe el agente. El contenido va delimitado y no puede abrir ni cerrar ninguna
+ * etiqueta del prompt, en ninguna variante (`</DOCUMENTO >`, `</historial>`…).
+ */
 export function componerMensaje(documento: DocumentoEnviable): string {
   const encabezado = `Adjunto el documento ${documento.nombre}.`;
   if (documento.tipo === "no_soportado") {
     return `${encabezado}\n<documento_no_soportado nombre="${documento.nombre}" tipo="${documento.tipoArchivo}" motivo="${documento.motivo}"/>`;
   }
-  const contenido = documento.contenido.replaceAll("</documento>", String.raw`<\/documento>`);
+  const contenido = neutralizarEtiquetas(documento.contenido);
   return `${encabezado}\n<documento nombre="${documento.nombre}">\n${contenido}\n</documento>`;
 }
 
