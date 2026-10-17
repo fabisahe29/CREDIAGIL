@@ -83,7 +83,7 @@ Una conversación sin registro en el core responde `verificada: false`, como est
 | `idIntento` | string | 1 a 64 caracteres; lo genera el adaptador, un UUID por llamada del modelo |
 | `respuesta` | `Respuesta<{ identidad: EstadoIdentidad }>` | la que se devolvió la primera vez |
 
-Un `idIntento` repetido devuelve la `respuesta` guardada sin contar otro intento ni auditar (Principio VI; R4).
+Solo se guardan los fallos. Un `idIntento` repetido tras un fallo devuelve la `respuesta` guardada sin contar otro intento ni auditar (Principio VI; R4). Un éxito repetido se evalúa contra el estado actual.
 
 ## DecisionRegla1 — `src/politica/identidad.ts`
 
@@ -105,8 +105,10 @@ Resultado de `evaluarRegla1(estado: EstadoIdentidad, idSolicitanteAccion?: strin
 |-------|------|-----|
 | `busquedasAmbiguas` | entero ≥ 0 | la segunda búsqueda ambigua seguida escala con el motivo `identidad_ambigua`; una búsqueda con una sola coincidencia lo reinicia (R6) |
 | `ambiguaEnTurno` | boolean | si ya contó una búsqueda ambigua en el turno; `conversar` lo reinicia en cada intento (R6) |
+| `desambiguada` | boolean | ya hubo una búsqueda con una sola coincidencia; viaja entre turnos como el contador (R6) |
+| `coincidenciasAmbiguas` | entero | coincidencias de la última búsqueda ambigua contada, para la señal |
 
-`SenalEscalamiento.motivo` suma `identidad_ambigua` e `identidad_no_verificable`. `SenalEscalamiento` suma el campo opcional `coincidencias` (entero ≥ 2), que solo se usa con `identidad_ambigua`.
+`SenalEscalamiento.motivo` suma `identidad_ambigua`, `identidad_no_verificable`, `pide_persona` y `caso_no_cubierto` (FR-011b). Suma también el campo opcional `causa` (`moneda_extranjera`, `documento_no_soportado` u `otro`), que solo se usa con `caso_no_cubierto`. `SenalEscalamiento` suma el campo opcional `coincidencias` (entero ≥ 2), que solo se usa con `identidad_ambigua`.
 
 ## Errores nuevos del contrato
 

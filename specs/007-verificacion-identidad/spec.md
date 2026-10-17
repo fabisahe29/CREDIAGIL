@@ -113,7 +113,7 @@ Como equipo, quiero un juego de datos ficticios con un solicitante único, dos h
 
 ### Edge Cases
 
-- **El solicitante pide hablar con una persona antes de identificarse**: la Regla 4 va antes que la Regla 1; el agente no busca ni verifica, escala de inmediato (lo implementa #15/#16; aquí solo no se interpone).
+- **El solicitante pide hablar con una persona antes de identificarse**: la Regla 4 va antes que la Regla 1. El agente no busca ni verifica: llama a `solicitar_analista` y el código escala de inmediato (FR-011b). El #15 y el #16 ampliarán el escalamiento.
 - **El solicitante hace solo preguntas generales** (tasa, requisitos): el agente responde sin pedir identificación; la pide cuando quiere iniciar la solicitud (FR-011).
 - **El solicitante adjunta un certificado o extracto antes de identificarse**: el agente no lo procesa y pide primero la identificación (FR-011a).
 - **El solicitante da un documento con puntos, espacios o guiones**: se normaliza antes de buscar; no cuenta como dato mal formado.
@@ -149,6 +149,7 @@ Como equipo, quiero un juego de datos ficticios con un solicitante único, dos h
 - **FR-010**: Ninguna respuesta de verificación fallida MUST revelar el dato correcto ni pistas sobre él.
 - **FR-011**: El agente MUST pedir la identificación **al inicio del trámite**: en cuanto el solicitante expresa que quiere iniciar una solicitud, y antes de pedir, recibir o procesar documentos de soporte o datos de la solicitud. Las preguntas generales (tasa, requisitos, cómo funciona) se responden sin identificar. Las reglas 4 (pedir una persona) y 5 (caso no cubierto) se evalúan antes y, si aplican, se escala sin pedir identificación (orden 4 → 5 → 1 → 3 → 2).
 - **FR-011a**: Si el solicitante entrega un documento de soporte antes de estar verificado, el agente MUST NOT extraer ni usar su contenido; MUST pedir primero la identificación y, una vez verificada, solicitar de nuevo el documento o retomarlo. En este ticket se cumple por la instrucción del sistema. La garantía por código llega cuando la herramienta de extracción del #10 entre en la lista del control de identidad (FR-014).
+- **FR-011b** *(agregado tras la revisión de cumplimiento del PR)*: Las reglas 4 y 5 MUST evaluarse antes que la Regla 1 y escalar por código. El modelo solo clasifica el caso con un motivo tipado (`pide_persona`, o `caso_no_cubierto` con su causa) mediante la herramienta `solicitar_analista`. El código deja la señal de escalamiento con la regla, emite el evento `escalamiento` y registra la auditoría. Desde ese momento, ninguna otra herramienta, tampoco las de identificación, se ejecuta en la conversación. Es un adelanto acotado del #15 y el #16, que lo ampliarán.
 
 **Estado de identidad**
 

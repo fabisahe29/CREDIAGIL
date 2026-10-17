@@ -229,3 +229,32 @@ describe("control de identidad: solicitante de la acción (cambio de identidad)"
     assert.deepEqual(await invocar(conEntrada({ idSolicitante: "CLI-0001000001" })), {});
   });
 });
+
+describe("control de identidad: conversación escalada (reglas 4 y 5 antes que la 1)", () => {
+  it("tras un escalamiento bloquea cualquier herramienta de originacion, sin consultar al core", async (t) => {
+    const logs = capturarStderr(t);
+    const { invocar, estado, llamadas } = preparar([]);
+    estado.escalamiento = {
+      motivo: "pide_persona",
+      regla: "Regla 4 · el solicitante pide hablar con una persona",
+      resultado: "escalada",
+      correlationId: estado.correlationId,
+      ts: new Date().toISOString(),
+      herramienta: "solicitar_analista",
+    };
+    for (const nombre of ["buscar_solicitante", "verificar_identidad", HERRAMIENTA]) {
+      const salida = await invocar(entrada(`mcp__originacion__${nombre}`));
+      assert.equal(decision(salida), "deny", nombre);
+      assert.equal(
+        (salida as { hookSpecificOutput: { permissionDecisionReason: string } }).hookSpecificOutput
+          .permissionDecisionReason,
+        "La conversación ya pasó a un analista; no se ejecutan más herramientas.",
+      );
+    }
+    assert.equal(llamadas(), 0);
+    assert.deepEqual(estado.eventos, []);
+    assert.ok(
+      logs().some((l) => l["evento"] === "control_identidad" && l["decision"] === "escalada"),
+    );
+  });
+});

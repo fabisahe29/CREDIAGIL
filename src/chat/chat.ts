@@ -166,6 +166,7 @@ export function iniciarChat({
         correlationId: conv.correlationId,
         historial: conv.historial,
         busquedasAmbiguas: conv.busquedasAmbiguas,
+        desambiguada: conv.desambiguada,
         ...(demo
           ? { alUsarHerramienta: (info) => escribir(formatearHerramienta(info, color)) }
           : {}),
@@ -189,6 +190,7 @@ export function iniciarChat({
         resultado.respuesta,
       ),
       busquedasAmbiguas: resultado.busquedasAmbiguas,
+      desambiguada: resultado.desambiguada,
     };
     escribir(formatearAgente(resultado.respuesta, color));
     const mostrados = (resultado.eventos as unknown[]).map(mostrar);

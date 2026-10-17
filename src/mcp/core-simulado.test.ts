@@ -553,3 +553,32 @@ describe("core simulado: cambio de solicitante en la conversación (caso borde d
     assert.equal(verificada(core)?.verificada, true);
   });
 });
+
+describe("core simulado: idempotencia solo de los fallos (revisión de código de dea0951)", () => {
+  const HOY = new Date("2026-10-17T12:00:00.000Z");
+  const CID = "00000000-0000-4000-8000-00000000d001";
+
+  it("A correcto, B, y A otra vez con la misma clave: la respuesta refleja el estado actual", () => {
+    const core = crearCore({ ahora: () => HOY });
+    const fechaA = solicitante(ID_HOMONIMO_1).fechaExpedicion;
+    const intentoA = {
+      idSolicitante: ID_HOMONIMO_1,
+      fechaExpedicion: fechaA,
+      idIntento: "k-a",
+      correlationId: CID,
+    };
+    assert.equal(core.verificarIdentidad(intentoA).respuesta.ok, true);
+    core.verificarIdentidad({
+      idSolicitante: ID_HOMONIMO_2,
+      fechaExpedicion: "2001-01-01",
+      idIntento: "k-b",
+      correlationId: CID,
+    });
+    const otraVez = core.verificarIdentidad(intentoA);
+    assert.equal(otraVez.respuesta.ok, true);
+    const estado = core.consultarIdentidad(CID);
+    assert.equal(estado.ok && estado.datos.identidad.verificada, true);
+    assert.equal(estado.ok && estado.datos.identidad.idSolicitante, ID_HOMONIMO_1);
+    assert.equal(otraVez.auditoria?.resultado, "verificada", "se volvió a verificar de verdad");
+  });
+});

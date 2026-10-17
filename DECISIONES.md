@@ -44,27 +44,27 @@ Un hook del Agent SDK consulta `consultar_identidad` en el core antes de las her
 
 ### Decisión 5: desambiguación y escalamiento decididos por el adaptador
 
-Ante homónimos, el código emite `solicitud_de_dato` pidiendo el número de documento. Una segunda búsqueda ambigua seguida escala con el motivo `identidad_ambigua`, y una verificación bloqueada, con `identidad_no_verificable`. Una búsqueda con una sola coincidencia reinicia el contador, porque el modelo repite la búsqueda en cada turno; sin el reinicio, repetirla por nombre después de dar el documento escalaba por error. Dentro de un turno cuenta una sola búsqueda ambigua, porque el solicitante todavía no pudo responder.
-
-### Decisión 6: el orden 4 → 5 → 1 va primero en el system prompt
-
-Antes de pedir la identificación, el prompt indica escalar sin buscar ni pedir datos si el solicitante pide una persona o si su caso no está cubierto por la política.
-
-**Motivo**: la revisión de cumplimiento de `d37d3a7` bloqueó el PR porque el prompt pedía identificar «primero», sin precedencia para las reglas 4 y 5 (constitución, orden de evaluación obligatorio).
-
-**Alternativa descartada**: detectar por código la petición de una persona en este ticket. Es el alcance del #15 y el #16, y hacerlo aquí exigiría interpretar texto libre sin su diseño.
-
-### Decisión 7: la verificación no se transfiere a otro solicitante
-
-Un intento de verificación sobre otro solicitante invalida la verificación anterior de la conversación. `evaluarRegla1` puede recibir el solicitante de la acción y exigir que sea el verificado.
-
-**Motivo**: es el caso borde de la spec, y evita que el #13 herede un control que permita registrar a nombre de quien no se verificó.
-
-**Alternativa descartada**: guardar varias identidades verificadas por conversación (no lo pide la spec y complica la Regla 1).
+Ante homónimos, el código emite `solicitud_de_dato` pidiendo el número de documento. Si la ambigüedad sigue en un turno posterior, escala con el motivo `identidad_ambigua`; una verificación bloqueada escala con `identidad_no_verificable`. El escalamiento por ambigüedad se decide al cerrar el turno, no en la llamada: así no depende del orden en que el modelo llama a las herramientas. Dentro de un turno cuenta una sola búsqueda ambigua. Una búsqueda con una sola coincidencia desambigua la conversación: las búsquedas ambiguas posteriores ya no cuentan ni vuelven a pedir el documento, porque el modelo repite la búsqueda en cada turno.
 
 **Motivo**: los eventos y los escalamientos los decide el código, nunca el modelo (Decisión 2 del #8; Principio III).
 
 **Alternativa descartada**: instruir al modelo para que escale (no es determinista).
+
+### Decisión 6: las reglas 4 y 5 escalan por código con `solicitar_analista`
+
+El modelo clasifica el caso con un motivo tipado (`pide_persona` o `caso_no_cubierto`, con su causa) al llamar a `solicitar_analista`, una herramienta del adaptador sin datos del solicitante. El código escala: deja la señal con la regla, emite el evento y registra la auditoría. A partir de ahí, el control `PreToolUse` niega cualquier otra herramienta, incluidas las de identificación. El system prompt pide usarla antes de identificar (orden 4 → 5 → 1).
+
+**Motivo**: las revisiones de cumplimiento de `d37d3a7` y `dea0951` bloquearon el PR. Con solo el prompt, el modelo decía «tu caso pasa a un analista» sin que nada escalara, mientras que la Regla 1 sí se aplicaba por código. El Principio III permite que el modelo comprenda y extraiga datos estructurados; la decisión y el efecto quedan en el código. Es un adelanto acotado del #15 y el #16, que lo ampliarán (resumen para el analista, detección más robusta).
+
+**Alternativas descartadas**: solo la instrucción del prompt (no escala de verdad); un clasificador previo con una llamada extra al modelo en cada turno (más costo y complejidad de lo que pide este ticket); quitar las herramientas de identificación hasta el #15 (el ticket no entregaría su valor).
+
+### Decisión 7: la verificación no se transfiere a otro solicitante
+
+Un intento de verificación sobre otro solicitante invalida la verificación anterior de la conversación. `evaluarRegla1` puede recibir el solicitante de la acción y exigir que sea el verificado. Para que una respuesta repetida no contradiga el estado, el core guarda por `idIntento` solo los fallos; un éxito repetido se evalúa contra el estado actual.
+
+**Motivo**: es el caso borde de la spec, y evita que el #13 herede un control que permita registrar a nombre de quien no se verificó.
+
+**Alternativa descartada**: guardar varias identidades verificadas por conversación (no lo pide la spec y complica la Regla 1).
 
 ---
 

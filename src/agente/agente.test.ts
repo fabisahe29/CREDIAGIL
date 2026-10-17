@@ -859,7 +859,7 @@ describe("agente: orden de evaluación 4 → 5 → 1 en el systemPrompt (#9, rev
     const prompt = await promptDelSistema(t);
     assert.match(
       prompt,
-      /Si el solicitante pide hablar con una persona, no lo busques ni le pidas datos: dile de inmediato que su caso pasa a un analista\./,
+      /Si el solicitante pide hablar con una persona, no lo busques ni le pidas datos: llama de inmediato a solicitar_analista con motivo pide_persona./,
     );
   });
 
@@ -867,7 +867,7 @@ describe("agente: orden de evaluación 4 → 5 → 1 en el systemPrompt (#9, rev
     const prompt = await promptDelSistema(t);
     assert.match(
       prompt,
-      /Si el caso no está cubierto por la política, por ejemplo ingresos en moneda extranjera o un documento no soportado, tampoco lo identifiques: dile que su caso pasa a un analista\./,
+      /Si el caso no está cubierto por la política, por ejemplo ingresos en moneda extranjera o un documento no soportado, tampoco lo identifiques: llama a solicitar_analista con motivo caso_no_cubierto y la causa./,
     );
   });
 
@@ -919,5 +919,51 @@ describe("agente: idempotencia de la verificación al repetir el turno del model
     assert.equal(llamadas.length, 2);
     assert.equal(claves.length, 2);
     assert.equal(claves[0], claves[1], "el reintento del turno debe repetir la clave");
+  });
+});
+
+describe("agente: escalamiento real de las reglas 4 y 5 (#9, revisión de cumplimiento)", () => {
+  it("pide_persona cierra el turno escalado, con aviso, regla y evento", async (t) => {
+    const logs = capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({ motivo: "pide_persona" });
+        return [resultado("success", "end_turn", "Te comunico con un analista.")];
+      },
+    ]);
+    const r = await conversar("Quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      core,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.match(r.respuesta, /^Te comunico con un analista de crédito, que te contactará\./);
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.equal(evento?.regla, "Regla 4 · el solicitante pide hablar con una persona");
+    assert.deepEqual(evento?.valores, { herramienta: "solicitar_analista" });
+    assert.ok(logs().some((l) => l["evento"] === "escalamiento" && l["motivo"] === "pide_persona"));
+  });
+
+  it("caso_no_cubierto escala con la Regla 5 y la causa en los valores", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({
+          motivo: "caso_no_cubierto",
+          causa: "moneda_extranjera",
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar("Gano en dólares", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.equal(r.tipo, "escalada");
+    assert.match(r.respuesta, /^Tu caso necesita la revisión de un analista, que te contactará\./);
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.equal(evento?.regla, "Regla 5 · caso no cubierto por la política");
+    assert.deepEqual(evento?.valores, {
+      herramienta: "solicitar_analista",
+      causa: "moneda_extranjera",
+    });
   });
 });

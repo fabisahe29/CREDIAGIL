@@ -60,6 +60,7 @@ const resultado = (
   turnos: 1,
   eventos: [],
   busquedasAmbiguas: 0,
+  desambiguada: false,
   ...extra,
 });
 
@@ -237,7 +238,7 @@ describe("chat: conversación turno a turno (US1)", () => {
 
   it("lleva el contador de búsquedas ambiguas entre turnos y /nueva lo vuelve a 0 (#9)", async () => {
     const chat = arrancar([
-      () => resultado("¿Tu documento?", { busquedasAmbiguas: 1 }),
+      () => resultado("¿Tu documento?", { busquedasAmbiguas: 1, desambiguada: true }),
       () => resultado("Ok"),
     ]);
     chat.linea("Soy Elena Martínez Inventada");
@@ -246,10 +247,12 @@ describe("chat: conversación turno a turno (US1)", () => {
     chat.linea("Elena Martínez Inventada");
     await hasta(() => chat.llamadas.length === 2 && chat.salida.includes("Agente: Ok"));
     assert.equal(chat.llamadas[1]!.opciones.busquedasAmbiguas, 1);
+    assert.equal(chat.llamadas[1]!.opciones.desambiguada, true);
     chat.linea("/nueva");
     chat.linea("Hola");
     await hasta(() => chat.llamadas.length === 3);
     assert.equal(chat.llamadas[2]!.opciones.busquedasAmbiguas, 0);
+    assert.equal(chat.llamadas[2]!.opciones.desambiguada, false);
   });
 
   it("/salir termina y cierra el core una vez", async () => {

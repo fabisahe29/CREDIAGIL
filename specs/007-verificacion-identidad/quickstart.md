@@ -69,3 +69,10 @@ Con el servidor `crediagil-core` habilitado en Claude Code, un mismo `correlatio
 ## Escenario 6: preguntas generales sin identificar (FR-011)
 
 1. `/nueva`, `¿Qué documentos necesito para pedir un crédito?`. Esperado: el agente responde sin pedir identificación ni llamar a `buscar_solicitante` (verificable con `--demo`).
+
+## Escenario 7: reglas 4 y 5 antes de identificar (FR-011b)
+
+Con `npm run chat -- --demo`:
+
+1. `Hola, quiero hablar con una persona`. Esperado: una sola línea `herramienta solicitar_analista · intento 1 · ok`, ninguna `buscar_solicitante`, y `[ESCALAMIENTO]` con «Regla 4 · el solicitante pide hablar con una persona». La conversación se cierra.
+2. `/nueva`, `Quiero un crédito; mis ingresos son en dólares`. Esperado: `solicitar_analista` y `[ESCALAMIENTO]` con «Regla 5 · caso no cubierto por la política» y `causa = moneda_extranjera`, sin buscar ni pedir el documento.

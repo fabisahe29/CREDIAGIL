@@ -42,7 +42,8 @@ Orden de evaluación (R4):
 
 - Ningún mensaje de error incluye la fecha guardada ni pistas sobre ella (FR-010).
 - Repetir una verificación correcta del mismo solicitante devuelve el mismo `EstadoIdentidad`, con la misma `verificadaEn`, y no escribe otra auditoría (FR-016).
-- Un `idIntento` repetido en la misma conversación devuelve la respuesta guardada: no cuenta otro intento ni escribe otra auditoría (Principio VI; R4).
+- Un `idIntento` repetido tras un **fallo** devuelve el mismo fallo: no cuenta otro intento ni escribe otra auditoría (Principio VI; R4). Los éxitos no se guardan: repetidos, se evalúan contra el estado actual, que pudo cambiar.
+- Un intento sobre otro solicitante (que existe) invalida la verificación anterior de la conversación: no se transfiere.
 - Cada verificación escribe en stderr `{ "evento": "auditoria", "regla": "Regla 1", "correlationId", "idSolicitante", "resultado", "intentosFallidos", "ts" }`, **sin** fechas (R9). Esto incluye el caso 1, con `resultado: "formato_invalido"` y su `campo`. Solo una repetición exitosa o un `idIntento` repetido no la escriben.
 
 ## `consultar_identidad`

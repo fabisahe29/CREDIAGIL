@@ -7,6 +7,7 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import {
   aResultadoMcp,
+  exito,
   fallo,
   transitorioAgotado,
   type Categoria,
@@ -27,7 +28,9 @@ export interface SenalEscalamiento {
     | "limite_de_turnos"
     | "respuesta_incompleta"
     | "identidad_ambigua"
-    | "identidad_no_verificable";
+    | "identidad_no_verificable"
+    | "pide_persona"
+    | "caso_no_cubierto";
   regla: string;
   resultado: "escalada";
   correlationId: string;
@@ -37,7 +40,12 @@ export interface SenalEscalamiento {
   ultimoError?: string;
   /** Número de coincidencias de la búsqueda ambigua (motivo identidad_ambigua). */
   coincidencias?: number;
+  /** Causa de un caso no cubierto (motivo caso_no_cubierto). */
+  causa?: CausaNoCubierto;
 }
+
+export const CAUSAS_NO_CUBIERTO = ["moneda_extranjera", "documento_no_soportado", "otro"] as const;
+export type CausaNoCubierto = (typeof CAUSAS_NO_CUBIERTO)[number];
 
 /** Un intento de llamada al core, para el modo de demostración del chat (R5 del #8). */
 export interface InfoHerramienta {
@@ -58,6 +66,10 @@ export interface EstadoConversacion {
   busquedasAmbiguas: number;
   /** Si ya contó una búsqueda ambigua en este turno: dentro de un turno cuenta una sola. */
   ambiguaEnTurno: boolean;
+  /** Ya hubo una búsqueda con una sola coincidencia en la conversación: no se vuelve a pedir el documento. */
+  desambiguada: boolean;
+  /** Coincidencias de la última búsqueda ambigua contada, para el escalamiento. */
+  coincidenciasAmbiguas: number;
 }
 
 export const crearEstado = (correlationId: string): EstadoConversacion => ({
@@ -66,9 +78,27 @@ export const crearEstado = (correlationId: string): EstadoConversacion => ({
   eventos: [],
   busquedasAmbiguas: 0,
   ambiguaEnTurno: false,
+  desambiguada: false,
+  coincidenciasAmbiguas: 0,
 });
 
 export const REGLA_AMBIGUA = "Regla 1 · coincidencias sin desambiguar";
+
+/**
+ * Al cerrar el turno se decide el escalamiento por identidad ambigua (FR-006): escala si la
+ * ambigüedad sigue tras pedir el documento en un turno anterior. Decidirlo al final del turno, y no
+ * en la llamada, hace que el resultado no dependa del orden en que el modelo llama a las
+ * herramientas: una búsqueda por documento en el mismo turno desambigua (revisión de dea0951).
+ */
+export function cerrarTurnoIdentidad(estado: EstadoConversacion): void {
+  if (estado.busquedasAmbiguas < 2) return;
+  dejarSenal(estado, {
+    motivo: "identidad_ambigua",
+    regla: REGLA_AMBIGUA,
+    herramienta: "buscar_solicitante",
+    coincidencias: estado.coincidenciasAmbiguas,
+  });
+}
 
 /**
  * Emite un evento de negocio: solo desde código determinista, nunca a partir del texto del modelo
@@ -140,6 +170,28 @@ const esquemaVerificar = {
 const DESCRIPCION_VERIFICAR = `Verifica la identidad de un solicitante encontrado con la fecha de expedición de su documento (AAAA-MM-DD). Si el dato no coincide, informa sin revelar el dato correcto. Tras ${MAX_INTENTOS_VERIFICACION} intentos fallidos la verificación queda bloqueada.`;
 
 export const REGLA_NO_VERIFICABLE = `Regla 1 · ${MAX_INTENTOS_VERIFICACION} intentos fallidos de verificación`;
+
+/**
+ * Reglas 4 y 5 (orden 4 → 5 → 1): el modelo solo clasifica el caso con un motivo tipado
+ * (Principio III: comprender y extraer); el escalamiento lo ejecuta el código.
+ */
+const esquemaSolicitarAnalista = {
+  motivo: z
+    .enum(["pide_persona", "caso_no_cubierto"])
+    .describe(
+      "pide_persona: el solicitante pide hablar con una persona. caso_no_cubierto: la política no cubre el caso.",
+    ),
+  causa: z
+    .enum(CAUSAS_NO_CUBIERTO)
+    .optional()
+    .describe("Solo con caso_no_cubierto: por qué no está cubierto."),
+};
+
+const DESCRIPCION_SOLICITAR_ANALISTA =
+  "Pasa el caso a un analista de crédito. Úsala antes que cualquier otra herramienta si el solicitante pide hablar con una persona, o si su caso no está cubierto por la política (ingresos en moneda extranjera, documento no soportado). No pide ni envía datos del solicitante.";
+
+export const REGLA_PIDE_PERSONA = "Regla 4 · el solicitante pide hablar con una persona";
+export const REGLA_NO_CUBIERTO = "Regla 5 · caso no cubierto por la política";
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
@@ -250,25 +302,28 @@ export function crearAdaptador({
     const respuesta = await llamarConReintentos("buscar_solicitante", () =>
       core.buscarSolicitante(criterio, estado.correlationId),
     );
-    if (respuesta.ok && respuesta.datos.coincidencias.length > 1) {
+    if (respuesta.ok && respuesta.datos.coincidencias.length > 1 && !estado.desambiguada) {
       desambiguar(respuesta.datos.coincidencias.length);
     } else if (respuesta.ok && respuesta.datos.coincidencias.length === 1) {
-      // Ya se desambiguó: solo escalan dos búsquedas ambiguas seguidas (FR-006). El modelo repite
-      // la búsqueda en cada turno, y una ambigua posterior no debe escalar por la anterior.
+      // Ya se desambiguó: el modelo repite la búsqueda en cada turno, también por nombre, y una
+      // ambigua posterior no debe escalar ni volver a pedir el documento (FR-006).
       estado.busquedasAmbiguas = 0;
+      estado.desambiguada = true;
     }
     return aResultadoMcp(respuesta);
   }
 
   /**
    * Homónimos: la primera vez se pide el número de documento; si la ambigüedad sigue en un turno
-   * posterior, se escala (FR-005, FR-006). Dentro de un turno cuenta una sola búsqueda ambigua: el
-   * solicitante todavía no pudo responder. Lo decide el código, nunca el modelo (R6).
+   * posterior, se escala al cerrar ese turno (cerrarTurnoIdentidad; FR-005, FR-006). Dentro de un
+   * turno cuenta una sola búsqueda ambigua: el solicitante todavía no pudo responder. Lo decide el
+   * código, nunca el modelo (R6).
    */
   function desambiguar(coincidencias: number): void {
     if (estado.ambiguaEnTurno) return;
     estado.ambiguaEnTurno = true;
     estado.busquedasAmbiguas++;
+    estado.coincidenciasAmbiguas = coincidencias;
     if (estado.busquedasAmbiguas === 1) {
       emitirEvento(estado, {
         tipo: "solicitud_de_dato",
@@ -279,14 +334,7 @@ export function crearAdaptador({
         regla: REGLA_AMBIGUA,
         valores: { coincidencias },
       });
-      return;
     }
-    senal({
-      motivo: "identidad_ambigua",
-      regla: REGLA_AMBIGUA,
-      herramienta: "buscar_solicitante",
-      coincidencias,
-    });
   }
 
   async function verificar({
@@ -315,10 +363,30 @@ export function crearAdaptador({
     return aResultadoMcp(respuesta);
   }
 
+  /** Reglas 4 y 5: escala por código, sin llamar al core ni pedir datos (FR-011b). */
+  function solicitarAnalista({
+    motivo,
+    causa,
+  }: {
+    motivo: "pide_persona" | "caso_no_cubierto";
+    causa?: CausaNoCubierto;
+  }) {
+    senal({
+      motivo,
+      regla: motivo === "pide_persona" ? REGLA_PIDE_PERSONA : REGLA_NO_CUBIERTO,
+      herramienta: "solicitar_analista",
+      ...(motivo === "caso_no_cubierto" && causa !== undefined ? { causa } : {}),
+    });
+    // No llama al core, pero el modo de demostración también la muestra.
+    avisarObservador({ herramienta: "solicitar_analista", intento: 1, resultado: "ok" });
+    return aResultadoMcp(exito({ escalada: true }));
+  }
+
   const herramientas = {
     consultar_solicitud: { esquema: esquemaConsultar, manejar: consultar },
     buscar_solicitante: { esquema: esquemaBuscar, manejar: buscar },
     verificar_identidad: { esquema: esquemaVerificar, manejar: verificar },
+    solicitar_analista: { esquema: esquemaSolicitarAnalista, manejar: solicitarAnalista },
   };
 
   const servidor = createSdkMcpServer({
@@ -343,6 +411,12 @@ export function crearAdaptador({
       ),
       tool("verificar_identidad", DESCRIPCION_VERIFICAR, esquemaVerificar, (argumentos) =>
         verificar(argumentos),
+      ),
+      tool(
+        "solicitar_analista",
+        DESCRIPCION_SOLICITAR_ANALISTA,
+        esquemaSolicitarAnalista,
+        (argumentos) => Promise.resolve(solicitarAnalista(argumentos)),
       ),
     ],
   });

@@ -170,7 +170,7 @@ export function crearCore({
   const identidades = new Map<string, EstadoIdentidad>();
   /** Intentos por `${correlationId}|${idSolicitante}` (data-model.md, "IntentosVerificacion"). */
   const intentos = new Map<string, { fallidos: number; bloqueada: boolean }>();
-  /** Respuesta por `${correlationId}|${idIntento}`, para la idempotencia (R4). */
+  /** Fallo por `${correlationId}|${idIntento}`, para la idempotencia (R4); los éxitos no se guardan. */
   const respuestasPorIntento = new Map<string, RespuestaIdentidad>();
 
   /** Valida y evalúa un intento en el orden de R4; no guarda la respuesta. */
@@ -379,7 +379,9 @@ export function crearCore({
       // El mismo intento reenviado (p. ej. un reintento tras un tiempo agotado) no cuenta dos veces.
       if (previa !== undefined) return { respuesta: structuredClone(previa), auditoria: null };
       const respuesta = evaluarIntento(entrada, auditar);
-      respuestasPorIntento.set(claveIntento, structuredClone(respuesta));
+      // Solo se guardan los fallos, que son los que no deben contarse dos veces. Un éxito repetido
+      // se evalúa contra el estado actual: si se invalidó, vuelve a verificar (revisión de dea0951).
+      if (!respuesta.ok) respuestasPorIntento.set(claveIntento, structuredClone(respuesta));
       return { respuesta, auditoria };
     },
 

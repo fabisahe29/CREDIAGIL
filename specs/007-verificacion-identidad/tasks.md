@@ -298,6 +298,14 @@ Cada `caso.json` sigue el formato de `casos/demo-consulta/caso.json`: `nombre` (
     - **Idempotencia**: el `idIntento` es por dato del turno, así que el reintento del turno del modelo ya no cuenta dos fallos.
     - **Homónimos**: dentro de un turno cuenta una sola búsqueda ambigua (`ambiguaEnTurno`).
     - **Cambio de solicitante**: el core invalida la verificación anterior y `evaluarRegla1` puede exigir el solicitante de la acción (Decisión 7).
+  - Segunda revisión (2026-10-17) sobre `dea0951`: ⛔ bloquea. Cumplimiento: reglas 4 y 5 ⛔ (crítica): el prompt solo dice «pasa a un analista», pero nada escala de verdad. Código: 0 críticos, 0 altos, 3 medios y 2 bajos. Registros: [código](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6242186264) y [cumplimiento](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6242196308).
+  - Corregido con la opción A, elegida por el desarrollador: FR-011b agregado a la spec y Decisión 6 de DECISIONES.md reescrita.
+    - Herramienta `solicitar_analista` con motivo tipado; el código escala con las reglas 4 y 5, el evento y la auditoría.
+    - El control niega cualquier herramienta en una conversación escalada.
+    - El core guarda por `idIntento` solo los fallos.
+    - El escalamiento por ambigüedad se decide al cerrar el turno, y `desambiguada` viaja entre turnos.
+    - Prueba del orden inverso, nombre y después documento.
+    - DECISIONES.md, Decisión 5, recompuesta.
   - Quedan pendientes los hallazgos bajos: la fecha «hoy» en UTC frente a Bogotá; los fallos sobre un solicitante ya verificado (el bloqueo convive con la verificación); `/nueva` reinicia el contador de intentos; y que el adaptador acepte verificar mientras la última búsqueda es ambigua. También quedan para el #10 y el #13 la lista vacía de herramientas protegidas y FR-011a por código.
 
 ---

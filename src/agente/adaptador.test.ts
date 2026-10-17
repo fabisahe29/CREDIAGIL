@@ -1,7 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { crearAdaptador, crearEstado, emitirEvento } from "./adaptador.ts";
+import {
+  cerrarTurnoIdentidad,
+  crearAdaptador,
+  crearEstado,
+  emitirEvento,
+  type SenalEscalamiento,
+} from "./adaptador.ts";
 import {
   crearClienteCore,
   type ClienteCore,
@@ -408,8 +414,9 @@ describe("adaptador: desambiguación de homónimos por código (#9, US2)", () =>
     );
   });
 
-  /** Lo que `conversar` hace al empezar cada turno (y cada intento del modelo). */
+  /** Lo que `conversar` hace al cerrar un turno y empezar el siguiente. */
   const nuevoTurno = (estado: ReturnType<typeof crearEstado>) => {
+    cerrarTurnoIdentidad(estado);
     estado.ambiguaEnTurno = false;
   };
   const porNombre = { nombre: "Elena Martínez Inventada" };
@@ -436,7 +443,14 @@ describe("adaptador: desambiguación de homónimos por código (#9, US2)", () =>
     await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
     assert.equal(estado.busquedasAmbiguas, 2);
     assert.equal(estado.eventos.length, 1, "la segunda no vuelve a pedir el dato");
-    const senal = estado.escalamiento;
+    assert.equal(
+      estado.escalamiento,
+      null,
+      "no escala en la llamada: se decide al cerrar el turno",
+    );
+    cerrarTurnoIdentidad(estado);
+    // Se relee: TypeScript estrechó escalamiento a null con la aserción anterior.
+    const senal = (estado as { escalamiento: SenalEscalamiento | null }).escalamiento;
     assert.ok(senal, "no quedó la señal de escalamiento");
     assert.equal(senal.motivo, "identidad_ambigua");
     assert.equal(senal.herramienta, "buscar_solicitante");
@@ -454,9 +468,27 @@ describe("adaptador: desambiguación de homónimos por código (#9, US2)", () =>
     nuevoTurno(estado);
     await adaptador.herramientas.buscar_solicitante.manejar({ documento: "0002020202" });
     assert.equal(estado.busquedasAmbiguas, 0);
+    assert.equal(estado.desambiguada, true);
     await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+    nuevoTurno(estado);
     assert.equal(estado.escalamiento, null, "no escala: ya se había desambiguado");
-    assert.equal(estado.busquedasAmbiguas, 1);
+    assert.equal(estado.busquedasAmbiguas, 0);
+    assert.equal(estado.eventos.length, 1, "no vuelve a pedir el documento ya entregado");
+  });
+
+  it("en el turno siguiente, nombre y después documento no escala (orden inverso)", async (t) => {
+    capturarStderr(t);
+    const { core } = coreIdentidad({ busquedas: [HOMONIMOS, HOMONIMOS, UNA] });
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+    nuevoTurno(estado);
+    await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+    await adaptador.herramientas.buscar_solicitante.manejar({ documento: "0002020202" });
+    nuevoTurno(estado);
+    assert.equal(estado.escalamiento, null);
+    assert.equal(estado.busquedasAmbiguas, 0);
+    assert.equal(estado.eventos.length, 1, "no vuelve a pedir el documento");
   });
 
   it("sin coincidencias no reinicia el contador: dos ambiguas en turnos seguidos escalan", async (t) => {
@@ -465,8 +497,8 @@ describe("adaptador: desambiguación de homónimos por código (#9, US2)", () =>
     const estado = crearEstado(randomUUID());
     const adaptador = crearAdaptador({ core, estado });
     for (let i = 0; i < 3; i++) {
-      nuevoTurno(estado);
       await adaptador.herramientas.buscar_solicitante.manejar(porNombre);
+      nuevoTurno(estado);
     }
     assert.equal(estado.escalamiento?.motivo, "identidad_ambigua");
   });
@@ -656,6 +688,85 @@ describe("adaptador: consultar_identidad no se expone al modelo (#9, US4)", () =
       "consultar_solicitud",
       "buscar_solicitante",
       "verificar_identidad",
+      "solicitar_analista",
     ]);
+  });
+});
+describe("adaptador: solicitar_analista, reglas 4 y 5 por código (#9, revisión de cumplimiento)", () => {
+  it("expone solicitar_analista con motivo y causa, sin datos del solicitante", () => {
+    const { core } = coreIdentidad();
+    const adaptador = crearAdaptador({
+      core,
+      estado: crearEstado(randomUUID()),
+    });
+    assert.deepEqual(Object.keys(adaptador.herramientas.solicitar_analista.esquema), [
+      "motivo",
+      "causa",
+    ]);
+  });
+
+  it("pide_persona escala de inmediato con la Regla 4, sin llamar al core", async (t) => {
+    const logs = capturarStderr(t);
+    const { core, llamadas } = coreIdentidad();
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    const resultado = await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "pide_persona",
+    });
+    assert.equal(resultado.isError, false);
+    assert.deepEqual(resultado.structuredContent, {
+      ok: true,
+      datos: { escalada: true },
+    });
+    assert.equal(llamadas.length, 0);
+    const senal = estado.escalamiento;
+    assert.ok(senal, "no quedó la señal");
+    assert.equal(senal.motivo, "pide_persona");
+    assert.equal(senal.regla, "Regla 4 · el solicitante pide hablar con una persona");
+    assert.equal(senal.herramienta, "solicitar_analista");
+    assert.ok(logs().some((l) => l["evento"] === "escalamiento" && l["motivo"] === "pide_persona"));
+  });
+
+  it("caso_no_cubierto escala con la Regla 5 y la causa", async (t) => {
+    capturarStderr(t);
+    const { core } = coreIdentidad();
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "caso_no_cubierto",
+      causa: "moneda_extranjera",
+    });
+    assert.equal(estado.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(estado.escalamiento?.regla, "Regla 5 · caso no cubierto por la política");
+    assert.equal(estado.escalamiento?.causa, "moneda_extranjera");
+  });
+
+  it("si ya hubo otro escalamiento, la primera señal prevalece", async (t) => {
+    capturarStderr(t);
+    const { core } = coreIdentidad();
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "pide_persona",
+    });
+    await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "caso_no_cubierto",
+    });
+    assert.equal(estado.escalamiento?.motivo, "pide_persona");
+  });
+});
+
+describe("adaptador: solicitar_analista en el modo de demostración", () => {
+  it("avisa al observador una vez, como ok", async (t) => {
+    capturarStderr(t);
+    const { core } = coreIdentidad();
+    const infos: unknown[] = [];
+    const adaptador = crearAdaptador({
+      core,
+      estado: crearEstado(randomUUID()),
+      alUsarHerramienta: (info) => void infos.push(info),
+    });
+    await adaptador.herramientas.solicitar_analista.manejar({ motivo: "pide_persona" });
+    assert.deepEqual(infos, [{ herramienta: "solicitar_analista", intento: 1, resultado: "ok" }]);
   });
 });

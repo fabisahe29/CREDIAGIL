@@ -31,6 +31,7 @@ const PREFIJO = `mcp__${CLAVE_SERVIDOR}__`;
 const MOTIVO_SIN_IDENTIDAD = "Regla 1: la identidad del solicitante no está verificada.";
 const MOTIVO_SIN_RESPUESTA = "No se pudo comprobar la identidad; no se continúa.";
 const MOTIVO_OTRO_SOLICITANTE = "Regla 1: la identidad verificada es de otro solicitante.";
+const MOTIVO_ESCALADA = "La conversación ya pasó a un analista; no se ejecutan más herramientas.";
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
@@ -128,6 +129,16 @@ export function crearControlIdentidad({
     if (entrada.hook_event_name !== "PreToolUse") return {};
     if (!entrada.tool_name.startsWith(PREFIJO)) return {};
     const herramienta = entrada.tool_name.slice(PREFIJO.length);
+    // Una conversación escalada (p. ej. reglas 4 y 5 con solicitar_analista) no sigue: ninguna
+    // herramienta, tampoco las de identificación, se ejecuta después (orden 4 → 5 → 1).
+    if (estado.escalamiento !== null) {
+      registrar("control_identidad", {
+        correlationId: estado.correlationId,
+        herramienta,
+        decision: "escalada",
+      });
+      return denegar(MOTIVO_ESCALADA);
+    }
     if (!herramientas.includes(herramienta)) return {};
     // Si la herramienta actúa sobre un solicitante concreto (p. ej. el registro del #13), debe ser
     // el verificado: la verificación no se transfiere a otra persona.

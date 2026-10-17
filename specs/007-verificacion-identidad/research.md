@@ -71,8 +71,8 @@ Hechos verificados en el repositorio y en los tipos instalados (`@anthropic-ai/c
 El tercer fallo responde directamente `verificacion_bloqueada`, no `dato_no_coincide`. Así el adaptador escala en ese mismo turno, sin esperar un cuarto intento.
 
 **Idempotencia** (Principio VI):
-- La entrada suma `idIntento`, un string de 1 a 64 caracteres. El core guarda la respuesta de cada `(correlationId, idIntento)`.
-- Si el `idIntento` se repite, el core devuelve la misma respuesta sin volver a contar el intento ni auditarlo.
+- La entrada suma `idIntento`, un string de 1 a 64 caracteres. El core guarda el **fallo** de cada `(correlationId, idIntento)`.
+- Si se repite el `idIntento` de un fallo, el core devuelve el mismo fallo sin volver a contar el intento ni auditarlo. Los éxitos no se guardan: un éxito repetido se evalúa contra el estado actual, para no contradecirlo si la verificación se invalidó entretanto (revisión de código de `dea0951`).
 - El adaptador usa como `idIntento` un UUID por **dato del turno** (`idSolicitante` + `fechaExpedicion`), memorizado mientras dura el turno. Lo repiten los reintentos del adaptador, una llamada repetida con el mismo dato y el reintento del turno completo cuando falla el modelo (corrección tras la revisión de código de `d37d3a7`). Un dato nuevo, o el mismo dato en otro turno, lleva otra clave.
 
 Esto evita que un reintento tras un tiempo agotado cuente dos fallos.
@@ -101,7 +101,8 @@ La usan el core, para el límite de intentos, y el control del agente (R7). El #
 - **Varias coincidencias**: emite `solicitud_de_dato`, con `dato: "número de documento de identidad"`, la `regla` («Regla 1 · coincidencias sin desambiguar») y `valores.coincidencias`. Marca en el estado de la conversación que hubo una búsqueda ambigua.
 - **Una búsqueda ambigua por turno**: dentro de un turno solo cuenta la primera, porque el solicitante todavía no pudo responder al pedido de documento (corrección tras la revisión de código de `d37d3a7`).
 - **Una segunda búsqueda ambigua seguida**, en un turno posterior: deja la señal de escalamiento con el motivo nuevo `identidad_ambigua` y el número de coincidencias (FR-006).
-- **Una búsqueda con exactamente una coincidencia** reinicia el contador: el solicitante ya desambiguó. Hace falta porque el modelo repite `buscar_solicitante` en cada turno, ya que el historial solo lleva textos (visto con `--demo` en la validación manual, T044). Sin el reinicio, repetir la búsqueda por nombre después de dar el documento escalaba por error. Una búsqueda sin coincidencias no reinicia el contador.
+- **El escalamiento por ambigüedad se decide al cerrar el turno** (`cerrarTurnoIdentidad`), no en la llamada. Si en el mismo turno el modelo busca por nombre y después por documento, no escala (revisión de código de `dea0951`).
+- **Una búsqueda con exactamente una coincidencia** reinicia el contador y marca la conversación como desambiguada (`desambiguada`, que viaja entre turnos). Las búsquedas ambiguas posteriores ya no cuentan ni vuelven a pedir el documento. Hace falta porque el modelo repite `buscar_solicitante` en cada turno, ya que el historial solo lleva textos (visto con `--demo` en la validación manual, T044). Sin el reinicio, repetir la búsqueda por nombre después de dar el documento escalaba por error. Una búsqueda sin coincidencias no reinicia el contador.
 - **`verificacion_bloqueada`**: deja la señal de escalamiento con el motivo nuevo `identidad_no_verificable` (FR-009).
 - **Cero coincidencias, `dato_no_coincide` o una verificación exitosa**: no emite eventos; el modelo informa con su texto.
 
@@ -138,7 +139,7 @@ La usan el core, para el límite de intentos, y el control del agente (R7). El #
 
 ## R8. Momento de identificar: instrucción del sistema y control por código
 
-**Decisión**: el system prompt antepone el orden de evaluación 4 → 5 → 1. Si el solicitante pide una persona, o el caso no está cubierto (moneda extranjera, documento no soportado), no se lo busca ni se le piden datos: se le dice que su caso pasa a un analista. Esta instrucción la exigió la revisión de cumplimiento de `d37d3a7`, y el #15 y el #16 la harán cumplir por código. Después suma tres instrucciones:
+**Decisión**: el system prompt antepone el orden de evaluación 4 → 5 → 1. Si el solicitante pide una persona, o el caso no está cubierto (moneda extranjera, documento no soportado), el modelo no lo busca ni le pide datos: llama a `solicitar_analista` con el motivo tipado, y el código escala (FR-011b; DECISIONES.md, Decisión 6 del #9). Desde ese momento, el control niega cualquier otra herramienta. Lo exigieron las revisiones de cumplimiento de `d37d3a7` y `dea0951`. Después suma tres instrucciones:
 - pedir número de documento o nombre en cuanto el solicitante quiera iniciar una solicitud;
 - con varias coincidencias, pedir el número de documento;
 - verificar con la fecha de expedición del documento, y no pedir ni usar documentos de soporte antes de verificar.
