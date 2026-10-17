@@ -1,5 +1,5 @@
 {
-  "enabledMcpjsonServers": ["github"],
+  "enabledMcpjsonServers": ["github", "crediagil-core"],
   "permissions": {
     "deny": [
       "Read(**/.env)",
