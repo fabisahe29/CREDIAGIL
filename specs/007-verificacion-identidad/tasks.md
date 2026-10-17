@@ -288,10 +288,13 @@ Cada `caso.json` sigue el formato de `casos/demo-consulta/caso.json`: `nombre` (
       - Una fecha imposible (`2020-13-40`) la descartó el propio modelo sin llamar al core, así que no hay auditoría `formato_invalido` en esa sesión; el camino del core está cubierto por pruebas.
       - Con `--demo` se ve que el modelo repite `buscar_solicitante` en cada turno (el historial solo lleva textos). Si repitiera una búsqueda **por nombre** después de desambiguar, el contador de búsquedas ambiguas escalaría por error. **Corregido**: una búsqueda con una sola coincidencia reinicia el contador (R6; prueba en `adaptador.test.ts`).
       - Sin herramienta de registro (#13), el agente dice que no puede radicar la solicitud: esperado.
+    - Escenario 7 (reglas 4 y 5, tras `cc0345f`), con `--demo` y el modelo real:
+      - «quiero hablar con una persona» → una sola línea `solicitar_analista · ok`, ninguna `buscar_solicitante`, y `[ESCALAMIENTO]` con «Regla 4 · el solicitante pide hablar con una persona», motivo `pide_persona`. Conversación cerrada.
+      - «quiero un crédito; mis ingresos son en dólares» → `solicitar_analista · ok` y `[ESCALAMIENTO]` con «Regla 5 · caso no cubierto por la política» y `causa = moneda_extranjera`, sin buscar ni pedir el documento. Conversación cerrada.
 - [X] T045 Commit convencional en `9-identificacion-y-verificacion-del-solici`, por ejemplo `feat: identificación y verificación del solicitante (#9)`. Antes:
   - `git status`, para confirmar que no entran `logs/`, ningún `.env` ni archivos temporales;
   - la búsqueda de tokens del quickstart del #3.
-- [ ] T046 Con confirmación del desarrollador: `git push -u origin 9-identificacion-y-verificacion-del-solici` y `/ticket-abrir-pr 9`. Se espera que la revisión de cumplimiento dé la Regla 1 ✅ y las demás no aplicables. Cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
+- [X] T046 Con confirmación del desarrollador: `git push -u origin 9-identificacion-y-verificacion-del-solici` y `/ticket-abrir-pr 9`. Se espera que la revisión de cumplimiento dé la Regla 1 ✅ y las demás no aplicables. Cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
   - Primera revisión (2026-10-17) sobre `d37d3a7`: ⛔ bloquea. Cumplimiento: Regla 1 ✅, reglas 2 y 3 ➖, reglas 4 y 5 ⛔ por una restricción crítica: el prompt pedía identificar «primero» sin precedencia para las reglas 4 y 5. Código: 0 críticos, 0 altos, 3 medios y 2 bajos. Registros en el issue: [código](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6241873596) y [cumplimiento](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6241879418).
   - Corregido en un commit nuevo, cada punto con su prueba (806 pruebas en verde):
     - **Crítico**: el prompt antepone las reglas 4 y 5 a la identificación, y una prueba fija el orden (DECISIONES.md, Decisión 6).
@@ -306,6 +309,7 @@ Cada `caso.json` sigue el formato de `casos/demo-consulta/caso.json`: `nombre` (
     - El escalamiento por ambigüedad se decide al cerrar el turno, y `desambiguada` viaja entre turnos.
     - Prueba del orden inverso, nombre y después documento.
     - DECISIONES.md, Decisión 5, recompuesta.
+  - Tercera revisión (2026-10-17) sobre `cc0345f`: ✅ no bloquea. Cumplimiento: reglas 1, 4 y 5 ✅, reglas 2 y 3 ➖. Código: 0 críticos, 0 altos, 2 medios y 3 bajos. Registros: [código](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6242503655) y [cumplimiento](https://github.com/fabisahe29/CREDIAGIL/issues/9#issuecomment-6242510202). Se abrió el [PR #27](https://github.com/fabisahe29/CREDIAGIL/pull/27), el ticket pasó a In review, y se dejó una nota del adelanto en el #15. Los hallazgos medios y bajos de esta revisión quedan en el comentario `pr` del issue.
   - Quedan pendientes los hallazgos bajos: la fecha «hoy» en UTC frente a Bogotá; los fallos sobre un solicitante ya verificado (el bloqueo convive con la verificación); `/nueva` reinicia el contador de intentos; y que el adaptador acepte verificar mientras la última búsqueda es ambigua. También quedan para el #10 y el #13 la lista vacía de herramientas protegidas y FR-011a por código.
 
 ---
