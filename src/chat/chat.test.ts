@@ -15,6 +15,7 @@ import type { ClienteCore } from "../agente/cliente-core.ts";
 import { exito } from "../compartido/errores.ts";
 import type { EventoNegocio } from "../compartido/eventos.ts";
 import { fijarDestino } from "../compartido/logs.ts";
+import { CORE_NO_SIMULADO } from "../agente/core-no-simulado.ts";
 
 // ── Utilidades ────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ function terminalFalsa() {
 function coreFalso() {
   let cierres = 0;
   const core: ClienteCore = {
+    ...CORE_NO_SIMULADO,
     async consultarSolicitud() {
       return exito({ solicitud: null });
     },
@@ -57,6 +59,7 @@ const resultado = (
   escalamiento: null,
   turnos: 1,
   eventos: [],
+  busquedasAmbiguas: 0,
   ...extra,
 });
 
@@ -230,6 +233,23 @@ describe("chat: conversación turno a turno (US1)", () => {
     await hasta(() => chat.llamadas.length === 2);
     assert.equal(chat.llamadas[1]!.opciones.correlationId, ID_2);
     assert.deepEqual(chat.llamadas[1]!.opciones.historial, []);
+  });
+
+  it("lleva el contador de búsquedas ambiguas entre turnos y /nueva lo vuelve a 0 (#9)", async () => {
+    const chat = arrancar([
+      () => resultado("¿Tu documento?", { busquedasAmbiguas: 1 }),
+      () => resultado("Ok"),
+    ]);
+    chat.linea("Soy Elena Martínez Inventada");
+    await hasta(() => chat.llamadas.length === 1 && chat.salida.includes("Agente: ¿Tu documento?"));
+    assert.equal(chat.llamadas[0]!.opciones.busquedasAmbiguas, 0);
+    chat.linea("Elena Martínez Inventada");
+    await hasta(() => chat.llamadas.length === 2 && chat.salida.includes("Agente: Ok"));
+    assert.equal(chat.llamadas[1]!.opciones.busquedasAmbiguas, 1);
+    chat.linea("/nueva");
+    chat.linea("Hola");
+    await hasta(() => chat.llamadas.length === 3);
+    assert.equal(chat.llamadas[2]!.opciones.busquedasAmbiguas, 0);
   });
 
   it("/salir termina y cierra el core una vez", async () => {

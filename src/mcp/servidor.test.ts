@@ -5,7 +5,17 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { ID_ANULADA, ID_EN_ESTUDIO, ID_INEXISTENTE, ID_RESERVADA } from "./datos-ejemplo.ts";
+import {
+  ID_ANULADA,
+  ID_EN_ESTUDIO,
+  ID_HOMONIMO_1,
+  ID_HOMONIMO_2,
+  ID_INEXISTENTE,
+  ID_RESERVADA,
+  ID_SOLICITANTE_UNICO,
+  NOMBRE_SIN_COINCIDENCIAS,
+  SOLICITANTES_EJEMPLO,
+} from "./datos-ejemplo.ts";
 
 const PRINCIPAL = fileURLToPath(new URL("./principal.ts", import.meta.url));
 
@@ -176,5 +186,331 @@ describe("servidor MCP del core: falla configurada al arrancar (US3)", () => {
     assert.equal(proceso.status, 1);
     assert.match(proceso.stderr, /CREDIAGIL_FALLA/);
     assert.equal(proceso.stdout, "");
+  });
+});
+
+type ContenidoHerramienta = {
+  ok: boolean;
+  datos?: Record<string, unknown>;
+  error?: {
+    categoria: string;
+    reintentable: boolean;
+    codigo: string;
+    campo?: string;
+    mensaje: string;
+  };
+};
+
+async function llamarHerramienta(
+  conexion: Conexion,
+  nombre: string,
+  argumentos: Record<string, unknown>,
+) {
+  const resultado = await conexion.cliente.callTool({ name: nombre, arguments: argumentos });
+  return {
+    isError: resultado.isError === true,
+    contenido: resultado.structuredContent as ContenidoHerramienta,
+  };
+}
+
+/** Registros JSON de stderr con ese correlationId, tras dar tiempo a que lleguen. */
+async function registrosDe(conexion: Conexion, correlationId: string) {
+  await new Promise((resolver) => setTimeout(resolver, 100));
+  return conexion.stderr
+    .join("")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((r) => r["correlationId"] === correlationId);
+}
+
+describe("servidor MCP del core: buscar_solicitante (US1)", () => {
+  let conexion: Conexion;
+  before(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  after(async () => {
+    await conexion.cerrar();
+  });
+
+  const buscar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "buscar_solicitante", argumentos);
+
+  it("anuncia buscar_solicitante con su esquema de entrada y de salida", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "buscar_solicitante");
+    assert.ok(herramienta, "falta buscar_solicitante");
+    for (const campo of ["documento", "nombre", "correlationId"]) {
+      assert.ok(herramienta.inputSchema.properties?.[campo], campo);
+    }
+    assert.ok(herramienta.outputSchema);
+  });
+
+  it("encuentra al solicitante único por documento con el documento enmascarado", async () => {
+    const r = await buscar({ documento: "000.123.4567", correlationId: randomUUID() });
+    assert.equal(r.isError, false);
+    assert.deepEqual(r.contenido, {
+      ok: true,
+      datos: {
+        coincidencias: [
+          {
+            idSolicitante: ID_SOLICITANTE_UNICO,
+            nombre: "Ana Pérez Ficticia",
+            documentoEnmascarado: "******4567",
+          },
+        ],
+      },
+    });
+  });
+
+  it("devuelve los dos homónimos por nombre", async () => {
+    const r = await buscar({ nombre: "elena martinez inventada", correlationId: randomUUID() });
+    const coincidencias = r.contenido.datos?.["coincidencias"] as { idSolicitante: string }[];
+    assert.deepEqual(
+      coincidencias.map((c) => c.idSolicitante),
+      [ID_HOMONIMO_1, ID_HOMONIMO_2],
+    );
+  });
+
+  it("sin coincidencias es un éxito vacío, sin isError", async () => {
+    const r = await buscar({ nombre: NOMBRE_SIN_COINCIDENCIAS, correlationId: randomUUID() });
+    assert.equal(r.isError, false);
+    assert.deepEqual(r.contenido, { ok: true, datos: { coincidencias: [] } });
+  });
+
+  it("ambos criterios, un campo extra o un correlationId inválido son validación con su campo", async () => {
+    const casos: [Record<string, unknown>, string][] = [
+      [
+        { documento: "0001234567", nombre: "Ana Pérez Ficticia", correlationId: randomUUID() },
+        "criterio",
+      ],
+      [{ correlationId: randomUUID() }, "criterio"],
+      [{ documento: "000ABC", correlationId: randomUUID() }, "documento"],
+      [{ nombre: "Al", correlationId: randomUUID() }, "nombre"],
+      [{ documento: 1234567, correlationId: randomUUID() }, "documento"],
+      [{ documento: "0001234567", correlationId: randomUUID(), extra: 1 }, "extra"],
+      [{ documento: "0001234567", correlationId: "no-uuid" }, "correlationId"],
+    ];
+    for (const [argumentos, campo] of casos) {
+      const r = await buscar(argumentos);
+      assert.equal(r.isError, true, JSON.stringify(argumentos));
+      assert.equal(r.contenido.error?.categoria, "validacion");
+      assert.equal(r.contenido.error?.codigo, "formato_invalido");
+      assert.equal(r.contenido.error?.campo, campo, JSON.stringify(argumentos));
+    }
+  });
+
+  it("registra el criterio y el número de coincidencias, sin el valor buscado", async () => {
+    const correlationId = randomUUID();
+    await buscar({ nombre: "Elena Martínez Inventada", correlationId });
+    const [registro] = await registrosDe(conexion, correlationId);
+    assert.ok(registro, "no se registró la búsqueda");
+    assert.equal(registro["evento"], "herramienta");
+    assert.equal(registro["herramienta"], "buscar_solicitante");
+    assert.equal(registro["criterio"], "nombre");
+    assert.equal(registro["coincidencias"], 2);
+    assert.equal(registro["resultado"], "ok");
+    assert.doesNotMatch(JSON.stringify(registro), /elena|martínez|martinez/i);
+  });
+});
+describe("servidor MCP del core: verificar_identidad (US3)", () => {
+  let conexion: Conexion;
+  before(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  after(async () => {
+    await conexion.cerrar();
+  });
+
+  const FECHA_UNICO = SOLICITANTES_EJEMPLO.find(
+    (s) => s.idSolicitante === ID_SOLICITANTE_UNICO,
+  )!.fechaExpedicion;
+  const TODAS_LAS_FECHAS = SOLICITANTES_EJEMPLO.map((s) => s.fechaExpedicion);
+
+  const verificar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "verificar_identidad", argumentos);
+
+  const intento = (correlationId: string, fechaExpedicion: unknown, extra = {}) => ({
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    fechaExpedicion,
+    idIntento: randomUUID(),
+    correlationId,
+    ...extra,
+  });
+
+  it("anuncia verificar_identidad con su esquema de entrada y de salida", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "verificar_identidad");
+    assert.ok(herramienta, "falta verificar_identidad");
+    for (const campo of ["idSolicitante", "fechaExpedicion", "idIntento", "correlationId"]) {
+      assert.ok(herramienta.inputSchema.properties?.[campo], campo);
+    }
+    assert.ok(herramienta.outputSchema);
+    assert.match(herramienta.description ?? "", /fecha de expedición/);
+  });
+
+  it("con la fecha correcta verifica, sin isError", async () => {
+    const correlationId = randomUUID();
+    const r = await verificar(intento(correlationId, FECHA_UNICO));
+    assert.equal(r.isError, false);
+    const identidad = r.contenido.datos?.["identidad"] as Record<string, unknown>;
+    assert.equal(identidad["verificada"], true);
+    assert.equal(identidad["idSolicitante"], ID_SOLICITANTE_UNICO);
+    assert.equal(identidad["correlationId"], correlationId);
+  });
+
+  it("distingue validación, solicitante inexistente, dato que no coincide y bloqueo", async () => {
+    const correlationId = randomUUID();
+    const casos: [Record<string, unknown>, string, string | undefined][] = [
+      [intento(correlationId, "2020-13-40"), "validacion/formato_invalido", "fechaExpedicion"],
+      [
+        intento(correlationId, FECHA_UNICO, { idSolicitante: "CLI-1" }),
+        "validacion/formato_invalido",
+        "idSolicitante",
+      ],
+      [
+        intento(correlationId, FECHA_UNICO, { idIntento: "" }),
+        "validacion/formato_invalido",
+        "idIntento",
+      ],
+      [
+        intento(correlationId, FECHA_UNICO, {
+          idSolicitante: "CLI-0009999999",
+        }),
+        "negocio/solicitante_inexistente",
+        undefined,
+      ],
+      [intento(correlationId, "2001-01-01"), "negocio/dato_no_coincide", undefined],
+      [intento(correlationId, "2001-01-02"), "negocio/dato_no_coincide", undefined],
+      [intento(correlationId, "2001-01-03"), "negocio/verificacion_bloqueada", undefined],
+      [intento(correlationId, FECHA_UNICO), "negocio/verificacion_bloqueada", undefined],
+    ];
+    for (const [argumentos, esperado, campo] of casos) {
+      const r = await verificar(argumentos);
+      assert.equal(r.isError, true, esperado);
+      const error = r.contenido.error!;
+      assert.equal(`${error.categoria}/${error.codigo}`, esperado);
+      assert.equal(error.campo, campo);
+      assert.equal(error.reintentable, false);
+    }
+  });
+
+  it("un campo faltante, extra o un correlationId inválido es validación de ese campo", async () => {
+    const correlationId = randomUUID();
+    const sinIntento: Record<string, unknown> = intento(correlationId, FECHA_UNICO);
+    delete sinIntento["idIntento"];
+    const casos: [Record<string, unknown>, string][] = [
+      [sinIntento, "idIntento"],
+      [intento(correlationId, FECHA_UNICO, { extra: 1 }), "extra"],
+      [intento("no-uuid", FECHA_UNICO), "correlationId"],
+    ];
+    for (const [argumentos, campo] of casos) {
+      const r = await verificar(argumentos);
+      assert.equal(r.contenido.error?.categoria, "validacion");
+      assert.equal(r.contenido.error?.campo, campo);
+    }
+  });
+
+  it("audita cada verificación, también la mal formada, y no las repeticiones", async () => {
+    const correlationId = randomUUID();
+    const repetido = intento(correlationId, "2001-01-01");
+    await verificar(intento(correlationId, "2020-13-40"));
+    await verificar(repetido);
+    await verificar(repetido);
+    await verificar(intento(correlationId, FECHA_UNICO));
+    await verificar(intento(correlationId, FECHA_UNICO));
+    const auditorias = (await registrosDe(conexion, correlationId)).filter(
+      (r) => r["evento"] === "auditoria",
+    );
+    assert.deepEqual(
+      auditorias.map((a) => [a["resultado"], a["intentosFallidos"], a["campo"] ?? null]),
+      [
+        ["formato_invalido", 0, "fechaExpedicion"],
+        ["no_coincide", 1, null],
+        ["verificada", 1, null],
+      ],
+    );
+    for (const a of auditorias) {
+      assert.equal(a["regla"], "Regla 1");
+      assert.equal(a["idSolicitante"], ID_SOLICITANTE_UNICO);
+      assert.match(String(a["ts"]), /^\d{4}-\d{2}-\d{2}T/);
+    }
+  });
+
+  it("ninguna línea de stderr ni respuesta contiene una fecha de expedición (SC-004)", async () => {
+    const correlationId = randomUUID();
+    const respuestas = [];
+    for (const fecha of ["2001-01-01", "2001-01-02", FECHA_UNICO]) {
+      respuestas.push(await verificar(intento(correlationId, fecha)));
+    }
+    const registros = JSON.stringify(await registrosDe(conexion, correlationId));
+    const salida = JSON.stringify(respuestas);
+    for (const fecha of [...TODAS_LAS_FECHAS, "2001-01-01", "2001-01-02"]) {
+      assert.equal(registros.includes(fecha), false, `log con ${fecha}`);
+      assert.equal(salida.includes(fecha), false, `respuesta con ${fecha}`);
+    }
+  });
+});
+describe("servidor MCP del core: consultar_identidad (US4)", () => {
+  let conexion: Conexion;
+  before(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  after(async () => {
+    await conexion.cerrar();
+  });
+
+  const consultar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "consultar_identidad", argumentos);
+
+  it("anuncia consultar_identidad como solo lectura", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "consultar_identidad");
+    assert.ok(herramienta, "falta consultar_identidad");
+    assert.ok(herramienta.inputSchema.properties?.["correlationId"]);
+    assert.ok(herramienta.outputSchema);
+    assert.equal(herramienta.annotations?.readOnlyHint, true);
+  });
+
+  it("refleja la verificación de la conversación y no la de otra", async () => {
+    const correlationId = randomUUID();
+    const antes = await consultar({ correlationId });
+    assert.equal(antes.isError, false);
+    assert.deepEqual(antes.contenido.datos?.["identidad"], {
+      correlationId,
+      verificada: false,
+      idSolicitante: null,
+      verificadaEn: null,
+    });
+    await llamarHerramienta(conexion, "verificar_identidad", {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      fechaExpedicion: SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!
+        .fechaExpedicion,
+      idIntento: randomUUID(),
+      correlationId,
+    });
+    const despues = await consultar({ correlationId });
+    const identidad = despues.contenido.datos?.["identidad"] as Record<string, unknown>;
+    assert.equal(identidad["verificada"], true);
+    assert.equal(identidad["idSolicitante"], ID_SOLICITANTE_UNICO);
+    const otra = await consultar({ correlationId: randomUUID() });
+    assert.equal(
+      (otra.contenido.datos?.["identidad"] as { verificada: boolean }).verificada,
+      false,
+    );
+  });
+
+  it("un correlationId inválido o un campo extra es validación de ese campo", async () => {
+    const casos: [Record<string, unknown>, string][] = [
+      [{ correlationId: "no-uuid" }, "correlationId"],
+      [{}, "correlationId"],
+      [{ correlationId: randomUUID(), extra: 1 }, "extra"],
+    ];
+    for (const [argumentos, campo] of casos) {
+      const r = await consultar(argumentos);
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.categoria, "validacion");
+      assert.equal(r.contenido.error?.campo, campo);
+    }
   });
 });

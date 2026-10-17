@@ -14,6 +14,8 @@ export interface Conversacion {
   readonly correlationId: string;
   readonly historial: readonly TurnoHistorial[];
   readonly estado: EstadoSolicitud;
+  /** Búsquedas ambiguas de la conversación; viaja a `conversar` en cada turno (#9). */
+  readonly busquedasAmbiguas: number;
 }
 
 /** Un evento tal como llega a la interfaz, después de validarlo otra vez (R3). */
@@ -25,6 +27,7 @@ export const nuevaConversacion = (correlationId: string = randomUUID()): Convers
   correlationId,
   historial: [],
   estado: "en_curso",
+  busquedasAmbiguas: 0,
 });
 
 export const registrarTurno = (

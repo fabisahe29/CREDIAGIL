@@ -1,0 +1,11 @@
+{
+  "nombre": "identidad-no-verificable",
+  "descripcion": "Caso de prueba 5: tres fechas de expedición incorrectas bloquean la verificación y el caso pasa a un analista",
+  "pasos": [
+    { "mensaje": "Hola, quiero pedir un crédito" },
+    { "mensaje": "Mi número de documento es 0001234567" },
+    { "mensaje": "La fecha de expedición de mi documento es 2001-01-01" },
+    { "mensaje": "Perdón, creo que es 2001-01-02" },
+    { "mensaje": "Entonces es 2001-01-03" }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "nombre": "identidad-homonimos",
+  "descripcion": "Homónimos: el solicitante da solo su nombre, el agente pide el documento y después verifica con la fecha de expedición",
+  "pasos": [
+    { "mensaje": "Hola, quiero pedir un crédito. Soy Elena Martínez Inventada" },
+    { "mensaje": "Mi número de documento es 0002020202" },
+    { "mensaje": "La fecha de expedición de mi documento es 2009-08-21" }
+  ]
+}

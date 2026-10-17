@@ -1,11 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { conversar, MODELO_POR_DEFECTO, type ContextoConsulta, type QueryFn } from "./agente.ts";
-import { errorTransitorio, exito, fallo } from "../compartido/errores.ts";
+import { errorNegocio, errorTransitorio, exito, fallo } from "../compartido/errores.ts";
 import type { ClienteCore } from "./cliente-core.ts";
 import { emitirEvento } from "./adaptador.ts";
+import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
 
 const core: ClienteCore = {
+  ...CORE_NO_SIMULADO,
   async consultarSolicitud() {
     return exito({ solicitud: null });
   },
@@ -223,6 +225,7 @@ describe("agente: interpretación del resultado", () => {
     capturarLogs(t);
     let llamadasAlCore = 0;
     const coreContado: ClienteCore = {
+      ...CORE_NO_SIMULADO,
       async consultarSolicitud() {
         llamadasAlCore++;
         return exito({ solicitud: null });
@@ -447,6 +450,7 @@ describe("agente: eventos de negocio en el resultado (chat, US2)", () => {
   it("la escalada por el adaptador lleva herramienta e intentos en los valores, una sola vez", async (t) => {
     capturarLogs(t);
     const coreCaido: ClienteCore = {
+      ...CORE_NO_SIMULADO,
       async consultarSolicitud() {
         return fallo(errorTransitorio("core_no_disponible", "Caído."));
       },
@@ -523,6 +527,7 @@ describe("agente: eventos de negocio en el resultado (chat, US2)", () => {
   it("un evento emitido antes de que el adaptador escale se conserva, en orden, antes del escalamiento", async (t) => {
     capturarLogs(t);
     const coreCaido: ClienteCore = {
+      ...CORE_NO_SIMULADO,
       async consultarSolicitud() {
         return fallo(errorTransitorio("core_no_disponible", "Caído."));
       },
@@ -585,6 +590,7 @@ describe("agente: eventos de negocio en el resultado (chat, US2)", () => {
 
 describe("agente: escalamiento por el adaptador (US3)", () => {
   const coreCaido: ClienteCore = {
+    ...CORE_NO_SIMULADO,
     async consultarSolicitud() {
       return fallo(errorTransitorio("core_no_disponible", "Caído."));
     },
@@ -620,4 +626,223 @@ describe("agente: escalamiento por el adaptador (US3)", () => {
       assert.equal(llamadas.length, 1);
     });
   }
+});
+
+describe("agente: desambiguación de homónimos (#9, US2)", () => {
+  const homonimos = exito({
+    coincidencias: [
+      {
+        idSolicitante: "CLI-0001000002",
+        nombre: "Elena Martínez Inventada",
+        documentoEnmascarado: "******0202",
+      },
+      {
+        idSolicitante: "CLI-0001000003",
+        nombre: "Elena Martínez Inventada",
+        documentoEnmascarado: "******0303",
+      },
+    ],
+  });
+  const coreHomonimos: ClienteCore = {
+    ...CORE_NO_SIMULADO,
+    async consultarSolicitud() {
+      return exito({ solicitud: null });
+    },
+    async buscarSolicitante() {
+      return homonimos;
+    },
+    async cerrar() {},
+  };
+  const buscarPorNombre = (contexto: ContextoConsulta) =>
+    contexto.herramientas.buscar_solicitante.manejar({ nombre: "Elena Martínez Inventada" });
+
+  it("la primera búsqueda ambigua pide el documento y no escala", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await buscarPorNombre(contexto);
+        return [resultado("success", "end_turn", "¿Cuál es tu número de documento?")];
+      },
+    ]);
+    const r = await conversar("Soy Elena Martínez Inventada", {
+      ejecutarConsulta: fn,
+      core: coreHomonimos,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.busquedasAmbiguas, 1);
+    assert.deepEqual(
+      r.eventos.map((e) => e.tipo),
+      ["solicitud_de_dato"],
+    );
+  });
+
+  it("la segunda búsqueda ambigua escala con el aviso, la regla y las coincidencias", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await buscarPorNombre(contexto);
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar("Soy Elena Martínez Inventada", {
+      ejecutarConsulta: fn,
+      core: coreHomonimos,
+      busquedasAmbiguas: 1,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.busquedasAmbiguas, 2);
+    assert.match(
+      r.respuesta,
+      /^No pude identificarte con certeza\. Tu caso pasa a un analista, que te contactará\./,
+    );
+    assert.equal(r.escalamiento?.motivo, "identidad_ambigua");
+    const escalamiento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.ok(escalamiento, "falta el evento de escalamiento");
+    assert.equal(escalamiento.regla, "Regla 1 · coincidencias sin desambiguar");
+    assert.deepEqual(escalamiento.valores, { herramienta: "buscar_solicitante", coincidencias: 2 });
+  });
+
+  it("un intento del modelo que falla y se reintenta no suma búsquedas ambiguas", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([
+      async (contexto) => {
+        await buscarPorNombre(contexto);
+        return [resultado("error_during_execution", null)];
+      },
+      async (contexto) => {
+        await buscarPorNombre(contexto);
+        return [resultado("success", "end_turn", "¿Cuál es tu número de documento?")];
+      },
+    ]);
+    const r = await conversar("Soy Elena Martínez Inventada", {
+      ejecutarConsulta: fn,
+      core: coreHomonimos,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 2);
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.busquedasAmbiguas, 1);
+  });
+
+  it("sin búsquedas el contador se devuelve igual", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    const r = await conversar("Hola", {
+      ejecutarConsulta: fn,
+      core,
+      busquedasAmbiguas: 1,
+      ...sinEspera,
+    });
+    assert.equal(r.busquedasAmbiguas, 1);
+  });
+
+  it("el systemPrompt pide identificar al inicio y no elegir entre homónimos", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.match(
+      prompt,
+      /Cuando el solicitante quiera iniciar una solicitud, pídele primero su número de documento o su nombre completo y búscalo con buscar_solicitante\. Las preguntas generales se responden sin identificar\./,
+    );
+    assert.match(prompt, /Si hay varias coincidencias, no elijas: pide el número de documento\./);
+  });
+});
+
+describe("agente: identidad no verificable (#9, US3)", () => {
+  const coreBloqueado: ClienteCore = {
+    ...CORE_NO_SIMULADO,
+    async consultarSolicitud() {
+      return exito({ solicitud: null });
+    },
+    async verificarIdentidad() {
+      return fallo(errorNegocio("verificacion_bloqueada", "Bloqueada."));
+    },
+    async cerrar() {},
+  };
+
+  it("con la verificación bloqueada escala con el aviso y la regla de la Regla 1", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.verificar_identidad.manejar({
+          idSolicitante: "CLI-0001000001",
+          fechaExpedicion: "2001-01-03",
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar("Mi fecha es 2001-01-03", {
+      ejecutarConsulta: fn,
+      core: coreBloqueado,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.match(
+      r.respuesta,
+      /^No pude verificar tu identidad\. Tu caso pasa a un analista, que te contactará\./,
+    );
+    assert.equal(r.escalamiento?.motivo, "identidad_no_verificable");
+    const escalamiento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.equal(escalamiento?.regla, "Regla 1 · 3 intentos fallidos de verificación");
+    assert.deepEqual(escalamiento?.valores, { herramienta: "verificar_identidad" });
+    assert.equal(JSON.stringify(r).includes("2001-01-03"), false);
+  });
+
+  it("el systemPrompt pide verificar con la fecha de expedición sin revelar el dato", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.match(
+      prompt,
+      /Verifica la identidad con verificar_identidad y la fecha de expedición del documento\. No pidas ni uses documentos de soporte antes de verificar\. Si el dato no coincide, no reveles el correcto\./,
+    );
+  });
+});
+
+describe("agente: control de identidad registrado como hook (#9, US4)", () => {
+  it("cada query() recibe el hook PreToolUse sobre las herramientas de originacion", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([
+      [resultado("error_during_execution", null)],
+      [resultado("success", "end_turn", "Hola")],
+    ]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.equal(llamadas.length, 2);
+    for (const { options } of llamadas) {
+      const hooks = options["hooks"] as {
+        PreToolUse: { matcher: string; hooks: unknown[] }[];
+      };
+      assert.equal(hooks.PreToolUse.length, 1);
+      assert.equal(hooks.PreToolUse[0]!.matcher, "mcp__originacion__.*");
+      assert.equal(hooks.PreToolUse[0]!.hooks.length, 1);
+      assert.equal(typeof hooks.PreToolUse[0]!.hooks[0], "function");
+    }
+  });
+
+  it("el hook registrado deja seguir una herramienta que no exige identidad", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const hooks = llamadas[0]!.options["hooks"] as {
+      PreToolUse: { hooks: ((...a: unknown[]) => Promise<unknown>)[] }[];
+    };
+    const salida = await hooks.PreToolUse[0]!.hooks[0]!(
+      {
+        session_id: "s",
+        transcript_path: "",
+        cwd: ".",
+        hook_event_name: "PreToolUse",
+        tool_name: "mcp__originacion__consultar_solicitud",
+        tool_input: {},
+        tool_use_id: "u",
+      },
+      "u",
+      { signal: new AbortController().signal },
+    );
+    assert.deepEqual(salida, {});
+  });
 });
