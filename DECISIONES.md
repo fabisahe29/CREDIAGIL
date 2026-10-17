@@ -4,6 +4,70 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-17 · Esqueleto del agente y del servidor MCP de originación
+
+**Issue**: [#7 — Esqueleto del agente y del servidor MCP de originación](https://github.com/fabisahe29/CREDIAGIL/issues/7)
+
+**Detalle**: [specs/005-esqueleto-agente-mcp/research.md](specs/005-esqueleto-agente-mcp/research.md), decisiones R1 a R4 y R7
+
+### Decisión 1: el core como servidor MCP stdio y el agente en otro proceso
+
+`src/mcp/` es el servidor MCP del core simulado (`crediagil-core`), construido con el SDK oficial de MCP y registrado en `.mcp.json`. `src/agente/` es el agente, con el Claude Agent SDK, que habla con el core como cliente MCP por stdio.
+
+**Motivo**: es lo que fija la constitución (Principio IV) y separa de verdad el razonamiento de la ejecución. El core se prueba sin el modelo y se usa también desde Claude Code.
+
+**Alternativas descartadas**: el core dentro del proceso del agente (no serviría para Claude Code); el core como funciones llamadas directamente (no es MCP).
+
+### Decisión 2: reintentos deterministas en un adaptador MCP en el mismo proceso del agente
+
+El agente no recibe el servidor del core directamente, sino un servidor MCP en su propio proceso (`createSdkMcpServer`, clave `originacion`). Cada manejador llama al core, reintenta 2 veces ante un error transitorio (500 ms y 1000 ms ±20%) y, si se agotan los intentos, deja la señal de escalamiento y devuelve `transitorio_agotado`, que no es reintentable.
+
+**Motivo**: el Agent SDK ejecuta el ciclo de herramientas sin devolver el control al código, y ningún hook reintenta una herramienta. El manejador es el único punto determinista: el reintento no depende de que el modelo decida volver a intentar (Principios III y VI).
+
+**Alternativas descartadas**: dejar el reintento al modelo (no es determinista); reintentar en un hook `PostToolUse` (no está soportado); reintentar dentro del core (ocultaría la falla que se quiere probar).
+
+**Consecuencias**: `transitorio_agotado` es la única excepción a «transitorio implica reintentable», documentada en el modelo de datos.
+
+### Decisión 3: contrato de errores compartido y validación estricta en el manejador
+
+`src/compartido/errores.ts` define con Zod las 4 categorías (`transitorio`, `validacion`, `negocio` y `permisos`), `reintentable`, `codigo`, `mensaje` y `campo`. El contrato viaja en `structuredContent`; una consulta vacía es un éxito.
+
+El esquema de entrada que anuncia el servidor es descriptivo pero permisivo. La validación estricta, que incluye campos extra y un `correlationId` que no sea UUID, la hace el manejador. Así una entrada inválida devuelve `validacion` con su campo (FR-008), y no el error genérico del SDK.
+
+**Motivo**: un solo contrato que el agente interpreta por categoría, nunca por el texto del mensaje (FR-009).
+
+**Alternativas descartadas**: errores como texto libre; solo `isError: true`; un esquema de entrada estricto en el SDK, que responde con su propio formato de error.
+
+### Decisión 4: toda conversación sin respuesta válida escala
+
+El agente interpreta el `result` del SDK. Solo `success` con `stop_reason` `end_turn` es una respuesta; todo lo demás escala, con un aviso fijo compuesto en código y una señal de auditoría (motivo, regla, resultado, `correlationId` y `ts`). Los motivos posibles son `falla_transitoria_persistente`, `respuesta_incompleta`, `limite_de_turnos` y `falla_del_agente`. Ante un error de ejecución, la conversación se reintenta una vez tras 1 s ±20% antes de escalar.
+
+**Motivo**: el Principio VI dice «si se agotan, la solicitud se escala; nunca se decide sin respuesta». Que el código componga los avisos garantiza que no aparezca un resultado inventado. La documentación del Agent SDK no confirma que reintente los errores de la API, por eso el reintento es explícito.
+
+**Alternativas descartadas**: responder «intenta más tarde» sin escalar; dejar que el modelo redacte el aviso; varios reintentos del modelo (multiplican el costo en tokens).
+
+### Decisión 5: pruebas sin red ni modelo
+
+`query()` se inyecta en `conversar`. Las pruebas pasan secuencias de mensajes del SDK y reciben el adaptador real para simular llamadas a herramientas. El servidor, el cliente y el adaptador se prueban contra el proceso stdio real, con la falla configurada por entorno.
+
+**Motivo**: la regla de tests prohíbe depender de red o del modelo real, y el Agent SDK no ofrece un transporte falso.
+
+**Alternativas descartadas**: Vitest con mocks de módulos; probar solo con el modelo real (cuesta tokens y no es reproducible).
+
+### Versiones y diferencias con la documentación
+
+- Instalado: `@anthropic-ai/claude-agent-sdk` 0.3.302, que trae `@modelcontextprotocol/sdk` 1.32.1 (línea 1.x) y **Zod 4.6.7**. Hay una sola versión de cada una (`npm ls`).
+- `strictMcpConfig` no existe en las opciones de esta versión del Agent SDK. No hace falta: con `settingSources: []` no se carga el `.mcp.json` del proyecto, y el agente solo ve el servidor que le pasa el código.
+- `tool()` del Agent SDK sí admite devolver `structuredContent`; no hizo falta la variante con JSON en texto.
+
+### Riesgos residuales aceptados
+
+- **El agente con el modelo real** solo se valida a mano (quickstart, Escenarios 3 y 4): consume tokens y no se puede reproducir en las pruebas automáticas (SC-001).
+- **La auditoría del escalamiento** es el log JSON por stderr; el almacén durable llega con el handoff del #15.
+- **`respuesta_fuera_de_contrato` usa la categoría `negocio`**, la menos mala de las no reintentables entre las 4 fijas del contrato.
+
+---
+
 ## 2026-10-16 · Revisión independiente y de cumplimiento antes del pull request
 
 **Issue**: [#6 — Revisión independiente y de cumplimiento antes del pull request](https://github.com/fabisahe29/CREDIAGIL/issues/6)

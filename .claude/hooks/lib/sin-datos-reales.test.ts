@@ -25,6 +25,8 @@ const REVISADOS = [
   ".claude/skills/ticket-abrir-pr/SKILL.md",
   ...archivos("specs/003-guardarrailes-hooks", ".md"),
   ...archivos("specs/004-revision-independiente-pr", ".md"),
+  ...archivos("src", ".ts"),
+  ...archivos("specs/005-esqueleto-agente-mcp", ".md"),
   ...archivos(".claude/rules", ".md"),
   "docs/datos-ficticios.md",
   "DECISIONES.md",
