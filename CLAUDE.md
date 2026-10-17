@@ -25,6 +25,9 @@ Las reglas no negociables (reglas de negocio, datos ficticios, decisiones determ
 | `.claude/` | Comandos propios (`skills/`), reglas por zona (`rules/`) y configuración compartida (`settings.json`) |
 | `src/politica/` | Módulo único de política de crédito (previsto, issue #7) |
 | `src/mcp/` | Servidor MCP de originación (previsto, issue #7) |
+| `src/chat/` | Chat de terminal: `npm run chat` (issue #8) |
+| `src/compartido/` | Contrato de errores, catálogo de eventos de negocio y logs |
+| `casos/` | Casos de prueba ficticios para la demo (`/caso` en el chat) |
 | `DECISIONES.md` | Decisiones de diseño con su alternativa descartada |
 
 ## Reglas por zona

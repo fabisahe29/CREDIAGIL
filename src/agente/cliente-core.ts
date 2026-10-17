@@ -5,7 +5,10 @@
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  StdioClientTransport,
+  type StdioServerParameters,
+} from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   errorTransitorio,
@@ -45,14 +48,19 @@ export interface OpcionesClienteCore {
   /** Cliente ya conectado; si falta, se arranca el servidor por stdio. */
   llamador?: LlamadorMcp;
   tiempoLimiteMs?: number;
+  /** Destino del stderr del servidor (por defecto "inherit"); el chat lo manda a su archivo de logs. */
+  stderr?: StdioServerParameters["stderr"];
 }
 
-async function conectarPorStdio(env: Record<string, string>): Promise<LlamadorMcp> {
+async function conectarPorStdio(
+  env: Record<string, string>,
+  stderr: StdioServerParameters["stderr"],
+): Promise<LlamadorMcp> {
   const transporte = new StdioClientTransport({
     command: process.execPath,
     args: [PRINCIPAL_CORE],
     env: { ...(process.env as Record<string, string>), ...env },
-    stderr: "inherit",
+    stderr,
   });
   const cliente = new Client({ name: "crediagil-agente", version: "0.1.0" });
   await cliente.connect(transporte);
@@ -68,8 +76,9 @@ export async function crearClienteCore({
   env = {},
   llamador,
   tiempoLimiteMs = TIEMPO_LIMITE_CORE_MS,
+  stderr = "inherit",
 }: OpcionesClienteCore = {}): Promise<ClienteCore> {
-  const mcp = llamador ?? (await conectarPorStdio(env));
+  const mcp = llamador ?? (await conectarPorStdio(env, stderr));
   let cerrado = false;
 
   return {

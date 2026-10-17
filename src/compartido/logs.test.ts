@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { registrar } from "./logs.ts";
+import { fijarDestino, registrar } from "./logs.ts";
 
 function destinoFalso() {
   const lineas: string[] = [];
@@ -36,6 +36,42 @@ describe("logs estructurados", () => {
     const stderr = t.mock.method(process.stderr, "write", () => true);
     registrar("prueba", { correlationId: "x" });
     assert.equal(stdout.mock.callCount(), 0);
+    assert.equal(stderr.mock.callCount(), 1);
+  });
+});
+
+describe("logs: destino por defecto configurable (chat, R6)", () => {
+  it("tras fijarDestino, registrar sin destino escribe en el nuevo destino y no en stderr", (t) => {
+    const stderr = t.mock.method(process.stderr, "write", () => true);
+    const archivo = destinoFalso();
+    fijarDestino(archivo);
+    try {
+      registrar("prueba", { correlationId: "x" });
+    } finally {
+      fijarDestino(null);
+    }
+    assert.equal(archivo.lineas.length, 1);
+    assert.equal(stderr.mock.callCount(), 0);
+  });
+
+  it("un destino explícito sigue mandando sobre el fijado", () => {
+    const archivo = destinoFalso();
+    const explicito = destinoFalso();
+    fijarDestino(archivo);
+    try {
+      registrar("prueba", {}, { destino: explicito });
+    } finally {
+      fijarDestino(null);
+    }
+    assert.equal(archivo.lineas.length, 0);
+    assert.equal(explicito.lineas.length, 1);
+  });
+
+  it("fijarDestino(null) vuelve a stderr", (t) => {
+    const stderr = t.mock.method(process.stderr, "write", () => true);
+    fijarDestino(destinoFalso());
+    fijarDestino(null);
+    registrar("prueba");
     assert.equal(stderr.mock.callCount(), 1);
   });
 });

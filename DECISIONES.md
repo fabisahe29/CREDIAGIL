@@ -4,6 +4,54 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-17 · Interfaz de chat
+
+**Issue**: [#8 — Interfaz de chat](https://github.com/fabisahe29/CREDIAGIL/issues/8)
+
+**Detalle**: [specs/006-interfaz-chat/research.md](specs/006-interfaz-chat/research.md), decisiones R1 a R9
+
+### Decisión 1: chat de terminal sin dependencias nuevas
+
+La interfaz es un bucle de `node:readline` con etiquetas de texto fijas (`Tú`, `Agente`, `[ESCALAMIENTO]`…) y color opcional con `styleText`. Se inicia con `npm run chat`.
+
+**Motivo**: la aclaración Q3 de la spec y el principio de simplicidad: el diseño visual no se califica y las etiquetas se leen igual sin color, en el video y en las pruebas.
+
+**Alternativas descartadas**: página local en el navegador (servidor web y UI que el enunciado no exige); Ink o blessed (dependencias nuevas).
+
+### Decisión 2: catálogo único de eventos de negocio, emitidos solo por código
+
+`src/compartido/eventos.ts` define con Zod `preaprobacion`, `solicitud_de_dato`, `escalamiento` y `bloqueo_por_regla`. Los emite el adaptador con `emitirEvento`, `conversar` los devuelve y la interfaz los valida otra vez antes de mostrarlos. El estado visible de la solicitud sale solo de esos eventos.
+
+**Motivo**: los tickets #9 a #16 solo emiten el evento y la interfaz lo muestra sin cambios. Que los emita el código, y no el modelo, mantiene el estado determinista (Principio III).
+
+**Alternativas descartadas**: que el modelo marque los eventos en su texto; una herramienta `emitir_evento` para el modelo (podría declarar una preaprobación que la política no decidió); confiar solo en el tipo de TypeScript sin revalidar.
+
+### Decisión 3: historial explícito en lugar de `resume` del SDK
+
+Cada turno sigue siendo un `query()` independiente, con `persistSession: false`. `conversar` recibe el historial de la conversación y lo antepone al mensaje nuevo.
+
+**Motivo**: conserva el modelo del #7 (clasificación del `result`, reintento y escalamiento por turno) y no deja documentos en disco fuera del repositorio.
+
+**Alternativas descartadas**: `resume` con el `session_id` (persiste la transcripción en `~/.claude/projects/` y un reintento hereda mensajes parciales); un único `query()` con entrada en streaming (un error del modelo terminaría toda la conversación).
+
+### Decisión 4: documentos con límites y no soportados entregados como metadatos
+
+Solo se lee un `.txt` o `.md` de 256 KiB como máximo, en UTF-8 válido y sin bytes nulos; viaja en un bloque `<documento>`. Cualquier otro archivo llega al agente solo con su nombre, tipo y motivo, para que el agente escale por la regla 5. Los logs registran solo los metadatos.
+
+**Motivo**: la constitución fija la entrada en texto y prohíbe documentos completos en los logs. La interfaz no decide nada sobre la solicitud.
+
+**Alternativa descartada**: rechazar el archivo en la interfaz sin avisar al agente (la interfaz estaría decidiendo y el caso no se escalaría).
+
+### Decisión 5: casos de prueba JSON en `casos/` y texto largo con `/pegar`
+
+Un caso es `casos/<nombre>/caso.json` con pasos `mensaje` o `adjuntar`, y se valida por completo antes de enviar el primer paso. El texto de varias líneas se envía con `/pegar` … `/fin`.
+
+**Motivo**: JSON se valida sin dependencias nuevas. Un marcador explícito para el texto largo es determinista en cualquier terminal.
+
+**Alternativas descartadas**: YAML (dependencia nueva) o Markdown con secciones (analizador propio); detectar el pegado por tiempo entre líneas o con *bracketed paste* (no es uniforme entre terminales).
+
+---
+
 ## 2026-10-17 · Esqueleto del agente y del servidor MCP de originación
 
 **Issue**: [#7 — Esqueleto del agente y del servidor MCP de originación](https://github.com/fabisahe29/CREDIAGIL/issues/7)

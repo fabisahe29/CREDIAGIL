@@ -1,0 +1,92 @@
+// Documentos adjuntos al chat (specs/006-interfaz-chat: research.md, R7; data-model.md, "Documento").
+// Solo .txt y .md, hasta 256 KiB, en UTF-8 válido y sin bytes nulos. Lo demás no se lee: llega al
+// agente como metadatos para que escale (regla 5). El contenido nunca va a los logs (FR-015).
+
+import { readFile, stat } from "node:fs/promises";
+import { basename, extname, resolve } from "node:path";
+
+export const TAMANO_MAXIMO_BYTES = 256 * 1024;
+const EXTENSIONES_SOPORTADAS = new Set([".txt", ".md"]);
+
+export type MotivoNoSoportado = "formato" | "tamano" | "codificacion";
+
+export type DocumentoLeido =
+  | { tipo: "soportado"; nombre: string; contenido: string; bytes: number }
+  | {
+      tipo: "no_soportado";
+      nombre: string;
+      tipoArchivo: string;
+      motivo: MotivoNoSoportado;
+      bytes: number;
+    }
+  | { tipo: "vacio"; nombre: string }
+  | { tipo: "inexistente"; ruta: string };
+
+export type DocumentoEnviable = Extract<DocumentoLeido, { tipo: "soportado" | "no_soportado" }>;
+
+/** Nombre base sin caracteres que rompan el bloque <documento nombre="…">. */
+export const nombreSeguro = (ruta: string) => basename(ruta).replace(/["<>]/g, "_");
+
+export async function leerDocumento(ruta: string, directorioBase: string): Promise<DocumentoLeido> {
+  const completa = resolve(directorioBase, ruta);
+  const info = await stat(completa).catch(() => null);
+  if (info === null || !info.isFile()) return { tipo: "inexistente", ruta };
+
+  const nombre = nombreSeguro(completa);
+  const extension = extname(completa).toLowerCase();
+  const tipoArchivo = extension === "" ? "sin extensión" : extension.slice(1);
+  const noSoportado = (motivo: MotivoNoSoportado): DocumentoLeido => ({
+    tipo: "no_soportado",
+    nombre,
+    tipoArchivo,
+    motivo,
+    bytes: info.size,
+  });
+
+  if (!EXTENSIONES_SOPORTADAS.has(extension)) return noSoportado("formato");
+  if (info.size > TAMANO_MAXIMO_BYTES) return noSoportado("tamano");
+  if (info.size === 0) return { tipo: "vacio", nombre };
+
+  const bytes = await readFile(completa);
+  if (bytes.includes(0)) return noSoportado("codificacion");
+  let contenido: string;
+  try {
+    contenido = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return noSoportado("codificacion");
+  }
+  if (contenido.trim() === "") return { tipo: "vacio", nombre };
+  return { tipo: "soportado", nombre, contenido, bytes: bytes.length };
+}
+
+/** Mensaje que recibe el agente: el contenido va delimitado y nunca puede cerrar el bloque. */
+export function componerMensaje(documento: DocumentoEnviable): string {
+  const encabezado = `Adjunto el documento ${documento.nombre}.`;
+  if (documento.tipo === "no_soportado") {
+    return `${encabezado}\n<documento_no_soportado nombre="${documento.nombre}" tipo="${documento.tipoArchivo}" motivo="${documento.motivo}"/>`;
+  }
+  const contenido = documento.contenido.replaceAll("</documento>", String.raw`<\/documento>`);
+  return `${encabezado}\n<documento nombre="${documento.nombre}">\n${contenido}\n</documento>`;
+}
+
+export const detalleAdjunto = (documento: DocumentoEnviable) =>
+  documento.tipo === "soportado" ? `${documento.bytes} bytes` : `no soportado: ${documento.motivo}`;
+
+/** Lo único del documento que va a los logs (Principio VI). */
+export function metadatosParaLog(documento: DocumentoEnviable) {
+  if (documento.tipo === "soportado") {
+    return {
+      nombre: documento.nombre,
+      tipoArchivo: extname(documento.nombre).slice(1).toLowerCase(),
+      bytes: documento.bytes,
+      soportado: true,
+    };
+  }
+  return {
+    nombre: documento.nombre,
+    tipoArchivo: documento.tipoArchivo,
+    bytes: documento.bytes,
+    soportado: false,
+    motivo: documento.motivo,
+  };
+}
