@@ -1,0 +1,9 @@
+{
+  "nombre": "identidad-unico",
+  "descripcion": "Caso de prueba 1: solicitante único que se identifica por documento y se verifica con la fecha de expedición correcta",
+  "pasos": [
+    { "mensaje": "Hola, quiero pedir un crédito" },
+    { "mensaje": "Mi número de documento es 0001234567" },
+    { "mensaje": "La fecha de expedición de mi documento es 2012-05-14" }
+  ]
+}

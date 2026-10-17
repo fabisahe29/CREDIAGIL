@@ -20,6 +20,51 @@ export const ID_RESERVADA = "SOL-0001000003";
 /** Formato válido, pero no existe: la consulta devuelve un éxito vacío. */
 export const ID_INEXISTENTE = "SOL-0009999999";
 
+/**
+ * Solicitante registrado en el core (specs/007-verificacion-identidad, data-model.md).
+ * `fechaExpedicion` es el dato de verificación: nunca sale del core.
+ */
+export interface Solicitante {
+  idSolicitante: string;
+  nombre: string;
+  documento: string;
+  /** AAAA-MM-DD. */
+  fechaExpedicion: string;
+  correo: string;
+}
+
+/** Casos de identificación (FR-017 del #9). */
+export const ID_SOLICITANTE_UNICO = "CLI-0001000001";
+export const ID_HOMONIMO_1 = "CLI-0001000002";
+export const ID_HOMONIMO_2 = "CLI-0001000003";
+/** Formato válido, pero sin solicitante: la búsqueda devuelve cero coincidencias. */
+export const DOCUMENTO_SIN_COINCIDENCIAS = "0009090909";
+export const NOMBRE_SIN_COINCIDENCIAS = "Nadie Registrado Ficticio";
+
+export const SOLICITANTES_EJEMPLO: readonly Solicitante[] = [
+  {
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    nombre: "Ana Pérez Ficticia",
+    documento: "0001234567",
+    fechaExpedicion: "2012-05-14",
+    correo: "ana.perez@cliente.example",
+  },
+  {
+    idSolicitante: ID_HOMONIMO_1,
+    nombre: "Elena Martínez Inventada",
+    documento: "0002020202",
+    fechaExpedicion: "2009-08-21",
+    correo: "elena.martinez.uno@cliente.example",
+  },
+  {
+    idSolicitante: ID_HOMONIMO_2,
+    nombre: "Elena Martínez Inventada",
+    documento: "0003030303",
+    fechaExpedicion: "2015-11-03",
+    correo: "elena.martinez.dos@cliente.example",
+  },
+];
+
 export const SOLICITUDES_EJEMPLO: readonly Solicitud[] = [
   {
     idSolicitud: ID_EN_ESTUDIO,

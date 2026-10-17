@@ -1,9 +1,10 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { cargarCaso } from "./casos.ts";
+import { ID_HOMONIMO_1, ID_SOLICITANTE_UNICO, SOLICITANTES_EJEMPLO } from "../mcp/datos-ejemplo.ts";
 
 let raiz: string;
 
@@ -58,6 +59,23 @@ describe("casos: carga válida", () => {
   it("el caso versionado casos/demo-consulta carga sin errores", async () => {
     const r = await cargarCaso(resolve("casos", "demo-consulta"), process.cwd());
     assert.equal(r.ok, true, r.ok ? "" : r.problema);
+  });
+
+  for (const nombre of ["identidad-unico", "identidad-homonimos", "identidad-no-verificable"]) {
+    it(`el caso versionado casos/${nombre} carga sin errores (#9)`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.equal(r.ok, true, r.ok ? "" : r.problema);
+    });
+  }
+
+  it("los casos de identidad usan las fechas de expedición de los datos del core (#9)", () => {
+    const fecha = (id: string) =>
+      SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === id)!.fechaExpedicion;
+    const texto = (nombre: string) => readFileSync(resolve("casos", nombre, "caso.json"), "utf8");
+    assert.ok(texto("identidad-unico").includes(fecha(ID_SOLICITANTE_UNICO)));
+    assert.ok(texto("identidad-homonimos").includes(fecha(ID_HOMONIMO_1)));
+    // El caso no verificable no puede contener la fecha correcta: debe agotar los 3 intentos.
+    assert.equal(texto("identidad-no-verificable").includes(fecha(ID_SOLICITANTE_UNICO)), false);
   });
 });
 

@@ -4,6 +4,70 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-17 · Identificación y verificación del solicitante
+
+**Issue**: [#9 — Identificación y verificación del solicitante](https://github.com/fabisahe29/CREDIAGIL/issues/9)
+
+**Detalle**: [specs/007-verificacion-identidad/research.md](specs/007-verificacion-identidad/research.md), decisiones R1 a R9
+
+### Decisión 1: el estado de identidad vive en el core, por conversación
+
+El core guarda en memoria si la identidad de cada conversación (`correlationId`) está verificada, y cuenta los intentos fallidos por solicitante. Solo `verificar_identidad` lo cambia, y `consultar_identidad` lo lee.
+
+**Motivo**: la Regla 1 no puede depender de lo que afirme el modelo, y el #13 necesita que el mismo core rechace un registro sin identidad (Principio IV).
+
+**Alternativas descartadas**: guardarlo en el estado del adaptador (el core no podría aplicar la regla del lado del servidor); un estado global del core (mezclaría conversaciones).
+
+### Decisión 2: tres herramientas separadas y errores del contrato del #7
+
+`buscar_solicitante` (documento o nombre, exactamente uno), `verificar_identidad` (fecha de expedición) y `consultar_identidad` (solo lectura). Un dato que no coincide es un error `negocio`; uno mal formado, un error `validacion`. El tercer fallo responde `verificacion_bloqueada`. Cada intento lleva una clave `idIntento`, que genera el adaptador: si se repite, el core devuelve la misma respuesta sin contar otro fallo.
+
+**Motivo**: cada contrato queda pequeño, y la distinción entre dato que no coincide y dato mal formado sale de la categoría del error, no del texto. La clave evita que un reintento tras un tiempo agotado cuente dos fallos (Principio VI).
+
+**Alternativas descartadas**: una sola herramienta `identificar` (mezcla la búsqueda sin efectos con el intento que cuenta); responder el fallo como éxito con `verificada: false` (la spec pide un error de negocio).
+
+### Decisión 3: se crea el módulo de política con la Regla 1
+
+`src/politica/` nace con `VERSION_POLITICA`, `MAX_INTENTOS_VERIFICACION = 3` y `evaluarRegla1`, que devuelve una decisión estructurada. La usan el core y el control del agente.
+
+**Motivo**: una sola fuente para la regla y su límite (regla de la zona MCP y Principio III).
+
+**Alternativas descartadas**: una constante en el core (el control la duplicaría); esperar al #12 para crear la política.
+
+### Decisión 4: control `PreToolUse` con una lista de herramientas que exigen identidad
+
+Un hook del Agent SDK consulta `consultar_identidad` en el core antes de las herramientas de la lista y las bloquea con un evento `bloqueo_por_regla` si no hay identidad verificada o si el core no responde. Si el core no responde, el control reintenta como el #7 y, al agotar los reintentos, además escala. La lista arranca vacía; el #10 y el #13 agregan sus herramientas.
+
+**Motivo**: el issue pide que los hooks consulten una fuente confiable, y así cada ticket aplica la Regla 1 agregando solo un nombre.
+
+**Alternativa descartada**: comprobar la identidad dentro de cada manejador del adaptador (cada ticket repetiría la comprobación).
+
+### Decisión 5: desambiguación y escalamiento decididos por el adaptador
+
+Ante homónimos, el código emite `solicitud_de_dato` pidiendo el número de documento. Si la ambigüedad sigue en un turno posterior, escala con el motivo `identidad_ambigua`; una verificación bloqueada escala con `identidad_no_verificable`. El escalamiento por ambigüedad se decide al cerrar el turno, no en la llamada: así no depende del orden en que el modelo llama a las herramientas. Dentro de un turno cuenta una sola búsqueda ambigua. Una búsqueda con una sola coincidencia desambigua la conversación: las búsquedas ambiguas posteriores ya no cuentan ni vuelven a pedir el documento, porque el modelo repite la búsqueda en cada turno.
+
+**Motivo**: los eventos y los escalamientos los decide el código, nunca el modelo (Decisión 2 del #8; Principio III).
+
+**Alternativa descartada**: instruir al modelo para que escale (no es determinista).
+
+### Decisión 6: las reglas 4 y 5 escalan por código con `solicitar_analista`
+
+El modelo clasifica el caso con un motivo tipado (`pide_persona` o `caso_no_cubierto`, con su causa) al llamar a `solicitar_analista`, una herramienta del adaptador sin datos del solicitante. El código escala: deja la señal con la regla, emite el evento y registra la auditoría. A partir de ahí, el control `PreToolUse` niega cualquier otra herramienta, incluidas las de identificación. El system prompt pide usarla antes de identificar (orden 4 → 5 → 1).
+
+**Motivo**: las revisiones de cumplimiento de `d37d3a7` y `dea0951` bloquearon el PR. Con solo el prompt, el modelo decía «tu caso pasa a un analista» sin que nada escalara, mientras que la Regla 1 sí se aplicaba por código. El Principio III permite que el modelo comprenda y extraiga datos estructurados; la decisión y el efecto quedan en el código. Es un adelanto acotado del #15 y el #16, que lo ampliarán (resumen para el analista, detección más robusta).
+
+**Alternativas descartadas**: solo la instrucción del prompt (no escala de verdad); un clasificador previo con una llamada extra al modelo en cada turno (más costo y complejidad de lo que pide este ticket); quitar las herramientas de identificación hasta el #15 (el ticket no entregaría su valor).
+
+### Decisión 7: la verificación no se transfiere a otro solicitante
+
+Un intento de verificación sobre otro solicitante invalida la verificación anterior de la conversación. `evaluarRegla1` puede recibir el solicitante de la acción y exigir que sea el verificado. Para que una respuesta repetida no contradiga el estado, el core guarda por `idIntento` solo los fallos; un éxito repetido se evalúa contra el estado actual.
+
+**Motivo**: es el caso borde de la spec, y evita que el #13 herede un control que permita registrar a nombre de quien no se verificó.
+
+**Alternativa descartada**: guardar varias identidades verificadas por conversación (no lo pide la spec y complica la Regla 1).
+
+---
+
 ## 2026-10-17 · Interfaz de chat
 
 **Issue**: [#8 — Interfaz de chat](https://github.com/fabisahe29/CREDIAGIL/issues/8)

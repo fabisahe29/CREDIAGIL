@@ -165,6 +165,8 @@ export function iniciarChat({
         core,
         correlationId: conv.correlationId,
         historial: conv.historial,
+        busquedasAmbiguas: conv.busquedasAmbiguas,
+        desambiguada: conv.desambiguada,
         ...(demo
           ? { alUsarHerramienta: (info) => escribir(formatearHerramienta(info, color)) }
           : {}),
@@ -181,11 +183,15 @@ export function iniciarChat({
       return;
     }
 
-    conv = registrarTurno(
-      registrarTurno(conv, "solicitante", mensaje),
-      "agente",
-      resultado.respuesta,
-    );
+    conv = {
+      ...registrarTurno(
+        registrarTurno(conv, "solicitante", mensaje),
+        "agente",
+        resultado.respuesta,
+      ),
+      busquedasAmbiguas: resultado.busquedasAmbiguas,
+      desambiguada: resultado.desambiguada,
+    };
     escribir(formatearAgente(resultado.respuesta, color));
     const mostrados = (resultado.eventos as unknown[]).map(mostrar);
     for (const mostrado of mostrados) {

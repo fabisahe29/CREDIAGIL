@@ -17,18 +17,43 @@ import {
   fueraDeContrato,
   type Respuesta,
 } from "../compartido/errores.ts";
-import { esquemaSolicitud } from "../mcp/core-simulado.ts";
+import {
+  esquemaCoincidencia,
+  esquemaEstadoIdentidad,
+  esquemaSolicitud,
+  type Coincidencia,
+} from "../mcp/core-simulado.ts";
 import type { Solicitud } from "../mcp/datos-ejemplo.ts";
+import type { EstadoIdentidad } from "../politica/identidad.ts";
 
 const PRINCIPAL_CORE = fileURLToPath(new URL("../mcp/principal.ts", import.meta.url));
 export const TIEMPO_LIMITE_CORE_MS = 5_000;
 
 const esquemaConsulta = esquemaRespuesta(z.object({ solicitud: esquemaSolicitud.nullable() }));
+const esquemaBusqueda = esquemaRespuesta(
+  z.object({ coincidencias: z.array(esquemaCoincidencia) }).strict(),
+);
+const esquemaIdentidad = esquemaRespuesta(z.object({ identidad: esquemaEstadoIdentidad }).strict());
 
 export type RespuestaConsulta = Respuesta<{ solicitud: Solicitud | null }>;
+export type RespuestaBusqueda = Respuesta<{ coincidencias: Coincidencia[] }>;
+export type RespuestaIdentidad = Respuesta<{ identidad: EstadoIdentidad }>;
+
+/** Criterio de búsqueda: exactamente uno de los dos (lo valida el core). */
+export type CriterioBusqueda = { documento: string } | { nombre: string };
 
 export interface ClienteCore {
   consultarSolicitud(idSolicitud: string, correlationId: string): Promise<RespuestaConsulta>;
+  buscarSolicitante(criterio: CriterioBusqueda, correlationId: string): Promise<RespuestaBusqueda>;
+  /** `idIntento` es la clave de idempotencia del intento: sus reintentos la repiten (R4). */
+  verificarIdentidad(
+    idSolicitante: string,
+    fechaExpedicion: string,
+    idIntento: string,
+    correlationId: string,
+  ): Promise<RespuestaIdentidad>;
+  /** Solo lectura; la usa el control de identidad, nunca el modelo (R6, R7). */
+  consultarIdentidad(correlationId: string): Promise<RespuestaIdentidad>;
   cerrar(): Promise<void>;
 }
 
@@ -81,28 +106,46 @@ export async function crearClienteCore({
   const mcp = llamador ?? (await conectarPorStdio(env, stderr));
   let cerrado = false;
 
+  /** Llama a una herramienta del core y valida su respuesta: fuera de contrato no se adivina (FR-009). */
+  async function llamar<T>(
+    nombre: string,
+    argumentos: Record<string, unknown>,
+    esquema: z.ZodType<unknown>,
+  ): Promise<Respuesta<T>> {
+    if (cerrado) {
+      return fallo(errorTransitorio("core_no_disponible", "La conexión con el core está cerrada."));
+    }
+    try {
+      const resultado = await mcp.callTool({ name: nombre, arguments: argumentos }, undefined, {
+        timeout: tiempoLimiteMs,
+      });
+      const respuesta = esquema.safeParse(resultado.structuredContent);
+      return respuesta.success ? (respuesta.data as Respuesta<T>) : fallo(fueraDeContrato());
+    } catch (error) {
+      return fallo(
+        esTiempoAgotado(error)
+          ? errorTransitorio("tiempo_agotado", "El core no respondió a tiempo.")
+          : errorTransitorio("core_no_disponible", "No se pudo hablar con el core."),
+      );
+    }
+  }
+
   return {
-    async consultarSolicitud(idSolicitud, correlationId) {
-      if (cerrado) {
-        return fallo(
-          errorTransitorio("core_no_disponible", "La conexión con el core está cerrada."),
-        );
-      }
-      try {
-        const resultado = await mcp.callTool(
-          { name: "consultar_solicitud", arguments: { idSolicitud, correlationId } },
-          undefined,
-          { timeout: tiempoLimiteMs },
-        );
-        const respuesta = esquemaConsulta.safeParse(resultado.structuredContent);
-        return respuesta.success ? (respuesta.data as RespuestaConsulta) : fallo(fueraDeContrato());
-      } catch (error) {
-        return fallo(
-          esTiempoAgotado(error)
-            ? errorTransitorio("tiempo_agotado", "El core no respondió a tiempo.")
-            : errorTransitorio("core_no_disponible", "No se pudo hablar con el core."),
-        );
-      }
+    consultarSolicitud(idSolicitud, correlationId) {
+      return llamar("consultar_solicitud", { idSolicitud, correlationId }, esquemaConsulta);
+    },
+    buscarSolicitante(criterio, correlationId) {
+      return llamar("buscar_solicitante", { ...criterio, correlationId }, esquemaBusqueda);
+    },
+    verificarIdentidad(idSolicitante, fechaExpedicion, idIntento, correlationId) {
+      return llamar(
+        "verificar_identidad",
+        { idSolicitante, fechaExpedicion, idIntento, correlationId },
+        esquemaIdentidad,
+      );
+    },
+    consultarIdentidad(correlationId) {
+      return llamar("consultar_identidad", { correlationId }, esquemaIdentidad);
     },
     async cerrar() {
       if (cerrado) return;

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
-import { ID_EN_ESTUDIO, ID_INEXISTENTE } from "../mcp/datos-ejemplo.ts";
+import { ID_EN_ESTUDIO, ID_INEXISTENTE, ID_SOLICITANTE_UNICO } from "../mcp/datos-ejemplo.ts";
 
 describe("cliente del core contra el servidor real", () => {
   let core: ClienteCore;
@@ -120,6 +120,272 @@ describe("cliente del core: respuestas fuera de contrato y fallas de transporte 
     if (!respuesta.ok) {
       assert.equal(respuesta.error.codigo, "core_no_disponible");
       assert.equal(respuesta.error.reintentable, true);
+    }
+  });
+});
+
+describe("cliente del core: herramientas de identidad (#9)", () => {
+  /** Llamador falso que guarda la última llamada y responde lo indicado. */
+  function llamadorQueResponde(contenido: () => unknown) {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    return {
+      llamadas,
+      llamador: {
+        callTool: async (params: { name: string; arguments: Record<string, unknown> }) => {
+          llamadas.push(params);
+          return { structuredContent: contenido() };
+        },
+        close: async () => {},
+      },
+    };
+  }
+
+  const coincidencia = {
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    nombre: "Ana Pérez Ficticia",
+    documentoEnmascarado: "******4567",
+  };
+
+  it("buscarSolicitante llama a buscar_solicitante con el criterio y el correlationId", async () => {
+    const falso = llamadorQueResponde(() => ({
+      ok: true,
+      datos: { coincidencias: [coincidencia] },
+    }));
+    const core = await crearClienteCore({ llamador: falso.llamador });
+    const correlationId = randomUUID();
+    const respuesta = await core.buscarSolicitante({ documento: "0001234567" }, correlationId);
+    assert.deepEqual(respuesta, { ok: true, datos: { coincidencias: [coincidencia] } });
+    assert.deepEqual(falso.llamadas, [
+      { name: "buscar_solicitante", arguments: { documento: "0001234567", correlationId } },
+    ]);
+  });
+
+  it("buscarSolicitante con una coincidencia que trae campos de más es fuera de contrato", async () => {
+    const falso = llamadorQueResponde(() => ({
+      ok: true,
+      datos: { coincidencias: [{ ...coincidencia, fechaExpedicion: "2012-05-14" }] },
+    }));
+    const core = await crearClienteCore({ llamador: falso.llamador });
+    const respuesta = await core.buscarSolicitante({ nombre: "Ana Pérez Ficticia" }, randomUUID());
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.codigo, "respuesta_fuera_de_contrato");
+  });
+
+  it("buscarSolicitante con tiempo agotado es transitorio tiempo_agotado", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "Request timed out");
+        },
+        close: async () => {},
+      },
+    });
+    const respuesta = await core.buscarSolicitante({ documento: "0001234567" }, randomUUID());
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.codigo, "tiempo_agotado");
+  });
+
+  it("buscarSolicitante con la conexión cerrada es transitorio", async () => {
+    const falso = llamadorQueResponde(() => ({ ok: true, datos: { coincidencias: [] } }));
+    const core = await crearClienteCore({ llamador: falso.llamador });
+    await core.cerrar();
+    const respuesta = await core.buscarSolicitante({ documento: "0001234567" }, randomUUID());
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.categoria, "transitorio");
+    assert.equal(falso.llamadas.length, 0);
+  });
+
+  it("contra el servidor real, encuentra a los homónimos", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const respuesta = await core.buscarSolicitante(
+        { nombre: "Elena Martínez Inventada" },
+        randomUUID(),
+      );
+      assert.equal(respuesta.ok, true);
+      if (respuesta.ok) assert.equal(respuesta.datos.coincidencias.length, 2);
+    } finally {
+      await core.cerrar();
+    }
+  });
+});
+describe("cliente del core: verificarIdentidad (#9, US3)", () => {
+  const llamadorCon = (contenido: unknown) => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    return {
+      llamadas,
+      llamador: {
+        callTool: async (params: { name: string; arguments: Record<string, unknown> }) => {
+          llamadas.push(params);
+          return { structuredContent: contenido };
+        },
+        close: async () => {},
+      },
+    };
+  };
+
+  it("llama a verificar_identidad con todos los campos y devuelve la identidad validada", async () => {
+    const correlationId = randomUUID();
+    const identidad = {
+      correlationId,
+      verificada: true,
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      verificadaEn: "2026-10-17T12:00:00.000Z",
+    };
+    const falso = llamadorCon({ ok: true, datos: { identidad } });
+    const core = await crearClienteCore({ llamador: falso.llamador });
+    const respuesta = await core.verificarIdentidad(
+      ID_SOLICITANTE_UNICO,
+      "2012-05-14",
+      "intento-1",
+      correlationId,
+    );
+    assert.deepEqual(respuesta, { ok: true, datos: { identidad } });
+    assert.deepEqual(falso.llamadas, [
+      {
+        name: "verificar_identidad",
+        arguments: {
+          idSolicitante: ID_SOLICITANTE_UNICO,
+          fechaExpedicion: "2012-05-14",
+          idIntento: "intento-1",
+          correlationId,
+        },
+      },
+    ]);
+  });
+
+  it("un error de negocio del core pasa tal cual", async () => {
+    const error = {
+      categoria: "negocio",
+      reintentable: false,
+      codigo: "dato_no_coincide",
+      mensaje: "La fecha de expedición no coincide. Te quedan 2 intentos.",
+    };
+    const core = await crearClienteCore({
+      llamador: llamadorCon({ ok: false, error }).llamador,
+    });
+    const respuesta = await core.verificarIdentidad(
+      ID_SOLICITANTE_UNICO,
+      "2001-01-01",
+      "i",
+      randomUUID(),
+    );
+    assert.deepEqual(respuesta, { ok: false, error });
+  });
+
+  it("una identidad con campos de más es fuera de contrato", async () => {
+    const correlationId = randomUUID();
+    const core = await crearClienteCore({
+      llamador: llamadorCon({
+        ok: true,
+        datos: {
+          identidad: {
+            correlationId,
+            verificada: true,
+            idSolicitante: ID_SOLICITANTE_UNICO,
+            verificadaEn: "2026-10-17T12:00:00.000Z",
+            fechaExpedicion: "2012-05-14",
+          },
+        },
+      }).llamador,
+    });
+    const respuesta = await core.verificarIdentidad(
+      ID_SOLICITANTE_UNICO,
+      "2012-05-14",
+      "i",
+      correlationId,
+    );
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.codigo, "respuesta_fuera_de_contrato");
+  });
+
+  it("un tiempo agotado es transitorio tiempo_agotado", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "Request timed out");
+        },
+        close: async () => {},
+      },
+    });
+    const respuesta = await core.verificarIdentidad(
+      ID_SOLICITANTE_UNICO,
+      "2012-05-14",
+      "i",
+      randomUUID(),
+    );
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.codigo, "tiempo_agotado");
+  });
+});
+describe("cliente del core: consultarIdentidad (#9, US4)", () => {
+  const llamadorCon = (contenido: unknown) => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    return {
+      llamadas,
+      llamador: {
+        callTool: async (params: { name: string; arguments: Record<string, unknown> }) => {
+          llamadas.push(params);
+          return { structuredContent: contenido };
+        },
+        close: async () => {},
+      },
+    };
+  };
+
+  it("llama a consultar_identidad con el correlationId y devuelve la identidad", async () => {
+    const correlationId = randomUUID();
+    const identidad = {
+      correlationId,
+      verificada: false,
+      idSolicitante: null,
+      verificadaEn: null,
+    };
+    const falso = llamadorCon({ ok: true, datos: { identidad } });
+    const core = await crearClienteCore({ llamador: falso.llamador });
+    assert.deepEqual(await core.consultarIdentidad(correlationId), {
+      ok: true,
+      datos: { identidad },
+    });
+    assert.deepEqual(falso.llamadas, [
+      { name: "consultar_identidad", arguments: { correlationId } },
+    ]);
+  });
+
+  it("una identidad que no cumple el esquema es fuera de contrato", async () => {
+    const core = await crearClienteCore({
+      llamador: llamadorCon({
+        ok: true,
+        datos: { identidad: { verificada: "sí" } },
+      }).llamador,
+    });
+    const r = await core.consultarIdentidad(randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
+  });
+
+  it("un tiempo agotado es transitorio tiempo_agotado", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "Request timed out");
+        },
+        close: async () => {},
+      },
+    });
+    const r = await core.consultarIdentidad(randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "tiempo_agotado");
+  });
+
+  it("contra el servidor real, una conversación nueva no está verificada", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const correlationId = randomUUID();
+      const r = await core.consultarIdentidad(correlationId);
+      assert.equal(r.ok && r.datos.identidad.verificada, false);
+    } finally {
+      await core.cerrar();
     }
   });
 });

@@ -23,8 +23,8 @@ Las reglas no negociables (reglas de negocio, datos ficticios, decisiones determ
 | `specs/NNN-…/` | Una carpeta por feature: spec, plan, research, contratos y tareas |
 | `.specify/` | Spec Kit: plantillas, scripts, hooks (`extensions.yml`) y constitución |
 | `.claude/` | Comandos propios (`skills/`), reglas por zona (`rules/`) y configuración compartida (`settings.json`) |
-| `src/politica/` | Módulo único de política de crédito (previsto, issue #7) |
-| `src/mcp/` | Servidor MCP de originación (previsto, issue #7) |
+| `src/politica/` | Módulo único de política de crédito: Regla 1 desde el #9; umbrales y tasa con #12 y #14 |
+| `src/mcp/` | Servidor MCP del core de originación (#7); identificación y verificación desde el #9 |
 | `src/chat/` | Chat de terminal: `npm run chat` (issue #8) |
 | `src/compartido/` | Contrato de errores, catálogo de eventos de negocio y logs |
 | `casos/` | Casos de prueba ficticios para la demo (`/caso` en el chat) |

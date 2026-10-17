@@ -41,6 +41,8 @@ describe("sesión: conversación (US1)", () => {
     assert.match(conv.correlationId, UUID);
     assert.deepEqual(conv.historial, []);
     assert.equal(conv.estado, "en_curso");
+    assert.equal(conv.busquedasAmbiguas, 0);
+    assert.equal(conv.desambiguada, false);
   });
 
   it("cada conversación nueva tiene un correlationId distinto", () => {
