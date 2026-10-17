@@ -496,13 +496,15 @@ describe("agente: eventos de negocio en el resultado (chat, US2)", () => {
     );
   });
 
-  it("si ambos intentos fallan, la escalada lleva solo su evento escalamiento", async (t) => {
+  it("si ambos intentos fallan, conserva solo los eventos del último intento y el escalamiento al final", async (t) => {
     capturarLogs(t);
+    let intento = 0;
     const emitirYFallar = async (contexto: ContextoConsulta) => {
+      intento++;
       emitirEvento(contexto.estado, {
         tipo: "solicitud_de_dato",
         descripcion: "Pido un dato",
-        motivo: "Intento fallido",
+        motivo: `Intento ${intento}`,
         dato: "extracto",
       });
       return [resultado("error_during_execution", null)];
@@ -510,8 +512,39 @@ describe("agente: eventos de negocio en el resultado (chat, US2)", () => {
     const { fn } = consultaFalsa([emitirYFallar, emitirYFallar]);
     const r = await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
     assert.deepEqual(
+      r.eventos.map((e) => [e.tipo, e.motivo]),
+      [
+        ["solicitud_de_dato", "Intento 2"],
+        ["escalamiento", "falla_del_agente"],
+      ],
+    );
+  });
+
+  it("un evento emitido antes de que el adaptador escale se conserva, en orden, antes del escalamiento", async (t) => {
+    capturarLogs(t);
+    const coreCaido: ClienteCore = {
+      async consultarSolicitud() {
+        return fallo(errorTransitorio("core_no_disponible", "Caído."));
+      },
+      async cerrar() {},
+    };
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        emitirEvento(contexto.estado, {
+          tipo: "solicitud_de_dato",
+          descripcion: "Necesitamos tu certificado",
+          motivo: "El ingreso sale de un documento",
+          dato: "certificado laboral",
+        });
+        await contexto.herramientas.consultar_solicitud.manejar({ idSolicitud: "SOL-0001000001" });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar("Hola", { ejecutarConsulta: fn, core: coreCaido, ...sinEspera });
+    assert.equal(r.tipo, "escalada");
+    assert.deepEqual(
       r.eventos.map((e) => e.tipo),
-      ["escalamiento"],
+      ["solicitud_de_dato", "escalamiento"],
     );
   });
 

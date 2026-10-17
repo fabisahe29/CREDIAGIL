@@ -37,7 +37,11 @@ async function principal(): Promise<void> {
   const rutaLog = `${CARPETA_LOGS}chat-${marcaDeTiempo(new Date())}.jsonl`;
   const descriptor = openSync(rutaLog, "a");
   fijarDestino({ write: (texto: string) => writeSync(descriptor, texto) });
+  // Idempotente: primero se deja de escribir en el archivo y después se cierra una sola vez.
+  let logsCerrados = false;
   const cerrarLogs = () => {
+    if (logsCerrados) return;
+    logsCerrados = true;
     fijarDestino(null);
     closeSync(descriptor);
   };
@@ -84,12 +88,19 @@ async function principal(): Promise<void> {
   };
 
   // Ctrl+C sale de inmediato, aunque haya un turno en curso; la conversación no se guarda.
+  // Los Ctrl+C siguientes se ignoran mientras se cierra; se sale aunque el cierre falle.
+  let saliendo = false;
   rl.on("SIGINT", () => {
+    if (saliendo) return;
+    saliendo = true;
     salida.write("\nSaliendo…\n");
-    void core.cerrar().finally(() => {
-      cerrarLogs();
-      process.exit(0);
-    });
+    void core
+      .cerrar()
+      .catch(() => {})
+      .finally(() => {
+        cerrarLogs();
+        process.exit(0);
+      });
   });
 
   await iniciarChat({

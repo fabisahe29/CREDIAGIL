@@ -25,10 +25,10 @@ export type DocumentoLeido =
 
 export type DocumentoEnviable = Extract<DocumentoLeido, { tipo: "soportado" | "no_soportado" }>;
 
-/** Nombre base sin caracteres que rompan el bloque <documento nombre="…">. */
 /** Quita comillas y ángulos, que romperían un atributo del bloque <documento …>. */
 const sinCaracteresDeBloque = (texto: string) => texto.replace(/["<>]/g, "_");
 
+/** Nombre base sin caracteres que rompan el bloque <documento nombre="…">. */
 export const nombreSeguro = (ruta: string) => sinCaracteresDeBloque(basename(ruta));
 
 /** Extensión en minúsculas, sin el punto y sin caracteres que rompan el bloque. */
@@ -58,6 +58,8 @@ export async function leerDocumento(ruta: string, directorioBase: string): Promi
   if (info.size === 0) return { tipo: "vacio", nombre };
 
   const bytes = await readFile(completa);
+  // El archivo pudo crecer entre stat y la lectura: el límite se aplica también a lo leído.
+  if (bytes.length > TAMANO_MAXIMO_BYTES) return noSoportado("tamano");
   if (bytes.includes(0)) return noSoportado("codificacion");
   let contenido: string;
   try {

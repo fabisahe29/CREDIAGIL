@@ -181,9 +181,8 @@ export async function conversar(
       ...(senal.herramienta !== undefined ? { herramienta: senal.herramienta } : {}),
       ...(senal.intentos !== undefined ? { intentos: senal.intentos } : {}),
     };
-    // Un turno escalado no produjo una respuesta válida: muestra solo su escalamiento. Los eventos
-    // descartados ya quedaron en los logs como evento_negocio.
-    estado.eventos.length = 0;
+    // Los eventos del intento clasificado se conservan (reflejan lo que el código ya hizo) y el
+    // escalamiento va al final; el chat fija el primer estado final (spec, casos borde).
     // Escalar nunca puede fallar (Principio VI): si el evento no valida, se registra y se escala igual.
     try {
       emitirEvento(estado, {
