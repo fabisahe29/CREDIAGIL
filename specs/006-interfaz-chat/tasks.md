@@ -265,7 +265,7 @@ description: "Lista de tareas: interfaz de chat"
     - Corregido en la validación: «1 pasos sin enviar» → singular y plural, con prueba nueva.
     - Observación para #10/#15: el agente remite a un «canal oficial de Crediágil para documentos» que no existe; es comportamiento del modelo, no de la interfaz.
     - Terminal interactiva (PowerShell/Windows Terminal), validada por el desarrollador: colores de `styleText` y su ausencia con `NO_COLOR`, una sola línea `Tú:` por entrada (sin eco duplicado), aviso al escribir durante un turno, `/pegar` a mano con el indicador `…`, `/nueva` sin historial, Ctrl+C a mitad de un turno, y la conversación cerrada tras el escalamiento con `--demo`. Todo según lo esperado.
-- [ ] T048 Commit convencional en `8-interfaz-de-chat`, por ejemplo `feat: interfaz de chat con eventos de negocio y casos de prueba (#8)`. Antes:
+- [X] T048 Commit convencional en `8-interfaz-de-chat`, por ejemplo `feat: interfaz de chat con eventos de negocio y casos de prueba (#8)`. Antes:
   - `git status`, para confirmar que no entra `logs/`, ningún `.env` ni archivo temporal;
   - la búsqueda de tokens del quickstart del #3.
 - [ ] T049 Con confirmación del desarrollador: `git push -u origin 8-interfaz-de-chat` y `/ticket-abrir-pr 8`. Se espera que la revisión de cumplimiento dé las 5 reglas como no aplicables; cualquier regla incumplida o hallazgo alto bloquea el PR y se corrige antes.
