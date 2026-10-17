@@ -10,6 +10,9 @@ build/
 coverage/
 *.log
 
+# Logs JSON de cada ejecución del chat (specs/006-interfaz-chat/research.md, R6)
+logs/
+
 # Sistema y editores
 .DS_Store
 Thumbs.db

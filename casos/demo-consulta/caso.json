@@ -1,0 +1,10 @@
+{
+  "nombre": "demo-consulta",
+  "descripcion": "Consulta de una solicitud ficticia, una pregunta de seguimiento y el adjunto de un certificado laboral",
+  "pasos": [
+    { "mensaje": "Hola, quiero saber cómo va mi solicitud SOL-0001000001" },
+    { "mensaje": "¿Y en qué fecha la radiqué?" },
+    { "adjuntar": "certificado-laboral.md" },
+    { "mensaje": "¿Recibiste el certificado?" }
+  ]
+}

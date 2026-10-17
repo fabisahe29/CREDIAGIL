@@ -1,6 +1,9 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
 import { ID_EN_ESTUDIO, ID_INEXISTENTE } from "../mcp/datos-ejemplo.ts";
@@ -25,6 +28,25 @@ describe("cliente del core contra el servidor real", () => {
       ok: true,
       datos: { solicitud: null },
     });
+  });
+});
+
+describe("cliente del core: destino del stderr del servidor (chat, R6)", () => {
+  it("con stderr hacia un archivo, los logs del core quedan en ese archivo", async () => {
+    const carpeta = mkdtempSync(join(tmpdir(), "crediagil-stderr-"));
+    const ruta = join(carpeta, "core.jsonl");
+    const descriptor = openSync(ruta, "a");
+    const correlationId = randomUUID();
+    try {
+      const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" }, stderr: descriptor });
+      await core.consultarSolicitud(ID_EN_ESTUDIO, correlationId);
+      await core.cerrar();
+    } finally {
+      closeSync(descriptor);
+    }
+    const contenido = readFileSync(ruta, "utf8");
+    rmSync(carpeta, { recursive: true, force: true });
+    assert.ok(contenido.includes(correlationId), "el log del core no quedó en el archivo");
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { crearAdaptador, crearEstado } from "./adaptador.ts";
+import { crearAdaptador, crearEstado, emitirEvento } from "./adaptador.ts";
 import { crearClienteCore, type ClienteCore, type RespuestaConsulta } from "./cliente-core.ts";
 import { exito } from "../compartido/errores.ts";
 import { ID_EN_ESTUDIO } from "../mcp/datos-ejemplo.ts";
@@ -138,6 +138,114 @@ describe("adaptador: reintentos y escalamiento contra el servidor real (US3)", (
     } finally {
       await core.cerrar();
     }
+  });
+});
+
+describe("adaptador: eventos de negocio (chat, US2)", () => {
+  it("un estado nuevo empieza sin eventos", () => {
+    assert.deepEqual(crearEstado(randomUUID()).eventos, []);
+  });
+
+  it("emitirEvento completa correlationId y ts, agrega el evento y lo registra", (t) => {
+    const logs = capturarStderr(t);
+    const correlationId = randomUUID();
+    const estado = crearEstado(correlationId);
+    const evento = emitirEvento(estado, {
+      tipo: "bloqueo_por_regla",
+      descripcion: "No podemos preaprobar automáticamente tu solicitud",
+      motivo: "La cuota supera el máximo",
+      regla: "Regla 2",
+      valores: { cuota: 1250000 },
+      siguientePaso: "Un analista revisará tu caso",
+    });
+    assert.equal(evento.correlationId, correlationId);
+    assert.match(evento.ts, /^\d{4}-\d{2}-\d{2}T/);
+    assert.deepEqual(estado.eventos, [evento]);
+    const registro = logs().find((l) => l["evento"] === "evento_negocio");
+    assert.ok(registro, "no se registró evento_negocio");
+    assert.equal(registro["tipo"], "bloqueo_por_regla");
+    assert.equal(registro["regla"], "Regla 2");
+    assert.deepEqual(registro["valores"], { cuota: 1250000 });
+    assert.equal(registro["correlationId"], correlationId);
+  });
+
+  it("emitirEvento lanza si el evento no cumple el catálogo, sin agregarlo", (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    assert.throws(
+      () =>
+        emitirEvento(estado, {
+          tipo: "preaprobacion",
+          descripcion: "Preaprobada",
+          motivo: "Cumple",
+          regla: "Regla 2",
+          valores: {},
+        }),
+      /evento inválido/,
+    );
+    assert.deepEqual(estado.eventos, []);
+  });
+});
+
+describe("adaptador: observador de herramientas del modo de demostración (US2)", () => {
+  it("recibe cada intento con herramienta, intento, resultado y categoría, sin argumentos", async (t) => {
+    capturarStderr(t);
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "siempre" } });
+    const infos: unknown[] = [];
+    try {
+      const adaptador = crearAdaptador({
+        core,
+        estado: crearEstado(randomUUID()),
+        dormir: async () => {},
+        azar: () => 0.5,
+        alUsarHerramienta: (info) => void infos.push(info),
+      });
+      await adaptador.herramientas.consultar_solicitud.manejar({ idSolicitud: ID_EN_ESTUDIO });
+    } finally {
+      await core.cerrar();
+    }
+    assert.deepEqual(
+      infos,
+      [1, 2, 3].map((intento) => ({
+        herramienta: "consultar_solicitud",
+        intento,
+        resultado: "core_no_disponible",
+        categoria: "transitorio",
+      })),
+    );
+  });
+
+  it("un intento exitoso llega como ok, sin categoría", async (t) => {
+    capturarStderr(t);
+    const { core } = coreFalso([exito({ solicitud: null })]);
+    const infos: unknown[] = [];
+    const adaptador = crearAdaptador({
+      core,
+      estado: crearEstado(randomUUID()),
+      alUsarHerramienta: (info) => void infos.push(info),
+    });
+    await adaptador.herramientas.consultar_solicitud.manejar({ idSolicitud: ID_EN_ESTUDIO });
+    assert.deepEqual(infos, [{ herramienta: "consultar_solicitud", intento: 1, resultado: "ok" }]);
+  });
+
+  it("una excepción del observador se registra y no interrumpe la llamada", async (t) => {
+    const logs = capturarStderr(t);
+    const { core, llamadas } = coreFalso([exito({ solicitud: null })]);
+    const adaptador = crearAdaptador({
+      core,
+      estado: crearEstado(randomUUID()),
+      alUsarHerramienta: () => {
+        throw new Error("pantalla rota");
+      },
+    });
+    const resultado = await adaptador.herramientas.consultar_solicitud.manejar({
+      idSolicitud: ID_EN_ESTUDIO,
+    });
+    assert.equal(resultado.isError, false);
+    assert.equal(llamadas.length, 1);
+    const error = logs().find((l) => l["evento"] === "error_observador");
+    assert.ok(error, "no se registró el error del observador");
+    assert.match(String(error["causa"]), /pantalla rota/);
   });
 });
 
