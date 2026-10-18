@@ -19,6 +19,12 @@ import {
 
 import { construirResultado, validarSalida } from "../compartido/extraccion.ts";
 import { CONTENIDO_CERTIFICADO, salidaCertificado } from "../compartido/extraccion-ejemplos.ts";
+import {
+  ejemploCertificado,
+  extractoConLecturaErrada,
+  extractosTrimestre,
+  type Ejemplo,
+} from "../compartido/ingreso-ejemplos.ts";
 import { VERSION_POLITICA } from "../politica/politica.ts";
 
 const PRINCIPAL = fileURLToPath(new URL("./principal.ts", import.meta.url));
@@ -621,5 +627,233 @@ describe("servidor MCP del core: registrar_extraccion y consultar_extracciones (
     assert.equal(extra.contenido.error?.campo, "otro");
     const id = await registrar("no-uuid");
     assert.equal(id.contenido.error?.campo, "correlationId");
+  });
+});
+
+describe("servidor MCP del core: verificar_ingreso y consultar_verificacion_ingreso (#11)", () => {
+  let conexion: Conexion;
+  before(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  after(async () => {
+    await conexion.cerrar();
+  });
+
+  async function verificado() {
+    const correlationId = randomUUID();
+    await llamarHerramienta(conexion, "verificar_identidad", {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      fechaExpedicion: SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!
+        .fechaExpedicion,
+      idIntento: randomUUID(),
+      correlationId,
+    });
+    return correlationId;
+  }
+
+  async function registrarDocumentos(correlationId: string) {
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      const v = validarSalida(e.salida, e, new Date());
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = await llamarHerramienta(conexion, "registrar_extraccion", {
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      });
+      assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    }
+  }
+
+  const verificar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "verificar_ingreso", argumentos);
+
+  it("anuncia las dos herramientas con su esquema de salida; la consulta como solo lectura", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const verificarH = tools.find((t) => t.name === "verificar_ingreso");
+    const consultarH = tools.find((t) => t.name === "consultar_verificacion_ingreso");
+    assert.ok(verificarH?.inputSchema.properties?.["correlationId"]);
+    assert.ok(verificarH?.inputSchema.properties?.["ingresoDeclarado"]);
+    assert.equal(verificarH?.inputSchema.properties?.["ingresoVerificado"], undefined);
+    assert.ok(verificarH?.outputSchema);
+    assert.ok(consultarH?.outputSchema);
+    assert.equal(consultarH?.annotations?.readOnlyHint, true);
+  });
+
+  it("sin identidad verificada responde negocio identidad_no_verificada", async () => {
+    const r = await verificar({ correlationId: randomUUID() });
+    assert.equal(r.isError, true);
+    assert.equal(r.contenido.error?.categoria, "negocio");
+    assert.equal(r.contenido.error?.codigo, "identidad_no_verificada");
+  });
+
+  it("con los documentos verifica, audita sin contenido ni valores y se puede consultar", async () => {
+    const correlationId = await verificado();
+    await registrarDocumentos(correlationId);
+
+    const r = await verificar({ correlationId, ingresoDeclarado: 4_300_000 });
+    assert.equal(r.isError, false);
+    const v = r.contenido.datos?.["verificacion"] as {
+      estado: string;
+      ingreso: { monto: number; origen: string };
+    };
+    assert.equal(v.estado, "discrepancia");
+    assert.equal(v.ingreso.monto, 3_800_000);
+
+    const consulta = await llamarHerramienta(conexion, "consultar_verificacion_ingreso", {
+      correlationId,
+    });
+    assert.equal(
+      (consulta.contenido.datos?.["verificacion"] as { estado: string }).estado,
+      "discrepancia",
+    );
+
+    const registros = await registrosDe(conexion, correlationId);
+    const auditoria = registros.find((l) => l["evento"] === "auditoria_ingreso");
+    assert.ok(auditoria, "falta la auditoría");
+    assert.equal(auditoria["estado"], "discrepancia");
+    assert.equal(auditoria["ingresoVerificado"], 3_800_000);
+    assert.equal(auditoria["ingresoDeclarado"], 4_300_000);
+    assert.equal(auditoria["diferencia"], 500_000);
+    assert.equal(auditoria["umbralPorcentaje"], 10);
+    assert.equal(auditoria["versionPolitica"], VERSION_POLITICA);
+    assert.equal(typeof auditoria["regla"], "string");
+    assert.equal(typeof auditoria["ts"], "string");
+    const herramienta = registros.find(
+      (l) => l["evento"] === "herramienta" && l["herramienta"] === "verificar_ingreso",
+    );
+    assert.equal(herramienta?.["estado"], "discrepancia");
+    const texto = JSON.stringify(registros);
+    for (const dato of ["Certificado laboral ficticio", "Industrias", "Ficticia", "Salario"]) {
+      assert.equal(texto.includes(dato), false, `«${dato}» en el log`);
+    }
+  });
+
+  it("repetir la verificación con los mismos datos no audita otra vez", async () => {
+    const correlationId = await verificado();
+    await registrarDocumentos(correlationId);
+    await verificar({ correlationId, ingresoDeclarado: 3_800_000 });
+    await verificar({ correlationId, ingresoDeclarado: 3_800_000 });
+    const registros = await registrosDe(conexion, correlationId);
+    assert.equal(registros.filter((l) => l["evento"] === "auditoria_ingreso").length, 1);
+  });
+
+  it("la consulta antes de verificar devuelve verificacion null", async () => {
+    const correlationId = await verificado();
+    const r = await llamarHerramienta(conexion, "consultar_verificacion_ingreso", {
+      correlationId,
+    });
+    assert.equal(r.isError, false);
+    assert.equal(r.contenido.datos?.["verificacion"], null);
+  });
+
+  it("un campo extra, un correlationId inválido o un declarado inválido son validación de ese campo", async () => {
+    const correlationId = await verificado();
+    const casos: [Record<string, unknown>, string][] = [
+      [{ correlationId, ingresoVerificado: 9_999_999 }, "ingresoVerificado"],
+      [{ correlationId: "no-uuid" }, "correlationId"],
+      [{}, "correlationId"],
+      [{ correlationId, ingresoDeclarado: -1 }, "ingresoDeclarado"],
+      [{ correlationId, ingresoDeclarado: "mucho" }, "ingresoDeclarado"],
+    ];
+    for (const [argumentos, campo] of casos) {
+      const r = await verificar(argumentos);
+      assert.equal(r.isError, true, campo);
+      assert.equal(r.contenido.error?.categoria, "validacion", campo);
+      assert.equal(r.contenido.error?.campo, campo);
+    }
+    const consulta = await llamarHerramienta(conexion, "consultar_verificacion_ingreso", {
+      correlationId,
+      extra: 1,
+    });
+    assert.equal(consulta.contenido.error?.campo, "extra");
+  });
+});
+
+describe("servidor MCP del core: registrar_extraccion con reextracción (#11, US5)", () => {
+  let conexion: Conexion;
+  before(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  after(async () => {
+    await conexion.cerrar();
+  });
+
+  async function verificado() {
+    const correlationId = randomUUID();
+    await llamarHerramienta(conexion, "verificar_identidad", {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      fechaExpedicion: SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!
+        .fechaExpedicion,
+      idIntento: randomUUID(),
+      correlationId,
+    });
+    return correlationId;
+  }
+
+  const registrar = (correlationId: string, e: Ejemplo, extra: Record<string, unknown> = {}) => {
+    const v = validarSalida(e.salida, e, new Date());
+    if (!v.ok) assert.fail(JSON.stringify(v.errores));
+    return llamarHerramienta(conexion, "registrar_extraccion", {
+      correlationId,
+      adjunto: e.adjunto,
+      nombre: e.nombre,
+      contenido: e.contenido,
+      resultado: construirResultado(v.salida, e, 1),
+      ...extra,
+    });
+  };
+
+  it("anuncia reextraccion en la entrada de registrar_extraccion", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const registrarH = tools.find((t) => t.name === "registrar_extraccion");
+    assert.ok(registrarH?.inputSchema.properties?.["reextraccion"]);
+  });
+
+  it("reemplaza el registro con una reextracción vigente, audita la regla y la anota en el log", async () => {
+    const correlationId = await verificado();
+    const { errada, correcta } = extractoConLecturaErrada();
+    assert.equal((await registrar(correlationId, errada)).isError, false);
+    const r = await registrar(correlationId, correcta, {
+      reextraccion: { regla: "titular_vs_solicitante" },
+    });
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    const extraccion = r.contenido.datos?.["extraccion"] as { reextraidaPor: string[] };
+    assert.deepEqual(extraccion.reextraidaPor, ["titular_vs_solicitante"]);
+    const registros = await registrosDe(conexion, correlationId);
+    const auditoria = registros.find(
+      (l) => l["evento"] === "auditoria_extraccion" && l["reextraccion"] !== undefined,
+    );
+    assert.equal(auditoria?.["reextraccion"], "titular_vs_solicitante");
+    const herramienta = registros.find(
+      (l) => l["evento"] === "herramienta" && l["reextraccion"] !== undefined,
+    );
+    assert.equal(herramienta?.["reextraccion"], "titular_vs_solicitante");
+    assert.equal(JSON.stringify(registros).includes("Luis Gómez"), false, "un valor en el log");
+  });
+
+  it("sin inconsistencia vigente responde negocio reextraccion_no_aplica", async () => {
+    const correlationId = await verificado();
+    const { correcta } = extractoConLecturaErrada();
+    assert.equal((await registrar(correlationId, correcta)).isError, false);
+    const r = await registrar(correlationId, correcta, {
+      reextraccion: { regla: "titular_vs_solicitante" },
+    });
+    assert.equal(r.isError, true);
+    assert.equal(r.contenido.error?.categoria, "negocio");
+    assert.equal(r.contenido.error?.codigo, "reextraccion_no_aplica");
+  });
+
+  it("rechaza campos extra dentro de reextraccion como validación de ese campo", async () => {
+    const correlationId = await verificado();
+    const { errada } = extractoConLecturaErrada();
+    assert.equal((await registrar(correlationId, errada)).isError, false);
+    const r = await registrar(correlationId, errada, {
+      reextraccion: { regla: "titular_vs_solicitante", otro: 1 },
+    });
+    assert.equal(r.isError, true);
+    assert.equal(r.contenido.error?.categoria, "validacion");
+    assert.equal(r.contenido.error?.campo, "reextraccion");
   });
 });

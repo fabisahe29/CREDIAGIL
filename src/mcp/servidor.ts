@@ -14,6 +14,7 @@ import {
   type Respuesta,
 } from "../compartido/errores.ts";
 import { esquemaRegistroExtraccion } from "../compartido/extraccion.ts";
+import { esquemaVerificacionIngreso } from "../compartido/ingreso.ts";
 import { registrar } from "../compartido/logs.ts";
 import { MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
 import {
@@ -48,10 +49,14 @@ const ENTRADAS = {
       nombre: z.unknown(),
       contenido: z.unknown(),
       resultado: z.unknown(),
+      reextraccion: z.unknown().optional(),
       correlationId,
     })
     .strict(),
   consultar_extracciones: z.object({ correlationId }).strict(),
+  // #11: el ingreso verificado no es un campo de entrada; lo calcula el core (R8).
+  verificar_ingreso: z.object({ ingresoDeclarado: z.unknown().optional(), correlationId }).strict(),
+  consultar_verificacion_ingreso: z.object({ correlationId }).strict(),
 } as const;
 
 type NombreHerramienta = keyof typeof ENTRADAS;
@@ -98,6 +103,13 @@ function registrarHerramienta(
     resultado: respuesta.ok ? "ok" : respuesta.error.codigo,
     ...campos,
   });
+}
+
+/** La regla de una reextracción, para el log; nunca otro dato de la entrada. */
+function reextraccionDe(reextraccion: unknown): { reextraccion?: string } {
+  if (typeof reextraccion !== "object" || reextraccion === null) return {};
+  const { regla } = reextraccion as { regla?: unknown };
+  return typeof regla === "string" ? { reextraccion: regla.slice(0, 64) } : {};
 }
 
 /** Qué criterio usó la búsqueda, para el log; nunca su valor (R9). */
@@ -250,6 +262,9 @@ export function crearServidor(core: Core): McpServer {
         resultado: anunciado(
           "Obligatorio. Resultado de la extracción: extraido, no_cubierto o no_extraible.",
         ),
+        reextraccion: anunciado(
+          "Opcional. { regla }: pide reemplazar el registro tras una inconsistencia corregible; el core la recalcula y la acepta una vez por documento y regla.",
+        ),
         correlationId: CORRELATION_ID_ANUNCIADO,
       }),
       outputSchema: salida({ extraccion: esquemaRegistroExtraccion }),
@@ -265,6 +280,7 @@ export function crearServidor(core: Core): McpServer {
       registrarHerramienta("registrar_extraccion", argumentos, respuesta, {
         adjunto: typeof validacion.entrada.adjunto === "number" ? validacion.entrada.adjunto : null,
         estado: respuesta.ok ? respuesta.datos.extraccion.estado : null,
+        ...reextraccionDe(validacion.entrada.reextraccion),
       });
       if (auditoria !== null) {
         registrar("auditoria_extraccion", {
@@ -293,6 +309,63 @@ export function crearServidor(core: Core): McpServer {
         : validacion.respuesta;
       registrarHerramienta("consultar_extracciones", argumentos, respuesta, {
         extracciones: respuesta.ok ? respuesta.datos.extracciones.length : null,
+      });
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "verificar_ingreso",
+    {
+      title: "Verificar ingreso",
+      description:
+        "Calcula el ingreso mensual verificado con los documentos ya extraídos, lo compara con el declarado y contrasta los documentos entre sí. Exige la identidad verificada. El ingreso verificado lo calcula el core; no se envía.",
+      inputSchema: z.looseObject({
+        ingresoDeclarado: anunciado(
+          "Opcional. Ingreso mensual que declaró el solicitante, entero de pesos ≥ 0. Ausente conserva el último; null lo borra.",
+        ),
+        correlationId: CORRELATION_ID_ANUNCIADO,
+      }),
+      outputSchema: salida({ verificacion: esquemaVerificacionIngreso }),
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("verificar_ingreso", argumentos);
+      if (!validacion.ok) {
+        registrarHerramienta("verificar_ingreso", argumentos, validacion.respuesta);
+        return aResultadoMcp(validacion.respuesta);
+      }
+      const { respuesta, auditoria } = core.verificarIngreso(validacion.entrada);
+      // Solo el estado: nunca valores de documentos, fragmentos ni nombres (R9).
+      registrarHerramienta("verificar_ingreso", argumentos, respuesta, {
+        estado: respuesta.ok ? respuesta.datos.verificacion.estado : null,
+      });
+      if (auditoria !== null) {
+        registrar("auditoria_ingreso", {
+          correlationId: validacion.entrada.correlationId,
+          ...auditoria,
+        });
+      }
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "consultar_verificacion_ingreso",
+    {
+      title: "Consultar verificación de ingreso",
+      description:
+        "Devuelve la última verificación de ingreso de la conversación, o null si todavía no se verificó. Solo lectura.",
+      inputSchema: z.looseObject({ correlationId: CORRELATION_ID_ANUNCIADO }),
+      outputSchema: salida({ verificacion: esquemaVerificacionIngreso.nullable() }),
+      annotations: { readOnlyHint: true },
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("consultar_verificacion_ingreso", argumentos);
+      const respuesta = validacion.ok
+        ? core.consultarVerificacionIngreso(validacion.entrada.correlationId)
+        : validacion.respuesta;
+      registrarHerramienta("consultar_verificacion_ingreso", argumentos, respuesta, {
+        estado: respuesta.ok ? (respuesta.datos.verificacion?.estado ?? null) : null,
       });
       return aResultadoMcp(respuesta);
     },

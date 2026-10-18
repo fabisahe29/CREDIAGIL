@@ -14,6 +14,7 @@ import {
 } from "../mcp/datos-ejemplo.ts";
 import { construirResultado, validarSalida } from "../compartido/extraccion.ts";
 import { CONTENIDO_CERTIFICADO, salidaCertificado } from "../compartido/extraccion-ejemplos.ts";
+import { ejemploCertificado, extractosTrimestre } from "../compartido/ingreso-ejemplos.ts";
 
 describe("cliente del core contra el servidor real", () => {
   let core: ClienteCore;
@@ -478,5 +479,220 @@ describe("cliente del core: extracciones (#10)", () => {
     const r = await core.registrarExtraccion(entrada(), randomUUID());
     assert.equal(r.ok, false);
     if (!r.ok) assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
+  });
+});
+
+describe("cliente del core: verificación de ingreso (#11)", () => {
+  async function registrarDocumentos(core: ClienteCore, correlationId: string) {
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      const v = validarSalida(e.salida, e, new Date());
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = await core.registrarExtraccion(
+        {
+          adjunto: e.adjunto,
+          nombre: e.nombre,
+          contenido: e.contenido,
+          resultado: construirResultado(v.salida, e, 1),
+        },
+        correlationId,
+      );
+      assert.equal(r.ok, true);
+    }
+  }
+
+  it("contra el servidor real, verifica el ingreso y luego consulta la verificación", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const correlationId = randomUUID();
+      const sinIdentidad = await core.verificarIngreso({}, correlationId);
+      assert.equal(sinIdentidad.ok, false);
+      if (!sinIdentidad.ok) assert.equal(sinIdentidad.error.codigo, "identidad_no_verificada");
+
+      const antes = await core.consultarVerificacionIngreso(correlationId);
+      assert.equal(antes.ok && antes.datos.verificacion, null);
+
+      const unico = SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!;
+      await core.verificarIdentidad(
+        unico.idSolicitante,
+        unico.fechaExpedicion,
+        randomUUID(),
+        correlationId,
+      );
+      await registrarDocumentos(core, correlationId);
+
+      const sinDeclarar = await core.verificarIngreso({}, correlationId);
+      assert.ok(sinDeclarar.ok);
+      if (sinDeclarar.ok) assert.equal(sinDeclarar.datos.verificacion.estado, "falta_declarado");
+
+      const declarado = await core.verificarIngreso({ ingresoDeclarado: 3_800_000 }, correlationId);
+      assert.ok(declarado.ok);
+      if (declarado.ok) {
+        assert.equal(declarado.datos.verificacion.estado, "verificado");
+        assert.equal(declarado.datos.verificacion.ingreso?.monto, 3_800_000);
+      }
+
+      const despues = await core.consultarVerificacionIngreso(correlationId);
+      assert.ok(despues.ok);
+      if (despues.ok) assert.equal(despues.datos.verificacion?.estado, "verificado");
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("envía ingresoDeclarado solo si se pasa, y null para borrarlo", async () => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return { structuredContent: { ok: true, datos: { verificacion: null } } };
+        },
+        close: async () => {},
+      },
+    });
+    const correlationId = randomUUID();
+    await core.verificarIngreso({}, correlationId);
+    await core.verificarIngreso({ ingresoDeclarado: 3_800_000 }, correlationId);
+    await core.verificarIngreso({ ingresoDeclarado: null }, correlationId);
+    await core.consultarVerificacionIngreso(correlationId);
+    assert.deepEqual(llamadas[0], { name: "verificar_ingreso", arguments: { correlationId } });
+    assert.deepEqual(llamadas[1], {
+      name: "verificar_ingreso",
+      arguments: { ingresoDeclarado: 3_800_000, correlationId },
+    });
+    assert.deepEqual(llamadas[2]?.arguments, { ingresoDeclarado: null, correlationId });
+    assert.deepEqual(llamadas[3], {
+      name: "consultar_verificacion_ingreso",
+      arguments: { correlationId },
+    });
+  });
+
+  it("la entrada del cliente no tiene ningún campo de ingreso verificado", async () => {
+    const llamadas: Record<string, unknown>[] = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params.arguments);
+          return { structuredContent: { ok: true, datos: { verificacion: null } } };
+        },
+        close: async () => {},
+      },
+    });
+    await core.verificarIngreso(
+      { ingresoDeclarado: 1, ingresoVerificado: 2 } as never,
+      randomUUID(),
+    );
+    // El cliente solo reenvía el campo declarado; cualquier otro lo rechazaría el servidor.
+    assert.deepEqual(Object.keys(llamadas[0] ?? {}).sort(), ["correlationId", "ingresoDeclarado"]);
+  });
+
+  it("una verificación que no cumple el esquema es fuera de contrato", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({
+          structuredContent: { ok: true, datos: { verificacion: { estado: "aprobado" } } },
+        }),
+        close: async () => {},
+      },
+    });
+    const r = await core.verificarIngreso({}, randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
+    const consulta = await core.consultarVerificacionIngreso(randomUUID());
+    assert.equal(consulta.ok, false);
+  });
+
+  it("la consulta acepta una verificación null como éxito", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({
+          structuredContent: { ok: true, datos: { verificacion: null } },
+        }),
+        close: async () => {},
+      },
+    });
+    const r = await core.consultarVerificacionIngreso(randomUUID());
+    assert.deepEqual(r, { ok: true, datos: { verificacion: null } });
+  });
+
+  it("un tiempo agotado es un error transitorio", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "tiempo");
+        },
+        close: async () => {},
+      },
+    });
+    const r = await core.verificarIngreso({}, randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "tiempo_agotado");
+  });
+});
+
+describe("cliente del core: reextracción (#11, US5)", () => {
+  function resultadoCertificado() {
+    const v = validarSalida(salidaCertificado(), { contenido: CONTENIDO_CERTIFICADO }, new Date());
+    if (!v.ok) assert.fail(JSON.stringify(v.errores));
+    return construirResultado(
+      v.salida,
+      { adjunto: 1, nombre: "certificado.md", contenido: CONTENIDO_CERTIFICADO },
+      1,
+    );
+  }
+
+  it("envía reextraccion con la regla a registrar_extraccion cuando viene, y no la envía si no", async () => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return { structuredContent: { ok: true, datos: {} } };
+        },
+        close: async () => {},
+      },
+    });
+    const base = {
+      adjunto: 1,
+      nombre: "extracto.md",
+      contenido: CONTENIDO_CERTIFICADO,
+      resultado: resultadoCertificado(),
+    };
+    await core.registrarExtraccion(base, randomUUID());
+    await core.registrarExtraccion(
+      { ...base, reextraccion: { regla: "titular_vs_solicitante" } },
+      randomUUID(),
+    );
+    assert.equal("reextraccion" in llamadas[0]!.arguments, false);
+    assert.deepEqual(llamadas[1]!.arguments["reextraccion"], { regla: "titular_vs_solicitante" });
+  });
+
+  it("conserva los códigos reextraccion_no_aplica y reextraccion_agotada del core", async () => {
+    for (const codigo of ["reextraccion_no_aplica", "reextraccion_agotada"]) {
+      const core = await crearClienteCore({
+        llamador: {
+          callTool: async () => ({
+            isError: true,
+            structuredContent: {
+              ok: false,
+              error: { categoria: "negocio", codigo, mensaje: "x", reintentable: false },
+            },
+          }),
+          close: async () => {},
+        },
+      });
+      const r = await core.registrarExtraccion(
+        {
+          adjunto: 1,
+          nombre: "a.md",
+          contenido: CONTENIDO_CERTIFICADO,
+          resultado: resultadoCertificado(),
+          reextraccion: { regla: "titular_vs_solicitante" },
+        },
+        randomUUID(),
+      );
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.error.codigo, codigo);
+    }
   });
 });

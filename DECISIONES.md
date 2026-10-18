@@ -4,6 +4,70 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-18 · Ingreso verificado y validación de consistencia
+
+**Issue**: [#11 — Ingreso verificado y validación de consistencia](https://github.com/fabisahe29/CREDIAGIL/issues/11)
+
+**Detalle**: [specs/009-ingreso-verificado-consistencia/research.md](specs/009-ingreso-verificado-consistencia/research.md), decisiones R1 a R10
+
+### Decisión 1: el ingreso verificado es el menor entre el salario y el promedio de nómina
+
+Con certificado y extractos, el ingreso es el menor entre el salario del certificado y el promedio mensual de abonos de nómina. El promedio divide entre el número de extractos (los que no traen nómina cuentan con 0) y redondea hacia abajo. Si falta un origen, se usa el otro.
+
+**Motivo**: cada elección va hacia el lado que no infla el ingreso, que es el de menor costo cuando se equivoca (Principio V). Es una función pura de datos con procedencia, sin el ingreso declarado.
+
+**Alternativas descartadas**: usar solo el salario del certificado, o solo el promedio de abonos (un solo documento pesaría por todos); exigir que coincidan (escalaría casos legítimos por diferencias pequeñas); promediar solo los meses con nómina (un mes con nómina entre tres extractos pasaría con el ingreso completo).
+
+### Decisión 2: la discrepancia se compara con enteros y sobre el ingreso verificado
+
+Hay discrepancia cuando `|declarado − verificado| × 100 > 10 × verificado`. Con el verificado en 0 no hay división: no hay ingreso verificado.
+
+**Motivo**: la constitución mide el 10% sobre el verificado, y el borde exacto no puede depender de un flotante (Principio III). El 10% vive solo en `src/politica/politica.ts`.
+
+**Alternativas descartadas**: `Math.abs(d - v) / v > 0.1`, porque 0,1 no es exacto y el borde podría caer en cualquiera de los lados; una librería decimal, porque los enteros bastan.
+
+### Decisión 3: las comprobaciones de consistencia usan reglas deterministas, no similitud
+
+Los nombres se comparan como conjuntos de palabras sin tildes, mayúsculas ni orden. Empleador y pagador coinciden si son iguales o el pagador es un prefijo de al menos dos palabras del empleador, sin sufijos societarios. El pagador se saca de la descripción del abono de nómina: no se agrega un campo al esquema del #10.
+
+**Motivo**: es explicable y reproducible en el borde, y una palabra de más o de menos no se supone igual (Principio V).
+
+**Alternativas descartadas**: igualdad exacta de cadenas (escalaría «S.A.S.» o «del Valle» por forma); distancia de edición (puede juntar a dos personas distintas y no es explicable); un campo «pagador» en el esquema del #10 (reabre su contrato y pide un dato más al modelo).
+
+### Decisión 4: detienen las dos comprobaciones mínimas y las que afectan el ingreso
+
+Detienen la solicitud, y la envían a un analista, el titular frente al solicitante, el empleador frente al pagador, los periodos superpuestos y los periodos de más de 31 días. Los huecos entre meses solo se reportan.
+
+**Motivo**: las dos primeras las pide el issue y la aclaración fija que detienen; las otras dos cambian el promedio, y la regla era «salvo que afecte identidad o ingreso».
+
+**Alternativas descartadas**: que toda inconsistencia detenga (los huecos no cambian el ingreso); que solo el titular detenga (un pagador distinto del empleador invalida la nómina).
+
+### Decisión 5: la reextracción dice la regla que falló, nunca el valor esperado
+
+Una inconsistencia corregible se reextrae una vez por documento y regla, con hasta 3 intentos. El subagente recibe la regla y el valor que él extrajo, no el nombre del solicitante ni el empleador del otro documento. El core solo acepta el reemplazo si recalcula que la inconsistencia vigente existe.
+
+**Motivo**: un extractor que conoce la respuesta esperada tiende a copiarla en lugar de leer el documento. Limitar la ronda y exigir la inconsistencia vigente evita reextraer hasta que el resultado convenga (Principios IV y VI).
+
+**Alternativas descartadas**: decirle el valor esperado; validar antes de registrar con un modo de prueba (el agente necesitaría el nombre del solicitante y el resultado dependería del orden de llegada); dejar reemplazar libremente un registro; reintentar sin tope.
+
+### Decisión 6: el core calcula y el agente nunca le pasa un ingreso verificado
+
+`verificar_ingreso` del core calcula con los registros que ya guardó. Además, el adaptador verifica por código tras cada extracción para que una inconsistencia que detiene escale aunque el modelo no llame a la herramienta.
+
+**Motivo**: la defensa en profundidad (Principio IV): el core no confía en un valor que no calculó, y la consistencia no depende de que el modelo se acuerde de preguntar.
+
+**Alternativas descartadas**: que el agente calcule y el core registre; verificar solo cuando el modelo llame a la herramienta; mezclar la verificación dentro de `registrar_extraccion`.
+
+### Decisión 7: dos motivos de escalamiento de la Regla 3 y el orden completo de reglas
+
+`discrepancia_de_ingreso` e `inconsistencia_documental` son motivos propios, y la prevalencia usa el orden de la constitución `[4, 5, 1, 3, 2]`.
+
+**Motivo**: el analista necesita el motivo exacto y el orden de evaluación es obligatorio (Principio I). El #14 y el #15 reutilizan el mismo mecanismo.
+
+**Alternativas descartadas**: reutilizar `caso_no_cubierto` (una discrepancia no es un caso fuera de política); un único motivo «ingreso».
+
+---
+
 ## 2026-10-17 · Extracción estructurada de documentos con subagente
 
 **Issue**: [#10 — Extracción estructurada de documentos con subagente](https://github.com/fabisahe29/CREDIAGIL/issues/10)

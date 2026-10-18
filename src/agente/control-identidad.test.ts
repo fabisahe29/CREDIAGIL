@@ -88,8 +88,8 @@ function capturarStderr(t: { mock: { method: Function } }) {
 }
 
 describe("control de identidad (#9, US4)", () => {
-  it("exige identidad para extraer documentos (#10); el #13 agregará el registro", () => {
-    assert.deepEqual([...HERRAMIENTAS_CON_IDENTIDAD], ["extraer_documento"]);
+  it("exige identidad para extraer documentos (#10) y verificar el ingreso (#11); el #13 agregará el registro", () => {
+    assert.deepEqual([...HERRAMIENTAS_CON_IDENTIDAD], ["extraer_documento", "verificar_ingreso"]);
   });
 
   it("una herramienta fuera de la lista sigue sin consultar al core", async (t) => {
@@ -398,5 +398,63 @@ describe("control de identidad: Regla 5 antes que la Regla 1 (revisión de 0aa8c
     );
     assert.deepEqual(await invocar(), {});
     assert.equal(llamadas, 0);
+  });
+});
+
+describe("control de identidad: verificar_ingreso (#11, US1)", () => {
+  const VERIFICAR = "mcp__originacion__verificar_ingreso";
+
+  function conListaPorDefecto(respuestas: (cid: string) => RespuestaIdentidad[]) {
+    const estado = crearEstado(randomUUID());
+    const { core, llamadas } = coreCon(respuestas(estado.correlationId));
+    const control = crearControlIdentidad({
+      core,
+      estado,
+      dormir: async () => {},
+      azar: () => 0.5,
+    });
+    const invocar = (entradaHerramienta: Record<string, unknown> = {}) =>
+      control({ ...entrada(VERIFICAR), tool_input: entradaHerramienta } as HookInput, "uso-1", {
+        signal: new AbortController().signal,
+      });
+    return { estado, llamadas, invocar };
+  }
+
+  it("sin identidad verificada se bloquea con bloqueo_por_regla y la Regla 1", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado } = conListaPorDefecto((cid) => [identidad(cid, false)]);
+    assert.equal(decision(await invocar({ ingresoDeclarado: 3_800_000 })), "deny");
+    const evento = estado.eventos[0];
+    assert.equal(evento?.tipo, "bloqueo_por_regla");
+    assert.equal(evento?.regla, "Regla 1 · identidad verificada antes de registrar");
+    assert.deepEqual(evento?.valores, {
+      identidad: "no verificada",
+      herramienta: "verificar_ingreso",
+    });
+  });
+
+  it("con identidad verificada la deja pasar", async (t) => {
+    capturarStderr(t);
+    const { invocar } = conListaPorDefecto((cid) => [identidad(cid, true)]);
+    assert.deepEqual(await invocar({ ingresoDeclarado: 3_800_000 }), {});
+  });
+
+  it("tras escalar niega la verificación sin consultar al core", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado, llamadas } = conListaPorDefecto((cid) => [identidad(cid, true)]);
+    estado.escalamiento = {
+      motivo: "discrepancia_de_ingreso",
+      regla: "Regla 3 · ingreso verificado desde los documentos",
+      resultado: "escalada",
+      correlationId: estado.correlationId,
+      ts: new Date().toISOString(),
+      herramienta: "verificar_ingreso",
+    };
+    assert.equal(decision(await invocar()), "deny");
+    assert.equal(llamadas(), 0);
+  });
+
+  it("consultar_verificacion_ingreso no es del modelo ni exige identidad: no está en la lista", () => {
+    assert.ok(!HERRAMIENTAS_CON_IDENTIDAD.includes("consultar_verificacion_ingreso"));
   });
 });

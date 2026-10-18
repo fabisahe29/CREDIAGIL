@@ -1,8 +1,9 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { datosReales } from "../../.claude/hooks/lib/datos-reales.ts";
 import { cargarCaso } from "./casos.ts";
 import { ID_HOMONIMO_1, ID_SOLICITANTE_UNICO, SOLICITANTES_EJEMPLO } from "../mcp/datos-ejemplo.ts";
 
@@ -133,4 +134,76 @@ describe("casos: rechazos antes de enviar nada", () => {
     assert.equal(r.ok, false);
     if (!r.ok) assert.match(r.problema, /no existe|no encontr/i);
   });
+});
+
+describe("casos: ingreso verificado y consistencia (#11)", () => {
+  /** Documentos de cada caso que son copia exacta de los del #10; el resto son propios del caso. */
+  const COPIAS: Record<string, Record<string, string>> = {
+    "ingreso-consistente": {
+      "certificado-completo.md": "extraccion-certificado",
+      "extracto-2026-07.md": "extraccion-extractos",
+      "extracto-2026-08.md": "extraccion-extractos",
+      "extracto-2026-09.md": "extraccion-extractos",
+    },
+    "ingreso-inflado": {
+      "certificado-completo.md": "extraccion-certificado",
+      "extracto-2026-07.md": "extraccion-extractos",
+      "extracto-2026-08.md": "extraccion-extractos",
+      "extracto-2026-09.md": "extraccion-extractos",
+    },
+    // El extracto de julio cambia de titular y no es copia; los demás sí.
+    "ingreso-titular-distinto": {
+      "certificado-completo.md": "extraccion-certificado",
+      "extracto-2026-08.md": "extraccion-extractos",
+      "extracto-2026-09.md": "extraccion-extractos",
+    },
+    // El certificado en dólares es propio de este caso: no hay copias que comprobar.
+    "ingreso-moneda-extranjera": {},
+    // El certificado cambia de empleador y no es copia; los extractos sí.
+    "ingreso-empleador-distinto": {
+      "extracto-2026-07.md": "extraccion-extractos",
+      "extracto-2026-08.md": "extraccion-extractos",
+      "extracto-2026-09.md": "extraccion-extractos",
+    },
+  };
+
+  const fechaExpedicion = SOLICITANTES_EJEMPLO.find(
+    (s) => s.idSolicitante === ID_SOLICITANTE_UNICO,
+  )!.fechaExpedicion;
+
+  for (const nombre of Object.keys(COPIAS)) {
+    it(`el caso versionado casos/${nombre} carga sin errores y verifica primero la identidad`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.equal(r.ok, true, r.ok ? "" : r.problema);
+      const texto = readFileSync(resolve("casos", nombre, "caso.json"), "utf8");
+      assert.ok(texto.includes(fechaExpedicion));
+    });
+
+    it(`los documentos copiados de casos/${nombre} son idénticos a los del #10`, () => {
+      for (const [archivo, origen] of Object.entries(COPIAS[nombre]!)) {
+        assert.equal(
+          readFileSync(resolve("casos", nombre, archivo), "utf8"),
+          readFileSync(resolve("casos", origen, archivo), "utf8"),
+          archivo,
+        );
+      }
+    });
+
+    it(`los documentos de casos/${nombre} cumplen la convención de datos ficticios`, () => {
+      const carpeta = resolve("casos", nombre);
+      for (const archivo of readdirSync(carpeta)) {
+        const texto = readFileSync(join(carpeta, archivo), "utf8");
+        const bloqueos = datosReales({
+          herramienta: "Write",
+          rutas: [`casos/${nombre}/${archivo}`],
+          textos: [{ origen: `casos/${nombre}/${archivo}`, texto }],
+        });
+        assert.deepEqual(
+          bloqueos.map((b) => b.detectado),
+          [],
+          archivo,
+        );
+      }
+    });
+  }
 });

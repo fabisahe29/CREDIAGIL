@@ -17,8 +17,18 @@ import {
   salidaExtracto,
 } from "../compartido/extraccion-ejemplos.ts";
 import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
+import { REGLA_3 } from "../politica/ingreso.ts";
+import { NOMBRE_IDENTIDAD_VERIFICADA } from "../compartido/ingreso.ts";
+import {
+  ejemploCertificado,
+  ejemploExtracto,
+  extractoConLecturaErrada,
+  extractosTrimestre,
+  type Ejemplo,
+} from "../compartido/ingreso-ejemplos.ts";
 import { VERSION_POLITICA } from "../politica/politica.ts";
 import {
+  INGRESO_DECLARADO_MAXIMO,
   crearCore,
   enmascararDocumento,
   normalizarDocumento,
@@ -894,5 +904,492 @@ describe("core simulado: moneda extranjera en el contenido (revisión de 0aa8c2a
     if (respuesta.ok) return;
     assert.equal(respuesta.error.codigo, "extraccion_invalida");
     assert.equal(respuesta.error.campo, "resultado.estado");
+  });
+});
+
+describe("core simulado: verificarIngreso y consultarVerificacionIngreso (#11, US1, US2 y US4)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  function coreVerificado(correlationId = randomUUID()) {
+    const core = crearCore({ ahora });
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    const r = core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-1",
+      correlationId,
+    });
+    assert.equal(r.respuesta.ok, true);
+    return { core, correlationId };
+  }
+
+  /** Registra un documento ficticio en el core, como lo haría `extraer_documento`. */
+  function registrar(core: ReturnType<typeof crearCore>, correlationId: string, e: Ejemplo) {
+    const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+    if (!v.ok) assert.fail(JSON.stringify(v.errores));
+    const respuesta = core.registrarExtraccion({
+      correlationId,
+      adjunto: e.adjunto,
+      nombre: e.nombre,
+      contenido: e.contenido,
+      resultado: construirResultado(v.salida, e, 1),
+    }).respuesta;
+    assert.equal(respuesta.ok, true, JSON.stringify(respuesta));
+  }
+
+  function conDocumentos(correlationId = randomUUID()) {
+    const { core } = coreVerificado(correlationId);
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      registrar(core, correlationId, e);
+    }
+    return { core, correlationId };
+  }
+
+  it("sin identidad verificada se rechaza con un error de negocio, sin efecto ni auditoría", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const { respuesta, auditoria } = core.verificarIngreso({ correlationId });
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.categoria, "negocio");
+    assert.equal(respuesta.error.codigo, "identidad_no_verificada");
+    assert.equal(auditoria, null);
+    const guardada = core.consultarVerificacionIngreso(correlationId);
+    assert.ok(guardada.ok);
+    if (guardada.ok) assert.equal(guardada.datos.verificacion, null);
+  });
+
+  it("un ingreso declarado inválido es un error de validación con su campo, sin efecto", () => {
+    const { core, correlationId } = conDocumentos();
+    const invalidos = [-1, 1.5, "3800000", 3_800_000.5, INGRESO_DECLARADO_MAXIMO + 1, {}, [1]];
+    for (const ingresoDeclarado of invalidos) {
+      const { respuesta, auditoria } = core.verificarIngreso({ correlationId, ingresoDeclarado });
+      assert.equal(respuesta.ok, false, String(ingresoDeclarado));
+      if (respuesta.ok) return;
+      assert.equal(respuesta.error.categoria, "validacion");
+      assert.equal(respuesta.error.codigo, "formato_invalido");
+      assert.equal(respuesta.error.campo, "ingresoDeclarado");
+      assert.equal(auditoria, null);
+    }
+    const guardada = core.consultarVerificacionIngreso(correlationId);
+    assert.ok(guardada.ok);
+    if (guardada.ok) assert.equal(guardada.datos.verificacion, null);
+  });
+
+  it("acepta 0 y el máximo permitido como ingreso declarado", () => {
+    const { core, correlationId } = conDocumentos();
+    for (const ingresoDeclarado of [0, INGRESO_DECLARADO_MAXIMO]) {
+      assert.equal(core.verificarIngreso({ correlationId, ingresoDeclarado }).respuesta.ok, true);
+    }
+  });
+
+  it("un correlationId que no es un UUID es un error de validación", () => {
+    const core = crearCore({ ahora });
+    const { respuesta } = core.verificarIngreso({ correlationId: "no-es-uuid" });
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.campo, "correlationId");
+  });
+
+  it("sin documentos de ingreso el estado es sin_ingreso", () => {
+    const { core, correlationId } = coreVerificado();
+    const { respuesta } = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.ok(respuesta.ok);
+    if (!respuesta.ok) return;
+    assert.equal(respuesta.datos.verificacion.estado, "sin_ingreso");
+    assert.equal(respuesta.datos.verificacion.ingreso, null);
+  });
+
+  it("con los documentos y sin declarar el estado es falta_declarado", () => {
+    const { core, correlationId } = conDocumentos();
+    const { respuesta } = core.verificarIngreso({ correlationId });
+    assert.ok(respuesta.ok);
+    if (!respuesta.ok) return;
+    const v = respuesta.datos.verificacion;
+    assert.equal(v.estado, "falta_declarado");
+    assert.equal(v.ingreso?.monto, 3_800_000);
+    assert.equal(v.ingresoDeclarado, null);
+    assert.equal(v.idSolicitante, ID_SOLICITANTE_UNICO);
+    assert.equal(v.calculadaEn, HOY_EJEMPLO.toISOString());
+  });
+
+  it("con un declarado igual al verificado el estado es verificado", () => {
+    const { core, correlationId } = conDocumentos();
+    const { respuesta } = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.ok(respuesta.ok);
+    if (!respuesta.ok) return;
+    assert.equal(respuesta.datos.verificacion.estado, "verificado");
+    assert.equal(respuesta.datos.verificacion.discrepancia?.diferencia, 0);
+  });
+
+  it("ausente conserva el último declarado y null lo borra", () => {
+    const { core, correlationId } = conDocumentos();
+    core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    const conservado = core.verificarIngreso({ correlationId });
+    assert.ok(conservado.respuesta.ok);
+    if (!conservado.respuesta.ok) return;
+    assert.equal(conservado.respuesta.datos.verificacion.ingresoDeclarado, 3_800_000);
+    assert.equal(conservado.respuesta.datos.verificacion.estado, "verificado");
+    const borrado = core.verificarIngreso({ correlationId, ingresoDeclarado: null });
+    assert.ok(borrado.respuesta.ok);
+    if (!borrado.respuesta.ok) return;
+    assert.equal(borrado.respuesta.datos.verificacion.ingresoDeclarado, null);
+    assert.equal(borrado.respuesta.datos.verificacion.estado, "falta_declarado");
+  });
+
+  it("no recibe un ingreso verificado: uno inyectado en la entrada no cambia el cálculo", () => {
+    const { core, correlationId } = conDocumentos();
+    const { respuesta } = core.verificarIngreso({
+      correlationId,
+      ingresoDeclarado: 3_800_000,
+      ingresoVerificado: 9_999_999,
+    } as never);
+    assert.ok(respuesta.ok);
+    if (!respuesta.ok) return;
+    assert.equal(respuesta.datos.verificacion.ingreso?.monto, 3_800_000);
+  });
+
+  it("es idempotente: repetir con los mismos datos da lo mismo, con la misma marca, sin auditar", () => {
+    let reloj = HOY_EJEMPLO.getTime();
+    const core = crearCore({ ahora: () => new Date(reloj) });
+    const correlationId = randomUUID();
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-1",
+      correlationId,
+    });
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      registrar(core, correlationId, e);
+    }
+    const primera = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.notEqual(primera.auditoria, null);
+    reloj += 60_000;
+    const segunda = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.equal(segunda.auditoria, null);
+    assert.deepEqual(segunda.respuesta, primera.respuesta);
+  });
+
+  it("si cambia el resultado (una declaración nueva) audita de nuevo", () => {
+    const { core, correlationId } = conDocumentos();
+    assert.notEqual(core.verificarIngreso({ correlationId }).auditoria, null);
+    assert.notEqual(
+      core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 }).auditoria,
+      null,
+    );
+    assert.equal(
+      core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 }).auditoria,
+      null,
+    );
+  });
+
+  it("si llega un documento nuevo, recalcula con lo guardado", () => {
+    const { core, correlationId } = coreVerificado();
+    registrar(core, correlationId, ejemploCertificado());
+    const solo = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.ok(solo.respuesta.ok);
+    if (!solo.respuesta.ok) return;
+    assert.equal(solo.respuesta.datos.verificacion.ingreso?.montoExtractos, null);
+    for (const e of extractosTrimestre({ nomina: 3_000_000 })) registrar(core, correlationId, e);
+    const conExtractos = core.verificarIngreso({ correlationId });
+    assert.ok(conExtractos.respuesta.ok);
+    if (!conExtractos.respuesta.ok) return;
+    assert.equal(conExtractos.respuesta.datos.verificacion.ingreso?.monto, 3_000_000);
+    assert.notEqual(conExtractos.auditoria, null);
+  });
+
+  it("la auditoría trae regla, estado, ingresos y versión, y ningún dato de los documentos", () => {
+    const { core, correlationId } = conDocumentos();
+    const { auditoria } = core.verificarIngreso({ correlationId, ingresoDeclarado: 4_300_000 });
+    assert.deepEqual(auditoria, {
+      regla: REGLA_3,
+      estado: "discrepancia",
+      ingresoVerificado: 3_800_000,
+      ingresoDeclarado: 4_300_000,
+      diferencia: 500_000,
+      umbralPorcentaje: 10,
+      reglasInconsistencia: [],
+      versionPolitica: VERSION_POLITICA,
+    });
+    const texto = JSON.stringify(auditoria);
+    for (const dato of ["Industrias", "Ficticia", "Salario", "Nómina", "certificado.md"]) {
+      assert.ok(!texto.includes(dato), dato);
+    }
+  });
+
+  it("un declarado que supera el 10% guarda discrepancia; uno en el borde vuelve a verificado", () => {
+    const { core, correlationId } = conDocumentos();
+    const alto = core.verificarIngreso({ correlationId, ingresoDeclarado: 4_180_001 });
+    assert.ok(alto.respuesta.ok);
+    if (!alto.respuesta.ok) return;
+    assert.equal(alto.respuesta.datos.verificacion.estado, "discrepancia");
+    const limite = core.verificarIngreso({ correlationId, ingresoDeclarado: 4_180_000 });
+    assert.ok(limite.respuesta.ok);
+    if (!limite.respuesta.ok) return;
+    assert.equal(limite.respuesta.datos.verificacion.estado, "verificado");
+    assert.notEqual(limite.auditoria, null);
+  });
+
+  it("con un documento no cubierto el estado es no_cubierto, con la regla de la Regla 5", () => {
+    const { core, correlationId } = conDocumentos();
+    const usd = { adjunto: 8, nombre: "certificado-usd.md", contenido: CONTENIDO_CERTIFICADO_USD };
+    const validada = validarSalida(salidaCertificadoUsd(), usd, HOY_EJEMPLO);
+    assert.ok(validada.ok);
+    if (!validada.ok) return;
+    const registro = core.registrarExtraccion({
+      correlationId,
+      ...usd,
+      resultado: construirResultado(validada.salida, usd, 1),
+    });
+    assert.ok(registro.respuesta.ok);
+    const { respuesta, auditoria } = core.verificarIngreso({
+      correlationId,
+      ingresoDeclarado: 3_800_000,
+    });
+    assert.ok(respuesta.ok);
+    if (!respuesta.ok) return;
+    assert.equal(respuesta.datos.verificacion.estado, "no_cubierto");
+    assert.equal(respuesta.datos.verificacion.ingreso, null);
+    assert.equal(respuesta.datos.verificacion.decision.regla, REGLA_5);
+    assert.equal(auditoria?.regla, REGLA_5);
+  });
+
+  it("consultarVerificacionIngreso devuelve null antes de verificar y la verificación después", () => {
+    const { core, correlationId } = conDocumentos();
+    const antes = core.consultarVerificacionIngreso(correlationId);
+    assert.ok(antes.ok);
+    if (antes.ok) assert.equal(antes.datos.verificacion, null);
+    core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    const despues = core.consultarVerificacionIngreso(correlationId);
+    assert.ok(despues.ok);
+    if (despues.ok) assert.equal(despues.datos.verificacion?.estado, "verificado");
+  });
+
+  it("consultarVerificacionIngreso rechaza un correlationId que no es un UUID", () => {
+    const respuesta = crearCore({ ahora }).consultarVerificacionIngreso("x");
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.campo, "correlationId");
+  });
+
+  it("la verificación de una conversación no aparece en otra", () => {
+    const { core, correlationId } = conDocumentos();
+    core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    const otra = core.consultarVerificacionIngreso(randomUUID());
+    assert.ok(otra.ok);
+    if (otra.ok) assert.equal(otra.datos.verificacion, null);
+  });
+
+  it("con la falla simulada devuelve un error transitorio", () => {
+    const core = crearCore({ falla: "siempre" });
+    const correlationId = randomUUID();
+    for (const respuesta of [
+      core.verificarIngreso({ correlationId }).respuesta,
+      core.consultarVerificacionIngreso(correlationId),
+    ]) {
+      assert.equal(respuesta.ok, false);
+      if (!respuesta.ok) assert.equal(respuesta.error.categoria, "transitorio");
+    }
+  });
+});
+
+describe("core simulado: verificarIngreso con inconsistencias (#11, US3)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  function coreConAjeno() {
+    const correlationId = randomUUID();
+    const core = crearCore({ ahora });
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-1",
+      correlationId,
+    });
+    for (const e of [
+      ejemploCertificado(),
+      ejemploExtracto({ titular: "Otra Persona Inventada" }),
+    ]) {
+      const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = core.registrarExtraccion({
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      }).respuesta;
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    return { core, correlationId, unico };
+  }
+
+  it("contrasta el titular con el nombre registrado del solicitante verificado, con su procedencia", () => {
+    const { core, correlationId, unico } = coreConAjeno();
+    const { respuesta } = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.ok(respuesta.ok);
+    if (!respuesta.ok) return;
+    const v = respuesta.datos.verificacion;
+    assert.equal(v.estado, "inconsistencia");
+    assert.equal(v.ingreso, null);
+    const i = v.inconsistencias.find((x) => x.regla === "titular_vs_solicitante");
+    assert.ok(i, "falta la inconsistencia del titular");
+    assert.equal(i.detiene, true);
+    const identidad = i.valores.find((u) => u.nombre === NOMBRE_IDENTIDAD_VERIFICADA);
+    assert.equal(identidad?.valor, unico.nombre);
+    assert.ok(
+      i.valores.some((u) => u.fragmento !== null),
+      "falta el fragmento del documento",
+    );
+  });
+
+  it("la auditoría trae los nombres de las reglas y ningún nombre ni valor de los documentos", () => {
+    const { core, correlationId, unico } = coreConAjeno();
+    const { auditoria } = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.ok(auditoria);
+    assert.equal(auditoria.estado, "inconsistencia");
+    assert.deepEqual(auditoria.reglasInconsistencia, ["titular_vs_solicitante"]);
+    const texto = JSON.stringify(auditoria);
+    assert.ok(!texto.includes("Otra Persona Inventada"));
+    assert.ok(!texto.includes(unico.nombre));
+  });
+
+  it("repetir sin cambios no audita; un documento correcto después no borra la inconsistencia", () => {
+    const { core, correlationId } = coreConAjeno();
+    assert.notEqual(core.verificarIngreso({ correlationId }).auditoria, null);
+    assert.equal(core.verificarIngreso({ correlationId }).auditoria, null);
+  });
+});
+
+describe("core simulado: registrarExtraccion con reextracción (#11, US5)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  function coreConLecturaErrada() {
+    const correlationId = randomUUID();
+    const core = crearCore({ ahora });
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-1",
+      correlationId,
+    });
+    const { errada, correcta } = extractoConLecturaErrada();
+    const entrada = (e: Ejemplo, reextraccion?: { regla: string }) => {
+      const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      return {
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+        ...(reextraccion === undefined ? {} : { reextraccion }),
+      };
+    };
+    const inicial = core.registrarExtraccion(entrada(errada));
+    assert.equal(inicial.respuesta.ok, true, JSON.stringify(inicial.respuesta));
+    return { core, correlationId, errada, correcta, entrada };
+  }
+
+  const TITULAR = { regla: "titular_vs_solicitante" };
+
+  it("sin un registro previo del contenido responde reextraccion_no_aplica", () => {
+    const { core, correlationId, correcta, entrada } = coreConLecturaErrada();
+    const otro = { ...correcta, contenido: `${correcta.contenido}\nOtra línea` };
+    const e = entrada(correcta, TITULAR);
+    const { respuesta, auditoria } = core.registrarExtraccion({
+      ...e,
+      contenido: otro.contenido,
+      resultado: { ...(e.resultado as object), huella: "x" },
+      correlationId,
+    });
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.categoria, "negocio");
+    assert.equal(respuesta.error.codigo, "reextraccion_no_aplica");
+    assert.equal(auditoria, null);
+  });
+
+  it("con una regla que no es una inconsistencia corregible vigente responde reextraccion_no_aplica", () => {
+    const { core, correcta, entrada } = coreConLecturaErrada();
+    for (const regla of ["periodos_superpuestos", "empleador_vs_pagador", "no_existe"]) {
+      const { respuesta, auditoria } = core.registrarExtraccion(entrada(correcta, { regla }));
+      assert.equal(respuesta.ok, false, regla);
+      if (respuesta.ok) return;
+      assert.equal(respuesta.error.codigo, "reextraccion_no_aplica", regla);
+      assert.equal(auditoria, null);
+    }
+  });
+
+  it("con la inconsistencia vigente reemplaza el registro, anota la regla y audita la reextracción", () => {
+    const { core, correlationId, correcta, entrada } = coreConLecturaErrada();
+    const { respuesta, auditoria } = core.registrarExtraccion(entrada(correcta, TITULAR));
+    assert.ok(respuesta.ok, JSON.stringify(respuesta));
+    if (!respuesta.ok) return;
+    const registro = respuesta.datos.extraccion;
+    assert.deepEqual(registro.reextraidaPor, ["titular_vs_solicitante"]);
+    if (registro.estado !== "extraido" || registro.documento.tipo !== "extracto_bancario") {
+      return assert.fail("debía seguir siendo un extracto extraído");
+    }
+    assert.equal(registro.documento.titular?.valor, "Ana Pérez Ficticia");
+    assert.equal(auditoria?.reextraccion, "titular_vs_solicitante");
+    assert.equal(JSON.stringify(auditoria).includes("Ana"), false);
+    const verificada = core.verificarIngreso({ correlationId });
+    assert.ok(verificada.respuesta.ok);
+    if (verificada.respuesta.ok) {
+      assert.equal(
+        verificada.respuesta.datos.verificacion.inconsistencias.length,
+        0,
+        "la inconsistencia ya no existe",
+      );
+    }
+  });
+
+  it("una segunda reextracción por la misma regla responde reextraccion_agotada", () => {
+    const { core, correcta, errada, entrada } = coreConLecturaErrada();
+    // El primer reemplazo deja otra lectura errada: la inconsistencia sigue vigente.
+    assert.ok(core.registrarExtraccion(entrada(errada, TITULAR)).respuesta.ok);
+    const { respuesta, auditoria } = core.registrarExtraccion(entrada(correcta, TITULAR));
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.codigo, "reextraccion_agotada");
+    assert.equal(auditoria, null);
+  });
+
+  it("un resultado nuevo que no pasa la revalidación conserva el registro anterior", () => {
+    const { core, correlationId, correcta, entrada } = coreConLecturaErrada();
+    const e = entrada(correcta, TITULAR);
+    const malo = { ...(e.resultado as Record<string, unknown>), documento: { tipo: "nada" } };
+    const { respuesta } = core.registrarExtraccion({ ...e, resultado: malo });
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.codigo, "extraccion_invalida");
+    const guardadas = core.consultarExtracciones(correlationId);
+    assert.ok(guardadas.ok);
+    if (!guardadas.ok) return;
+    assert.deepEqual(guardadas.datos.extracciones[0]?.reextraidaPor, []);
+  });
+
+  it("sin reextraccion el mismo contenido devuelve el registro previo, sin efecto", () => {
+    const { core, correcta, entrada } = coreConLecturaErrada();
+    const { respuesta, auditoria } = core.registrarExtraccion(entrada(correcta));
+    assert.ok(respuesta.ok);
+    assert.equal(auditoria, null);
+    if (!respuesta.ok) return;
+    assert.deepEqual(respuesta.datos.extraccion.reextraidaPor, []);
+  });
+
+  it("una reextracción con campos extra o sin regla es un error de validación", () => {
+    const { core, correcta, entrada } = coreConLecturaErrada();
+    for (const reextraccion of [{ regla: "" }, { regla: TITULAR.regla, otro: 1 }, {}, "x"]) {
+      const { respuesta } = core.registrarExtraccion({
+        ...entrada(correcta),
+        reextraccion,
+      });
+      assert.equal(respuesta.ok, false, JSON.stringify(reextraccion));
+      if (respuesta.ok) return;
+      assert.equal(respuesta.error.categoria, "validacion");
+      assert.equal(respuesta.error.campo, "reextraccion");
+    }
   });
 });

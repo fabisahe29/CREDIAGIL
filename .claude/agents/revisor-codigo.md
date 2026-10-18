@@ -3,7 +3,7 @@ name: revisor-codigo
 description: "Revisa el diff de un ticket de Crediágil desde un contexto aislado y entrega un informe JSON. Solo lo invoca /ticket-abrir-pr."
 tools: Read, Grep, Glob
 disallowedTools: Write, Edit, MultiEdit, NotebookEdit, Bash, PowerShell, Agent, mcp__*
-model: inherit
+model: sonnet
 maxTurns: 40
 ---
 

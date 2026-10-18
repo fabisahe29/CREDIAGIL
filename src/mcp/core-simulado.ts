@@ -20,8 +20,15 @@ import {
 } from "./datos-ejemplo.ts";
 import { crearFalla, type ModoFalla } from "./falla.ts";
 import { alcanzaLimite, evaluarRegla1, type EstadoIdentidad } from "../politica/identidad.ts";
-import { MAX_INTENTOS_VERIFICACION, VERSION_POLITICA } from "../politica/politica.ts";
+import {
+  MAX_INTENTOS_VERIFICACION,
+  MAX_REEXTRACCIONES_POR_REGLA,
+  VERSION_POLITICA,
+} from "../politica/politica.ts";
 import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
+import { validarConsistencia } from "../politica/consistencia.ts";
+import { decidirIngreso } from "../politica/ingreso.ts";
+import type { VerificacionIngreso } from "../compartido/ingreso.ts";
 import {
   TAMANO_MAXIMO_CONTENIDO,
   huella,
@@ -107,6 +114,11 @@ export interface EntradaRegistroExtraccion {
   /** El texto del documento: solo para revalidar, nunca se guarda. */
   contenido: unknown;
   resultado: unknown;
+  /**
+   * Pide reemplazar el registro de este contenido tras una inconsistencia corregible (#11, R6). El core
+   * recalcula la consistencia: el agente no puede reemplazar un registro porque «crea» que falló.
+   */
+  reextraccion?: unknown;
 }
 
 const esquemaEntradaExtraccion = z.object({
@@ -115,6 +127,7 @@ const esquemaEntradaExtraccion = z.object({
   nombre: z.string().min(1).max(255),
   contenido: z.string().min(1).max(TAMANO_MAXIMO_CONTENIDO),
   resultado: z.unknown(),
+  reextraccion: z.strictObject({ regla: z.string().min(1).max(64) }).optional(),
 });
 
 /** Auditoría de una extracción registrada: metadatos, nunca contenido, valores ni fragmentos. */
@@ -128,9 +141,42 @@ export interface AuditoriaExtraccion {
   faltantes: string[];
   regla: string;
   versionPolitica: string;
+  /** La regla de consistencia que motivó el reemplazo, si fue una reextracción. */
+  reextraccion?: string;
 }
 
 export type RespuestaRegistroExtraccion = Respuesta<{ extraccion: RegistroExtraccion }>;
+
+/** Entrada de `verificar_ingreso` (specs/009-ingreso-verificado-consistencia/contracts/core-mcp.md). */
+export interface EntradaVerificacionIngreso {
+  /** Ya validado por el servidor. */
+  correlationId: string;
+  /**
+   * Lo que declaró el solicitante, en pesos. `undefined` conserva el último declarado y `null` lo
+   * borra. Se guarda; nunca interviene en el ingreso verificado (FR-001).
+   */
+  ingresoDeclarado?: unknown;
+}
+
+/** Tope del ingreso declarado: con él, ×100 sigue siendo un entero seguro. */
+export const INGRESO_DECLARADO_MAXIMO = Math.floor(Number.MAX_SAFE_INTEGER / 100);
+
+const esquemaIngresoDeclarado = z.int().min(0).max(INGRESO_DECLARADO_MAXIMO);
+
+/** Auditoría de una verificación que cambió el resultado: metadatos y enteros, nunca contenido (R9). */
+export interface AuditoriaIngreso {
+  regla: string;
+  estado: VerificacionIngreso["estado"];
+  ingresoVerificado: number | null;
+  ingresoDeclarado: number | null;
+  diferencia: number | null;
+  umbralPorcentaje: number | null;
+  /** Solo los nombres de las reglas de consistencia que fallaron. */
+  reglasInconsistencia: string[];
+  versionPolitica: string;
+}
+
+export type RespuestaVerificacionIngreso = Respuesta<{ verificacion: VerificacionIngreso }>;
 
 export interface Core {
   consultarSolicitud(idSolicitud: unknown): Respuesta<{ solicitud: Solicitud | null }>;
@@ -148,6 +194,18 @@ export interface Core {
   };
   /** Solo lectura: las extracciones de la conversación, ordenadas por adjunto. */
   consultarExtracciones(correlationId: unknown): Respuesta<{ extracciones: RegistroExtraccion[] }>;
+  /**
+   * Calcula el ingreso verificado y evalúa discrepancia e inconsistencias con lo que el core ya guardó
+   * (#11, R8). Exige identidad verificada. `auditoria` es `null` si el resultado no cambió.
+   */
+  verificarIngreso(entrada: EntradaVerificacionIngreso): {
+    respuesta: RespuestaVerificacionIngreso;
+    auditoria: AuditoriaIngreso | null;
+  };
+  /** Solo lectura: la última verificación de ingreso de la conversación, o `null` si no hay. */
+  consultarVerificacionIngreso(
+    correlationId: unknown,
+  ): Respuesta<{ verificacion: VerificacionIngreso | null }>;
 }
 
 export interface OpcionesCore {
@@ -227,6 +285,9 @@ export function crearCore({
   const respuestasPorIntento = new Map<string, RespuestaIdentidad>();
   /** Extracciones por conversación y huella del contenido; nunca el contenido (#10, R6). */
   const extracciones = new Map<string, Map<string, RegistroExtraccion>>();
+  /** Última verificación de ingreso y último ingreso declarado, por conversación (#11, R8). */
+  const verificaciones = new Map<string, VerificacionIngreso>();
+  const declarados = new Map<string, number | null>();
 
   /** Valida y evalúa un intento en el orden de R4; no guarda la respuesta. */
   function evaluarIntento(
@@ -462,6 +523,90 @@ export function crearCore({
     },
 
     registrarExtraccion(entrada) {
+      /** Una reextracción: reemplaza el registro solo si la inconsistencia corregible sigue vigente. */
+      function reemplazar({
+        correlationId,
+        idSolicitante,
+        previo,
+        deLaConversacion,
+        entrada: { adjunto, nombre, contenido, resultado },
+        regla,
+      }: {
+        correlationId: string;
+        idSolicitante: string | null;
+        previo: RegistroExtraccion | undefined;
+        deLaConversacion: Map<string, RegistroExtraccion>;
+        entrada: { adjunto: number; nombre: string; contenido: string; resultado: unknown };
+        regla: string;
+      }): { respuesta: RespuestaRegistroExtraccion; auditoria: AuditoriaExtraccion | null } {
+        const sinEfecto = (error: ReturnType<typeof errorNegocio>) => ({
+          respuesta: fallo(error),
+          auditoria: null,
+        });
+        if (previo?.estado !== "extraido") {
+          return sinEfecto(
+            errorNegocio(
+              "reextraccion_no_aplica",
+              "No hay una extracción previa de este documento que reextraer.",
+            ),
+          );
+        }
+        if (
+          previo.reextraidaPor.filter((r) => r === regla).length >= MAX_REEXTRACCIONES_POR_REGLA
+        ) {
+          return sinEfecto(
+            errorNegocio(
+              "reextraccion_agotada",
+              "Este documento ya se reextrajo por esa regla; la inconsistencia vigente decide.",
+            ),
+          );
+        }
+        const nombreSolicitante = registrados.find(
+          (s) => s.idSolicitante === idSolicitante,
+        )?.nombre;
+        const { inconsistencias } = validarConsistencia({
+          nombreSolicitante: nombreSolicitante ?? "",
+          registros: [...deLaConversacion.values()],
+        });
+        const vigente = inconsistencias.some(
+          (i) => i.regla === regla && i.corregible && i.adjuntos.includes(previo.adjunto),
+        );
+        if (nombreSolicitante === undefined || !vigente) {
+          return sinEfecto(
+            errorNegocio(
+              "reextraccion_no_aplica",
+              "La regla no es una inconsistencia corregible vigente de este documento.",
+            ),
+          );
+        }
+        // El resultado nuevo se revalida como cualquiera; si no pasa, el registro anterior se conserva.
+        const validacion = validarResultado(resultado, contenido, ahora());
+        const primero = primerError(validacion, adjunto, nombre);
+        if (!validacion.ok || primero !== null) {
+          return {
+            respuesta: fallo(
+              errorValidacion(
+                "extraccion_invalida",
+                `La reextracción no coincide con el documento: ${primero?.campo} (${primero?.motivo}).`,
+                `resultado.${primero?.campo ?? "(raíz)"}`,
+              ),
+            ),
+            auditoria: null,
+          };
+        }
+        const registro: RegistroExtraccion = {
+          ...validacion.resultado,
+          adjuntos: previo.adjuntos,
+          registradoEn: ahora().toISOString(),
+          reextraidaPor: [...previo.reextraidaPor, regla],
+        };
+        deLaConversacion.set(registro.huella, registro);
+        return {
+          respuesta: exito({ extraccion: structuredClone(registro) }),
+          auditoria: { ...auditoriaDe(registro), reextraccion: regla },
+        };
+      }
+
       if (fallaSimulada.debeFallar()) return { respuesta: fallo(noDisponible()), auditoria: null };
       const forma = esquemaEntradaExtraccion.safeParse(entrada);
       if (!forma.success) {
@@ -477,7 +622,7 @@ export function crearCore({
           auditoria: null,
         };
       }
-      const { correlationId, adjunto, nombre, contenido, resultado } = forma.data;
+      const { correlationId, adjunto, nombre, contenido, resultado, reextraccion } = forma.data;
 
       // Regla 1 del lado del servidor: sin identidad verificada no se registra nada (Principio IV).
       const identidad = identidades.get(correlationId) ?? {
@@ -502,6 +647,16 @@ export function crearCore({
       const deLaConversacion =
         extracciones.get(correlationId) ?? new Map<string, RegistroExtraccion>();
       const previo = deLaConversacion.get(huella(contenido));
+      if (reextraccion !== undefined) {
+        return reemplazar({
+          correlationId,
+          idSolicitante: identidad.idSolicitante,
+          previo,
+          deLaConversacion,
+          entrada: { adjunto, nombre, contenido, resultado },
+          regla: reextraccion.regla,
+        });
+      }
       if (previo !== undefined) {
         if (!previo.adjuntos.includes(adjunto)) previo.adjuntos.push(adjunto);
         return { respuesta: exito({ extraccion: structuredClone(previo) }), auditoria: null };
@@ -527,6 +682,7 @@ export function crearCore({
         ...validacion.resultado,
         adjuntos: [adjunto],
         registradoEn: ahora().toISOString(),
+        reextraidaPor: [],
       };
       deLaConversacion.set(registro.huella, registro);
       extracciones.set(correlationId, deLaConversacion);
@@ -534,6 +690,111 @@ export function crearCore({
         respuesta: exito({ extraccion: structuredClone(registro) }),
         auditoria: auditoriaDe(registro),
       };
+    },
+
+    verificarIngreso(entrada) {
+      if (fallaSimulada.debeFallar()) return { respuesta: fallo(noDisponible()), auditoria: null };
+      const sinEfecto = (respuesta: RespuestaVerificacionIngreso) => ({
+        respuesta,
+        auditoria: null,
+      });
+      const id = z.uuid().safeParse(entrada.correlationId);
+      if (!id.success) {
+        return sinEfecto(
+          fallo(
+            errorValidacion(
+              "formato_invalido",
+              "El correlationId debe ser un UUID.",
+              "correlationId",
+            ),
+          ),
+        );
+      }
+      const correlationId = id.data;
+      const { ingresoDeclarado } = entrada;
+      if (
+        ingresoDeclarado !== undefined &&
+        ingresoDeclarado !== null &&
+        !esquemaIngresoDeclarado.safeParse(ingresoDeclarado).success
+      ) {
+        return sinEfecto(
+          fallo(
+            errorValidacion(
+              "formato_invalido",
+              "El ingreso declarado debe ser un entero de pesos, mayor o igual a 0.",
+              "ingresoDeclarado",
+            ),
+          ),
+        );
+      }
+
+      // Regla 1 del lado del servidor: sin identidad verificada no se calcula ni se guarda nada.
+      const identidad = identidades.get(correlationId);
+      if (identidad === undefined || !evaluarRegla1(identidad).permitido) {
+        return sinEfecto(
+          fallo(
+            errorNegocio(
+              "identidad_no_verificada",
+              "No se verifica el ingreso sin la identidad del solicitante verificada.",
+            ),
+          ),
+        );
+      }
+      const idSolicitante = identidad.idSolicitante;
+      const nombreSolicitante = registrados.find((s) => s.idSolicitante === idSolicitante)?.nombre;
+      if (idSolicitante === null || nombreSolicitante === undefined) {
+        return sinEfecto(
+          fallo(
+            errorNegocio(
+              "identidad_no_verificada",
+              "El solicitante verificado no está registrado en el core.",
+            ),
+          ),
+        );
+      }
+
+      const declarado =
+        ingresoDeclarado === undefined
+          ? (declarados.get(correlationId) ?? null)
+          : (ingresoDeclarado as number | null);
+      declarados.set(correlationId, declarado);
+      const resultado = decidirIngreso({
+        registros: [...(extracciones.get(correlationId)?.values() ?? [])],
+        nombreSolicitante,
+        idSolicitante,
+        ingresoDeclarado: declarado,
+      });
+      const anterior = verificaciones.get(correlationId);
+      const nueva: VerificacionIngreso = {
+        correlationId,
+        ...resultado,
+        calculadaEn: ahora().toISOString(),
+      };
+      // La misma decisión con los mismos datos no cambia nada ni se audita otra vez (R9).
+      if (anterior !== undefined && mismaVerificacion(anterior, nueva)) {
+        return sinEfecto(exito({ verificacion: structuredClone(anterior) }));
+      }
+      verificaciones.set(correlationId, nueva);
+      return {
+        respuesta: exito({ verificacion: structuredClone(nueva) }),
+        auditoria: auditoriaIngresoDe(nueva),
+      };
+    },
+
+    consultarVerificacionIngreso(correlationId) {
+      if (fallaSimulada.debeFallar()) return fallo(noDisponible());
+      const id = z.uuid().safeParse(correlationId);
+      if (!id.success) {
+        return fallo(
+          errorValidacion(
+            "formato_invalido",
+            "El correlationId debe ser un UUID.",
+            "correlationId",
+          ),
+        );
+      }
+      const guardada = verificaciones.get(id.data);
+      return exito({ verificacion: guardada === undefined ? null : structuredClone(guardada) });
     },
 
     consultarExtracciones(correlationId) {
@@ -553,6 +814,26 @@ export function crearCore({
         .sort((a, b) => (a.adjuntos[0] ?? 0) - (b.adjuntos[0] ?? 0));
       return exito({ extracciones: lista });
     },
+  };
+}
+
+/** Dos verificaciones son la misma decisión si solo difiere la marca de tiempo (R9). */
+function mismaVerificacion(a: VerificacionIngreso, b: VerificacionIngreso): boolean {
+  const sinMarca = ({ calculadaEn: _marca, ...resto }: VerificacionIngreso) => resto;
+  return JSON.stringify(sinMarca(a)) === JSON.stringify(sinMarca(b));
+}
+
+/** Auditoría de la Regla 3 (R9): estado y enteros; nunca fragmentos, valores de documentos ni nombres. */
+function auditoriaIngresoDe(v: VerificacionIngreso): AuditoriaIngreso {
+  return {
+    regla: v.decision.regla,
+    estado: v.estado,
+    ingresoVerificado: v.ingreso?.monto ?? null,
+    ingresoDeclarado: v.ingresoDeclarado,
+    diferencia: v.discrepancia?.diferencia ?? null,
+    umbralPorcentaje: v.discrepancia?.umbralPorcentaje ?? null,
+    reglasInconsistencia: [...new Set(v.inconsistencias.map((i) => i.regla))],
+    versionPolitica: v.decision.versionPolitica,
   };
 }
 

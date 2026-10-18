@@ -8,6 +8,7 @@ import {
   crearAdaptador,
   crearEstado,
   emitirEvento,
+  ORDEN_REGLA,
   REGLA_NO_CUBIERTO,
   REGLA_NO_EXTRAIBLE,
   REGLA_5_DOCUMENTOS,
@@ -47,7 +48,21 @@ import type {
 } from "./extraccion.ts";
 import { crearCore } from "../mcp/core-simulado.ts";
 import { fijarDestino } from "../compartido/logs.ts";
-import type { RegistroExtraccion, SalidaSubagente } from "../compartido/extraccion.ts";
+import {
+  construirResultado,
+  validarSalida,
+  type RegistroExtraccion,
+  type SalidaSubagente,
+} from "../compartido/extraccion.ts";
+import { REGLA_3 } from "../politica/ingreso.ts";
+import {
+  ejemploCertificado,
+  ejemploExtracto,
+  extractoConLecturaErrada,
+  nominaDelMes,
+  extractosTrimestre,
+  type Ejemplo,
+} from "../compartido/ingreso-ejemplos.ts";
 import {
   CONTENIDO_CERTIFICADO,
   CONTENIDO_CERTIFICADO_SIN_SALARIO,
@@ -730,6 +745,7 @@ describe("adaptador: consultar_identidad no se expone al modelo (#9, US4)", () =
       "verificar_identidad",
       "solicitar_analista",
       "extraer_documento",
+      "verificar_ingreso",
       "consultar_extracciones",
     ]);
   });
@@ -836,6 +852,12 @@ function coreEnMemoria() {
       consultas++;
       return core.consultarExtracciones(correlationId);
     },
+    async verificarIngreso(entrada, correlationId) {
+      return core.verificarIngreso({ ...entrada, correlationId }).respuesta;
+    },
+    async consultarVerificacionIngreso(correlationId) {
+      return core.consultarVerificacionIngreso(correlationId);
+    },
     async cerrar() {},
   };
   const verificar = (correlationId: string) => {
@@ -847,7 +869,7 @@ function coreEnMemoria() {
       correlationId,
     });
   };
-  return { cliente, registros, consultas: () => consultas, verificar };
+  return { cliente, core, registros, consultas: () => consultas, verificar };
 }
 
 /** Subagente falso: cada llamada usa la siguiente respuesta (la última se repite). */
@@ -1503,5 +1525,692 @@ describe("adaptador: Regla 5 al cerrar el turno y prioridad de señales (revisi�
     });
     dejarSenal(estado, { motivo: "caso_no_cubierto", regla: "Regla 5", herramienta: "x" });
     assert.equal(estado.escalamiento?.motivo, "falla_transitoria_persistente");
+  });
+});
+
+describe("adaptador: orden de reglas con la Regla 3 (#11)", () => {
+  const MOTIVOS_REGLA_3 = ["discrepancia_de_ingreso", "inconsistencia_documental"] as const;
+  const otraSenal = {
+    pide_persona: "Regla 4",
+    caso_no_cubierto: "Regla 5",
+    identidad_no_verificable: "Regla 1",
+  } as const;
+
+  it("ORDEN_REGLA marca ambos motivos como Regla 3", () => {
+    for (const motivo of MOTIVOS_REGLA_3) assert.equal(ORDEN_REGLA[motivo], 3);
+  });
+
+  it("una señal de la Regla 4, 5 o 1 reemplaza a una de la Regla 3", () => {
+    for (const previa of MOTIVOS_REGLA_3) {
+      for (const [motivo, regla] of Object.entries(otraSenal)) {
+        const estado = crearEstado(randomUUID());
+        dejarSenal(estado, { motivo: previa, regla: "Regla 3", herramienta: "verificar_ingreso" });
+        dejarSenal(estado, {
+          motivo: motivo as keyof typeof otraSenal,
+          regla,
+          herramienta: "x",
+        });
+        assert.equal(estado.escalamiento?.motivo, motivo, `${motivo} sobre ${previa}`);
+      }
+    }
+  });
+
+  it("una señal de la Regla 3 no reemplaza a una de la Regla 4, 5 ni 1", () => {
+    for (const nueva of MOTIVOS_REGLA_3) {
+      for (const [motivo, regla] of Object.entries(otraSenal)) {
+        const estado = crearEstado(randomUUID());
+        dejarSenal(estado, { motivo: motivo as keyof typeof otraSenal, regla, herramienta: "x" });
+        dejarSenal(estado, { motivo: nueva, regla: "Regla 3", herramienta: "verificar_ingreso" });
+        assert.equal(estado.escalamiento?.motivo, motivo, `${nueva} bajo ${motivo}`);
+      }
+    }
+  });
+
+  it("entre dos señales de la Regla 3 prevalece la primera", () => {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "inconsistencia_documental",
+      regla: "Regla 3",
+      herramienta: "extraer_documento",
+    });
+    dejarSenal(estado, {
+      motivo: "discrepancia_de_ingreso",
+      regla: "Regla 3",
+      herramienta: "verificar_ingreso",
+    });
+    assert.equal(estado.escalamiento?.motivo, "inconsistencia_documental");
+  });
+
+  it("una señal técnica ni reemplaza a una de la Regla 3 ni es reemplazada por ella", () => {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "discrepancia_de_ingreso",
+      regla: "Regla 3",
+      herramienta: "verificar_ingreso",
+    });
+    dejarSenal(estado, {
+      motivo: "falla_transitoria_persistente",
+      regla: "Principio VI",
+      herramienta: "z",
+    });
+    assert.equal(estado.escalamiento?.motivo, "discrepancia_de_ingreso");
+    const otro = crearEstado(randomUUID());
+    dejarSenal(otro, {
+      motivo: "falla_transitoria_persistente",
+      regla: "Principio VI",
+      herramienta: "z",
+    });
+    dejarSenal(otro, {
+      motivo: "inconsistencia_documental",
+      regla: "Regla 3",
+      herramienta: "extraer_documento",
+    });
+    assert.equal(otro.escalamiento?.motivo, "falla_transitoria_persistente");
+  });
+
+  it("la señal conserva los valores de la discrepancia", () => {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "discrepancia_de_ingreso",
+      regla: "Regla 3",
+      herramienta: "verificar_ingreso",
+      ingresoDeclarado: 4300000,
+      ingresoVerificado: 3800000,
+      umbralPorcentaje: 10,
+    });
+    assert.equal(estado.escalamiento?.ingresoDeclarado, 4300000);
+    assert.equal(estado.escalamiento?.ingresoVerificado, 3800000);
+    assert.equal(estado.escalamiento?.umbralPorcentaje, 10);
+  });
+});
+
+// ── Ingreso verificado (#11) ───────────────────────────────────────────────────
+
+/** Registra directamente en el core en memoria los documentos ficticios, sin pasar por el subagente. */
+async function registrarEjemplos(p: ReturnType<typeof prepararExtraccion>, ejemplos: Ejemplo[]) {
+  for (const e of ejemplos) {
+    const validada = validarSalida(e.salida, e, HOY_EJEMPLO);
+    if (!validada.ok) assert.fail(JSON.stringify(validada.errores));
+    const r = await p.enMemoria.cliente.registrarExtraccion(
+      {
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(validada.salida, e, 1),
+      },
+      p.correlationId,
+    );
+    assert.equal(r.ok, true, JSON.stringify(r));
+  }
+}
+
+const verificarIngreso = (p: ReturnType<typeof prepararExtraccion>, ingresoDeclarado?: number) =>
+  p.adaptador.herramientas.verificar_ingreso.manejar(
+    ingresoDeclarado === undefined ? {} : { ingresoDeclarado },
+  );
+
+const documentosDeIngreso = () => [ejemploCertificado(), ...extractosTrimestre()];
+
+describe("adaptador: verificar_ingreso (#11, US1, US2 y US4)", () => {
+  let logs: Record<string, unknown>[];
+  beforeEach(() => {
+    logs = [];
+    fijarDestino({ write: (t: string) => logs.push(JSON.parse(t) as Record<string, unknown>) });
+  });
+  afterEach(() => fijarDestino(null));
+
+  it("expone verificar_ingreso con solo el ingreso declarado, opcional", () => {
+    const { adaptador } = prepararExtraccion([], []);
+    assert.deepEqual(Object.keys(adaptador.herramientas.verificar_ingreso.esquema), [
+      "ingresoDeclarado",
+    ]);
+    const esquema = adaptador.herramientas.verificar_ingreso.esquema.ingresoDeclarado;
+    assert.equal(esquema.safeParse(undefined).success, true);
+    assert.equal(esquema.safeParse(3_800_000).success, true);
+    assert.equal(esquema.safeParse(-1).success, false);
+    assert.equal(esquema.safeParse(1.5).success, false);
+    assert.equal(esquema.safeParse("3800000").success, false);
+  });
+
+  it("verificado: devuelve el ingreso y el origen, sin eventos ni escalamiento", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    const r = await verificarIngreso(p, 3_800_000);
+    assert.equal(r.isError, false);
+    assert.deepEqual(contenidoDe(r).datos, {
+      estado: "verificado",
+      ingresoVerificado: 3_800_000,
+      origen: "ambos",
+    });
+    assert.equal(p.estado.escalamiento, null);
+    assert.deepEqual(p.estado.eventos, []);
+  });
+
+  it("falta_declarado: pide el ingreso con un solo evento por turno y no escala", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    const r = await verificarIngreso(p);
+    assert.deepEqual(contenidoDe(r).datos, { estado: "falta_declarado", faltaDeclarado: true });
+    await verificarIngreso(p);
+    assert.equal(p.estado.eventos.length, 1);
+    const evento = p.estado.eventos[0];
+    assert.equal(evento?.tipo, "solicitud_de_dato");
+    if (evento?.tipo !== "solicitud_de_dato") return;
+    assert.equal(evento.motivo, "ingreso_declarado_faltante");
+    assert.equal(evento.dato, "ingreso mensual declarado");
+    assert.equal(evento.regla, REGLA_3);
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("sin_ingreso: pide documentos de ingreso y no escala", async () => {
+    const p = prepararExtraccion([], []);
+    const r = await verificarIngreso(p, 3_800_000);
+    assert.deepEqual(contenidoDe(r).datos, { estado: "sin_ingreso", faltanDocumentos: true });
+    const evento = p.estado.eventos[0];
+    assert.equal(evento?.tipo, "solicitud_de_dato");
+    if (evento?.tipo !== "solicitud_de_dato") return;
+    assert.equal(evento.motivo, "ingreso_no_verificable");
+    assert.equal(evento.dato, "certificado laboral con salario o extractos con abonos de nómina");
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("al modelo no le llegan inconsistencias, diferencias ni valores de documentos", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    const texto = JSON.stringify((await verificarIngreso(p, 3_800_000)).structuredContent);
+    for (const dato of ["inconsistencias", "diferencia", "Industrias", "Ficticia", "fragmento"]) {
+      assert.equal(texto.includes(dato), false, dato);
+    }
+  });
+
+  it("discrepancia: escala con la Regla 3 y los valores, sin darle al modelo la diferencia", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    const r = await verificarIngreso(p, 4_300_000);
+    assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "discrepancia" });
+    const senal = p.estado.escalamiento;
+    assert.equal(senal?.motivo, "discrepancia_de_ingreso");
+    assert.equal(senal?.regla, REGLA_3);
+    assert.equal(senal?.herramienta, "verificar_ingreso");
+    assert.equal(senal?.ingresoDeclarado, 4_300_000);
+    assert.equal(senal?.ingresoVerificado, 3_800_000);
+    assert.equal(senal?.umbralPorcentaje, 10);
+  });
+
+  it("exactamente el 10% no escala; un peso más sí", async () => {
+    const limite = prepararExtraccion([], []);
+    await registrarEjemplos(limite, documentosDeIngreso());
+    const r = await verificarIngreso(limite, 4_180_000);
+    assert.equal(contenidoDe(r).datos?.["estado"], "verificado");
+    assert.equal(limite.estado.escalamiento, null);
+
+    const encima = prepararExtraccion([], []);
+    await registrarEjemplos(encima, documentosDeIngreso());
+    await verificarIngreso(encima, 4_180_001);
+    assert.equal(encima.estado.escalamiento?.motivo, "discrepancia_de_ingreso");
+  });
+
+  it("una señal de la Regla 4 previa prevalece sobre la de la Regla 3", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    dejarSenal(p.estado, { motivo: "pide_persona", regla: "Regla 4", herramienta: "x" });
+    await verificarIngreso(p, 4_300_000).catch(() => undefined);
+    assert.equal(p.estado.escalamiento?.motivo, "pide_persona");
+  });
+
+  it("una señal de la Regla 5 posterior reemplaza a la de la Regla 3", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    await verificarIngreso(p, 4_300_000);
+    assert.equal(p.estado.escalamiento?.motivo, "discrepancia_de_ingreso");
+    dejarSenal(p.estado, {
+      motivo: "caso_no_cubierto",
+      regla: REGLA_NO_CUBIERTO,
+      herramienta: "solicitar_analista",
+      causa: "moneda_extranjera",
+    });
+    assert.equal(p.estado.escalamiento?.motivo, "caso_no_cubierto");
+  });
+
+  it("con la conversación ya escalada no llama al core", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    dejarSenal(p.estado, { motivo: "pide_persona", regla: "Regla 4", herramienta: "x" });
+    const r = await verificarIngreso(p, 3_800_000);
+    assert.equal(r.isError, true);
+    assert.equal(p.estado.eventos.length, 0);
+  });
+
+  it("no_cubierto: confirma la escalada de la Regla 5 sin calcular ni convertir", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    const usd = { adjunto: 8, nombre: "certificado-usd.md", contenido: CONTENIDO_CERTIFICADO_USD };
+    const validada = validarSalida(salidaCertificadoUsd(), usd, HOY_EJEMPLO);
+    assert.ok(validada.ok);
+    if (!validada.ok) return;
+    const registro = await p.enMemoria.cliente.registrarExtraccion(
+      { ...usd, resultado: construirResultado(validada.salida, usd, 1) },
+      p.correlationId,
+    );
+    assert.ok(registro.ok);
+    const r = await verificarIngreso(p, 4_300_000);
+    assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "no_cubierto" });
+    const senal = p.estado.escalamiento;
+    assert.equal(senal?.motivo, "caso_no_cubierto");
+    assert.equal(senal?.regla, REGLA_NO_CUBIERTO);
+    assert.equal(senal?.causa, "moneda_extranjera");
+    assert.equal(senal?.adjunto, 8);
+  });
+
+  it("si la Regla 5 ya escaló en la extracción, verificar no cambia ni el motivo ni la causa", async () => {
+    const p = prepararExtraccion([], []);
+    dejarSenal(p.estado, {
+      motivo: "caso_no_cubierto",
+      regla: REGLA_NO_CUBIERTO,
+      herramienta: "extraer_documento",
+      causa: "documento_no_soportado",
+      adjunto: 3,
+    });
+    await verificarIngreso(p, 4_300_000);
+    assert.equal(p.estado.escalamiento?.causa, "documento_no_soportado");
+    assert.equal(p.estado.escalamiento?.adjunto, 3);
+  });
+
+  it("moneda extranjera y discrepancia a la vez: queda la Regla 5 y no se evalúa la discrepancia", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    const usd = { adjunto: 8, nombre: "certificado-usd.md", contenido: CONTENIDO_CERTIFICADO_USD };
+    const validada = validarSalida(salidaCertificadoUsd(), usd, HOY_EJEMPLO);
+    if (!validada.ok) return assert.fail("salida inválida");
+    await p.enMemoria.cliente.registrarExtraccion(
+      { ...usd, resultado: construirResultado(validada.salida, usd, 1) },
+      p.correlationId,
+    );
+    await verificarIngreso(p, 9_000_000);
+    assert.equal(p.estado.escalamiento?.motivo, "caso_no_cubierto");
+    assert.notEqual(p.estado.escalamiento?.motivo, "discrepancia_de_ingreso");
+  });
+
+  it("una falla del core que se agota escala por falla_transitoria_persistente", async () => {
+    const enMemoria = coreEnMemoria();
+    const p = prepararExtraccion([], [], {
+      core: {
+        ...enMemoria.cliente,
+        verificarIngreso: async () =>
+          fallo(errorTransitorio("core_no_disponible", "No se pudo hablar con el core.")),
+      },
+    });
+    const r = await verificarIngreso(p, 3_800_000);
+    assert.equal(r.isError, true);
+    assert.equal(p.estado.escalamiento?.motivo, "falla_transitoria_persistente");
+    assert.equal(p.estado.escalamiento?.herramienta, "verificar_ingreso");
+  });
+
+  it("un error de negocio del core pasa tal cual, sin escalar", async () => {
+    const enMemoria = coreEnMemoria();
+    const p = prepararExtraccion([], [], {
+      core: {
+        ...enMemoria.cliente,
+        verificarIngreso: async () =>
+          fallo(errorNegocio("identidad_no_verificada", "No hay identidad verificada.")),
+      },
+    });
+    const r = await verificarIngreso(p, 3_800_000);
+    assert.equal(r.isError, true);
+    assert.equal(contenidoDe(r).error?.codigo, "identidad_no_verificada");
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("el log verificacion_ingreso lleva estado, origen y reglas, sin valores de documentos", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    await verificarIngreso(p, 3_800_000);
+    const log = logs.find((l) => l["evento"] === "verificacion_ingreso");
+    assert.ok(log, "falta el log");
+    assert.equal(log["correlationId"], p.correlationId);
+    assert.equal(log["estado"], "verificado");
+    assert.equal(log["origen"], "ambos");
+    assert.deepEqual(log["inconsistencias"], []);
+    assert.equal(log["declarado"], true);
+    const texto = JSON.stringify(logs);
+    for (const dato of ["Industrias", "Ficticia", "Salario básico", "Certificado laboral"]) {
+      assert.equal(texto.includes(dato), false, dato);
+    }
+  });
+
+  it("avisa al observador de cada intento de llamada al core", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    await verificarIngreso(p, 3_800_000);
+    assert.ok(
+      p.infos.some((i) => i.herramienta === "verificar_ingreso" && i.resultado === "ok"),
+      JSON.stringify(p.infos),
+    );
+  });
+});
+
+describe("adaptador: verificación interna tras extraer_documento (#11, US3)", () => {
+  let logs: Record<string, unknown>[];
+  beforeEach(() => {
+    logs = [];
+    fijarDestino({ write: (t: string) => logs.push(JSON.parse(t) as Record<string, unknown>) });
+  });
+  afterEach(() => fijarDestino(null));
+
+  const comoDocumento = (e: Ejemplo): DocumentoConversacion => ({
+    adjunto: e.adjunto,
+    nombre: e.nombre,
+    soportado: true,
+    contenido: e.contenido,
+  });
+  const conEjemplos = (
+    ejemplos: Ejemplo[],
+    opciones: Parameters<typeof prepararExtraccion>[2] = {},
+  ) =>
+    prepararExtraccion(
+      ejemplos.map(comoDocumento),
+      ejemplos.map((e) => valida(e.salida)),
+      opciones,
+    );
+
+  it("un extracto de otro titular escala por inconsistencia_documental con las reglas, sin valores", async () => {
+    const ajeno = ejemploExtracto({ titular: "Otra Persona Inventada" });
+    const p = conEjemplos([ajeno]);
+    const r = await p.extraer(ajeno.adjunto);
+    assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "inconsistencia" });
+    const senal = p.estado.escalamiento;
+    assert.equal(senal?.motivo, "inconsistencia_documental");
+    assert.equal(senal?.regla, REGLA_3);
+    assert.equal(senal?.herramienta, "extraer_documento");
+    assert.equal(senal?.reglas, "titular_vs_solicitante");
+    assert.equal(JSON.stringify(logs).includes("Otra Persona Inventada"), false);
+  });
+
+  it("no le devuelve al modelo el resultado ni los valores del documento contradictorio", async () => {
+    const ajeno = ejemploExtracto({ titular: "Otra Persona Inventada" });
+    const p = conEjemplos([ajeno]);
+    const texto = JSON.stringify((await p.extraer(ajeno.adjunto)).structuredContent);
+    assert.equal(texto.includes("Otra Persona Inventada"), false);
+    assert.equal(texto.includes("resultado"), false);
+  });
+
+  it("empleador distinto del pagador escala por empleador_vs_pagador", async () => {
+    const certificado = ejemploCertificado({ empleador: "Compañía Inventada del Norte" });
+    const [julio] = extractosTrimestre();
+    const p = conEjemplos([certificado, julio!]);
+    await p.extraer(certificado.adjunto);
+    assert.equal(p.estado.escalamiento === null, true, "un certificado solo no contradice nada");
+    await p.extraer(julio!.adjunto);
+    assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental");
+    assert.equal(p.estado.escalamiento?.reglas, "empleador_vs_pagador");
+  });
+
+  it("documentos consistentes no escalan y devuelven el resultado de siempre", async () => {
+    const ejemplos = documentosDeIngreso();
+    const p = conEjemplos(ejemplos);
+    for (const e of ejemplos) {
+      const r = await p.extraer(e.adjunto);
+      assert.equal(r.isError, false);
+      assert.equal(resultadoDe(r).estado, "extraido");
+    }
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("una inconsistencia que no detiene (hueco entre periodos) no escala", async () => {
+    const [julio, , septiembre] = extractosTrimestre();
+    const p = conEjemplos([ejemploCertificado(), julio!, septiembre!]);
+    for (const e of [ejemploCertificado(), julio!, septiembre!]) await p.extraer(e.adjunto);
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("un documento reutilizado no vuelve a verificar el ingreso", async () => {
+    const e = ejemploCertificado();
+    const enMemoria = coreEnMemoria();
+    let llamadas = 0;
+    const core: ClienteCore = {
+      ...enMemoria.cliente,
+      async verificarIngreso(entrada, correlationId) {
+        llamadas++;
+        return enMemoria.cliente.verificarIngreso(entrada, correlationId);
+      },
+    };
+    const p = prepararExtraccion([comoDocumento(e)], [valida(e.salida)], { core });
+    enMemoria.verificar(p.correlationId);
+    await p.extraer(e.adjunto);
+    assert.equal(llamadas, 1);
+    await p.extraer(e.adjunto);
+    assert.equal(llamadas, 1);
+  });
+
+  it("deja el log verificacion_ingreso con las reglas y sin valores de documentos", async () => {
+    const ajeno = ejemploExtracto({ titular: "Otra Persona Inventada" });
+    const p = conEjemplos([ajeno]);
+    await p.extraer(ajeno.adjunto);
+    const log = logs.find((l) => l["evento"] === "verificacion_ingreso");
+    assert.ok(log, "falta el log");
+    assert.equal(log["estado"], "inconsistencia");
+    assert.deepEqual(log["inconsistencias"], ["titular_vs_solicitante"]);
+    assert.equal(log["declarado"], false);
+  });
+
+  it("si el core falla al verificar, el error pasa al modelo y no se decide nada", async () => {
+    const e = ejemploCertificado();
+    const enMemoria = coreEnMemoria();
+    const core: ClienteCore = {
+      ...enMemoria.cliente,
+      verificarIngreso: async () =>
+        fallo(errorNegocio("identidad_no_verificada", "No hay identidad verificada.")),
+    };
+    const p = prepararExtraccion([comoDocumento(e)], [valida(e.salida)], { core });
+    enMemoria.verificar(p.correlationId);
+    const r = await p.extraer(e.adjunto);
+    assert.equal(r.isError, true);
+    assert.equal(p.estado.escalamiento, null);
+  });
+});
+
+describe("adaptador: moneda extranjera y la Regla 5 sobre la Regla 3 (#11, US4)", () => {
+  beforeEach(() => fijarDestino({ write: () => true }));
+  afterEach(() => fijarDestino(null));
+
+  const comoDocumento = (e: Ejemplo): DocumentoConversacion => ({
+    adjunto: e.adjunto,
+    nombre: e.nombre,
+    soportado: true,
+    contenido: e.contenido,
+  });
+  const usd: DocumentoConversacion = {
+    adjunto: 8,
+    nombre: "certificado-usd.md",
+    soportado: true,
+    contenido: CONTENIDO_CERTIFICADO_USD,
+  };
+
+  it("un documento en dólares junto a documentos en pesos es no cubierto, no una inconsistencia", async () => {
+    const ejemplos = documentosDeIngreso();
+    const p = prepararExtraccion(
+      [...ejemplos.map(comoDocumento), usd],
+      [...ejemplos.map((e) => valida(e.salida)), valida(salidaCertificadoUsd())],
+    );
+    for (const e of ejemplos) await p.extraer(e.adjunto);
+    const r = await p.extraer(usd.adjunto);
+    assert.deepEqual(contenidoDe(r).datos, { escalada: true, causa: "moneda_extranjera" });
+    assert.equal(p.estado.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(p.estado.escalamiento?.causa, "moneda_extranjera");
+  });
+
+  it("la verificación interna no reemplaza una señal de la Regla 5 por una de la Regla 3", async () => {
+    const ajeno = ejemploExtracto({ titular: "Otra Persona Inventada" });
+    const p = prepararExtraccion([comoDocumento(ajeno)], [valida(ajeno.salida)]);
+    dejarSenal(p.estado, {
+      motivo: "caso_no_cubierto",
+      regla: REGLA_NO_CUBIERTO,
+      herramienta: "extraer_documento",
+      causa: "moneda_extranjera",
+      adjunto: 8,
+    });
+    await p.extraer(ajeno.adjunto).catch(() => undefined);
+    assert.equal(p.estado.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(p.estado.escalamiento?.causa, "moneda_extranjera");
+  });
+});
+
+describe("adaptador: reextracción de inconsistencias corregibles (#11, US5)", () => {
+  let logs: Record<string, unknown>[];
+  beforeEach(() => {
+    logs = [];
+    fijarDestino({ write: (t: string) => logs.push(JSON.parse(t) as Record<string, unknown>) });
+  });
+  afterEach(() => fijarDestino(null));
+
+  const comoDocumento = (e: Ejemplo): DocumentoConversacion => ({
+    adjunto: e.adjunto,
+    nombre: e.nombre,
+    soportado: true,
+    contenido: e.contenido,
+  });
+  const lecturaErrada = () => {
+    const { errada, correcta } = extractoConLecturaErrada();
+    return { errada, correcta, documento: comoDocumento(correcta) };
+  };
+  const registrosDelCore = (p: ReturnType<typeof prepararExtraccion>) => {
+    const r = p.enMemoria.core.consultarExtracciones(p.correlationId);
+    assert.ok(r.ok);
+    return r.ok ? r.datos.extracciones : [];
+  };
+
+  it("corrige: la segunda lectura del titular reemplaza el registro, no queda inconsistencia y no escala", async () => {
+    const { errada, correcta, documento } = lecturaErrada();
+    const p = prepararExtraccion([documento], [valida(errada.salida), valida(correcta.salida)]);
+    const r = await p.extraer(documento.adjunto);
+    assert.equal(r.isError, false);
+    assert.equal(resultadoDe(r).estado, "extraido");
+    assert.equal(p.estado.escalamiento === null, true);
+    assert.deepEqual(registrosDelCore(p)[0]?.reextraidaPor, ["titular_vs_solicitante"]);
+    assert.equal(p.subagente.entradas.length, 2);
+  });
+
+  it("al subagente de la reextracción le da la regla y el valor extraído, sin el nombre del solicitante", async () => {
+    const { errada, correcta, documento } = lecturaErrada();
+    const p = prepararExtraccion([documento], [valida(errada.salida), valida(correcta.salida)]);
+    await p.extraer(documento.adjunto);
+    const segunda = p.subagente.entradas[1];
+    assert.equal(segunda?.erroresPrevios[0]?.motivo, "inconsistencia_entre_documentos");
+    const detalle = segunda?.erroresPrevios[0]?.detalle ?? "";
+    assert.ok(detalle.includes("Regla titular_vs_solicitante"));
+    assert.ok(detalle.includes("Luis Gómez Inventado"));
+    assert.equal(JSON.stringify(segunda?.erroresPrevios).includes("Ana"), false);
+    assert.equal(p.subagente.entradas[0]?.erroresPrevios.length, 0);
+  });
+
+  it("persiste: si la inconsistencia sigue tras la ronda, escala por inconsistencia_documental", async () => {
+    const { errada, documento } = lecturaErrada();
+    const p = prepararExtraccion([documento], [valida(errada.salida)]);
+    const r = await p.extraer(documento.adjunto);
+    assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "inconsistencia" });
+    assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental");
+    assert.equal(p.estado.escalamiento?.reglas, "titular_vs_solicitante");
+    // Una extracción y una ronda: la lectura sigue siendo válida pero errada, así que no hay más intentos.
+    assert.equal(p.subagente.entradas.length, 2);
+  });
+
+  it("una sola ronda por adjunto y regla: entregar el mismo documento otra vez no reextrae de nuevo", async () => {
+    const { errada, documento } = lecturaErrada();
+    const p = prepararExtraccion([documento], [valida(errada.salida)]);
+    await p.extraer(documento.adjunto);
+    const antes = p.subagente.entradas.length;
+    await p.extraer(documento.adjunto).catch(() => undefined);
+    assert.equal(p.subagente.entradas.length, antes);
+  });
+
+  it("una inconsistencia no corregible (periodos superpuestos) no se reextrae", async () => {
+    const a = ejemploExtracto({ adjunto: 2, nombre: "a.md" });
+    const b = ejemploExtracto({
+      adjunto: 3,
+      nombre: "b.md",
+      desde: "2026-08-15",
+      hasta: "2026-09-14",
+      movimientos: [{ ...nominaDelMes("2026-08-01"), fecha: "2026-08-20" }],
+    });
+    const p = prepararExtraccion(
+      [a, b].map(comoDocumento),
+      [a, b].map((e) => valida(e.salida)),
+    );
+    await p.extraer(a.adjunto);
+    await p.extraer(b.adjunto);
+    assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental");
+    assert.equal(p.estado.escalamiento?.reglas, "periodos_superpuestos");
+    assert.equal(p.subagente.entradas.length, 2, "ninguna reextracción");
+  });
+
+  it("empleador_vs_pagador reextrae todos los documentos involucrados", async () => {
+    const certificado = ejemploCertificado({ empleador: "Compañía Inventada del Norte" });
+    const [julio] = extractosTrimestre();
+    const docs = [certificado, julio!];
+    const p = prepararExtraccion(
+      docs.map(comoDocumento),
+      docs.map((e) => valida(e.salida)),
+    );
+    await p.extraer(certificado.adjunto);
+    await p.extraer(julio!.adjunto);
+    const reextraidos = p.subagente.entradas
+      .filter((e) => e.erroresPrevios.some((x) => x.motivo === "inconsistencia_entre_documentos"))
+      .map((e) => e.documento.adjunto);
+    assert.ok(reextraidos.includes(certificado.adjunto), "el certificado");
+    assert.ok(reextraidos.includes(julio!.adjunto), "el extracto");
+    assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental");
+  });
+
+  it("si el subagente no responde en la ronda conserva el registro y no escala por esa falla", async () => {
+    const { errada, documento } = lecturaErrada();
+    const p = prepararExtraccion([documento], [valida(errada.salida), tiempoAgotado]);
+    await p.extraer(documento.adjunto);
+    assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental");
+    assert.deepEqual(registrosDelCore(p)[0]?.reextraidaPor, []);
+  });
+
+  it("reextraccion_no_aplica y reextraccion_agotada del core se conservan y la inconsistencia decide", async () => {
+    for (const codigo of ["reextraccion_no_aplica", "reextraccion_agotada"]) {
+      const { errada, correcta, documento } = lecturaErrada();
+      const enMemoria = coreEnMemoria();
+      const core: ClienteCore = {
+        ...enMemoria.cliente,
+        async registrarExtraccion(entrada, correlationId) {
+          if (entrada.reextraccion !== undefined) {
+            return fallo(errorNegocio(codigo, "El core no acepta el reemplazo."));
+          }
+          return enMemoria.cliente.registrarExtraccion(entrada, correlationId);
+        },
+      };
+      const p = prepararExtraccion([documento], [valida(errada.salida), valida(correcta.salida)], {
+        core,
+      });
+      enMemoria.verificar(p.correlationId);
+      const r = await p.extraer(documento.adjunto);
+      assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "inconsistencia" }, codigo);
+      assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental", codigo);
+    }
+  });
+
+  it("el log intento_extraccion lleva la regla de la reextracción y ningún valor", async () => {
+    const { errada, correcta, documento } = lecturaErrada();
+    const p = prepararExtraccion([documento], [valida(errada.salida), valida(correcta.salida)]);
+    await p.extraer(documento.adjunto);
+    const intentos = logs.filter((l) => l["evento"] === "intento_extraccion");
+    assert.equal(intentos.length, 2);
+    assert.equal(intentos[0]?.["reextraccion"], undefined);
+    assert.equal(intentos[1]?.["reextraccion"], "titular_vs_solicitante");
+    const texto = JSON.stringify(logs);
+    for (const dato of ["Luis Gómez", "Ana Pérez", "Autorizado"]) {
+      assert.equal(texto.includes(dato), false, dato);
+    }
+  });
+
+  it("el log verificacion_ingreso cuenta las reextracciones", async () => {
+    const { errada, correcta, documento } = lecturaErrada();
+    const p = prepararExtraccion([documento], [valida(errada.salida), valida(correcta.salida)]);
+    await p.extraer(documento.adjunto);
+    const verificaciones = logs.filter((l) => l["evento"] === "verificacion_ingreso");
+    assert.equal(verificaciones.at(-1)?.["reextracciones"], 1);
   });
 });

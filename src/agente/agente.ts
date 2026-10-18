@@ -22,6 +22,7 @@ import {
   type InfoHerramienta,
   type SenalEscalamiento,
 } from "./adaptador.ts";
+import { REGLA_3 } from "../politica/ingreso.ts";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
 import { crearControlIdentidad } from "./control-identidad.ts";
 import {
@@ -60,6 +61,10 @@ const SYSTEM_PROMPT = [
   "No leas datos de los documentos por tu cuenta: usa solo los que devuelve extraer_documento, con su procedencia.",
   "Si extraer_documento ya pidió un dato que falta, no lo pidas de nuevo con otras palabras. Un dato que el solicitante escribe no reemplaza a un documento: pídele el documento.",
   "Para recordar datos ya extraídos en turnos anteriores, usa consultar_extracciones.",
+  // Ingreso verificado (#11, R8): el modelo guía; el cálculo, la comparación y el escalamiento son del código.
+  "Cuando el solicitante te diga cuánto gana al mes, o cuando ya haya entregado documentos de ingreso, llama a verificar_ingreso con el ingreso que declaró, como un entero de pesos; si no lo dijo, llámala sin ese dato.",
+  "No calcules, compares ni des por bueno un ingreso por tu cuenta: usa solo lo que devuelve verificar_ingreso. Un ingreso que el solicitante escribe no reemplaza a un documento.",
+  "Si el solicitante declara su ingreso en otra moneda, no lo registres: llama a solicitar_analista con motivo caso_no_cubierto y causa moneda_extranjera.",
 ].join(" ");
 
 /**
@@ -168,6 +173,10 @@ const AVISOS: Readonly<Record<Motivo, string>> = {
   caso_no_cubierto: "Tu caso necesita la revisión de un analista, que te contactará.",
   documento_no_extraible:
     "No pude leer con certeza los datos de tu documento. Tu caso pasa a un analista, que te contactará.",
+  discrepancia_de_ingreso:
+    "Los ingresos de tus documentos no coinciden con lo que declaraste. Tu caso pasa a un analista, que te contactará.",
+  inconsistencia_documental:
+    "Encontré datos que no coinciden entre tus documentos. Tu caso pasa a un analista, que te contactará.",
 };
 
 const REGLAS: Readonly<Record<Motivo, string>> = {
@@ -180,6 +189,8 @@ const REGLAS: Readonly<Record<Motivo, string>> = {
   pide_persona: REGLA_PIDE_PERSONA,
   caso_no_cubierto: REGLA_NO_CUBIERTO,
   documento_no_extraible: REGLA_NO_EXTRAIBLE,
+  discrepancia_de_ingreso: REGLA_3,
+  inconsistencia_documental: REGLA_3,
 };
 
 const REGLA_CORE_NO_ARRANCO = "constitución, Principio VI · el core no arrancó";
@@ -260,6 +271,12 @@ export async function conversar(
       ...(senal.coincidencias !== undefined ? { coincidencias: senal.coincidencias } : {}),
       ...(senal.causa !== undefined ? { causa: senal.causa } : {}),
       ...(senal.adjunto !== undefined ? { adjunto: senal.adjunto } : {}),
+      ...(senal.ingresoDeclarado !== undefined ? { ingresoDeclarado: senal.ingresoDeclarado } : {}),
+      ...(senal.ingresoVerificado !== undefined
+        ? { ingresoVerificado: senal.ingresoVerificado }
+        : {}),
+      ...(senal.umbralPorcentaje !== undefined ? { umbralPorcentaje: senal.umbralPorcentaje } : {}),
+      ...(senal.reglas !== undefined ? { reglas: senal.reglas } : {}),
     };
     // Los eventos del intento clasificado se conservan (reflejan lo que el código ya hizo) y el
     // escalamiento va al final; el chat fija el primer estado final (spec, casos borde).

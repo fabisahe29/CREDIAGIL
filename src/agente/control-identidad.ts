@@ -14,9 +14,13 @@ import { conReintentos } from "./reintentos.ts";
 /**
  * Herramientas del servidor `originacion` que exigen identidad verificada. La extracción de
  * documentos (#10) entra aquí: así ningún documento se procesa sin identidad, por código y no solo
- * por el prompt (FR-011a del #9). El registro de la solicitud (#13) agregará la suya.
+ * por el prompt (FR-011a del #9). La verificación de ingreso (#11) también: sin identidad no se
+ * compara nada con el solicitante. El registro de la solicitud (#13) agregará la suya.
  */
-export const HERRAMIENTAS_CON_IDENTIDAD: readonly string[] = ["extraer_documento"];
+export const HERRAMIENTAS_CON_IDENTIDAD: readonly string[] = [
+  "extraer_documento",
+  "verificar_ingreso",
+];
 
 export interface OpcionesControlIdentidad {
   core: Pick<ClienteCore, "consultarIdentidad">;

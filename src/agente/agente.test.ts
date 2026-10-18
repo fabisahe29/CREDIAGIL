@@ -4,6 +4,7 @@ import { conversar, MODELO_POR_DEFECTO, type ContextoConsulta, type QueryFn } fr
 import { errorNegocio, errorTransitorio, exito, fallo } from "../compartido/errores.ts";
 import type { ClienteCore } from "./cliente-core.ts";
 import { dejarSenal, emitirEvento, REGLA_NO_EXTRAIBLE } from "./adaptador.ts";
+import { REGLA_3 } from "../politica/ingreso.ts";
 import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
 
 const core: ClienteCore = {
@@ -1258,5 +1259,109 @@ describe("agente: tipo no soportado antes de la identidad (revisión de 5d28165)
     assert.equal(r.tipo, "respuesta");
     assert.equal(r.documentosRevisados, 2);
     assert.deepEqual(vistos, [2]);
+  });
+});
+
+describe("agente: ingreso verificado (#11)", () => {
+  it("el systemPrompt pide llamar a verificar_ingreso con el entero declarado, o sin él (US1)", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Ok")]]);
+    await conversar("Gano 3.800.000", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.match(
+      prompt,
+      /llama a verificar_ingreso con el ingreso que declaró, como un entero de pesos; si no lo dijo, llámala sin ese dato\./,
+    );
+  });
+
+  it("el systemPrompt prohíbe calcular o comparar ingresos y no acepta un ingreso escrito como documento", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Ok")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.match(
+      prompt,
+      /No calcules, compares ni des por bueno un ingreso por tu cuenta: usa solo lo que devuelve verificar_ingreso\./,
+    );
+    assert.match(prompt, /Un ingreso que el solicitante escribe no reemplaza a un documento\./);
+  });
+
+  it("el systemPrompt manda un ingreso en otra moneda a solicitar_analista como caso no cubierto", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Ok")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.match(
+      String(llamadas[0]!.options["systemPrompt"]),
+      /Si el solicitante declara su ingreso en otra moneda, no lo registres: llama a solicitar_analista con motivo caso_no_cubierto y causa moneda_extranjera\./,
+    );
+  });
+
+  it("verificar_ingreso está disponible como herramienta del adaptador", async (t) => {
+    capturarLogs(t);
+    let disponible = false;
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        disponible = "verificar_ingreso" in contexto.herramientas;
+        return [resultado("success", "end_turn", "Ok")];
+      },
+    ]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.equal(disponible, true);
+  });
+
+  it("una señal discrepancia_de_ingreso escala con su aviso, la Regla 3 y los tres enteros (US2)", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "discrepancia_de_ingreso",
+          regla: REGLA_3,
+          herramienta: "verificar_ingreso",
+          ingresoDeclarado: 4_300_000,
+          ingresoVerificado: 3_800_000,
+          umbralPorcentaje: 10,
+        });
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const r = await conversar("Gano 4.300.000", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.equal(r.tipo, "escalada");
+    assert.match(
+      r.respuesta,
+      /^Los ingresos de tus documentos no coinciden con lo que declaraste\. Tu caso pasa a un analista, que te contactará\./,
+    );
+    const escalamiento = r.eventos.at(-1);
+    assert.equal(escalamiento?.tipo, "escalamiento");
+    assert.equal(escalamiento?.regla, REGLA_3);
+    assert.deepEqual(escalamiento?.valores, {
+      herramienta: "verificar_ingreso",
+      ingresoDeclarado: 4_300_000,
+      ingresoVerificado: 3_800_000,
+      umbralPorcentaje: 10,
+    });
+  });
+
+  it("una señal inconsistencia_documental escala con su aviso y las reglas que detienen (US3)", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "inconsistencia_documental",
+          regla: REGLA_3,
+          herramienta: "extraer_documento",
+          reglas: "titular_vs_solicitante, empleador_vs_pagador",
+        });
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const r = await conversar("Aquí va", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.equal(r.tipo, "escalada");
+    assert.match(r.respuesta, /^Encontré datos que no coinciden entre tus documentos\./);
+    const escalamiento = r.eventos.at(-1);
+    assert.equal(escalamiento?.regla, REGLA_3);
+    assert.deepEqual(escalamiento?.valores, {
+      herramienta: "extraer_documento",
+      reglas: "titular_vs_solicitante, empleador_vs_pagador",
+    });
   });
 });
