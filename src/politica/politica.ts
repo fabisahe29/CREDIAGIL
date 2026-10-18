@@ -1,10 +1,20 @@
 // Módulo único de política de crédito (constitución, Principio I; specs/007-verificacion-identidad,
 // research.md, R5). Es la única fuente de los límites de las reglas de negocio: ningún otro archivo
-// los repite como literal. El umbral del 10% de ingreso llegó con el #11; los de monto y cuota y la
-// tasa llegan con el #12 y el #14.
+// los repite como literal. El umbral del 10% de ingreso llegó con el #11 y la tasa con el #12; los
+// de monto y cuota llegan con el #14.
 
 /** Versión de la política; acompaña cada decisión para poder auditarla. */
-export const VERSION_POLITICA = "2026-10-18.1";
+export const VERSION_POLITICA = "2026-10-18.2";
+
+/**
+ * Tasa de interés fija ficticia, en puntos base: 180 es el 1,8% mensual (constitución, Principio I;
+ * specs/010-simulacion-cuota-capacidad-pago, research.md, R1). En entero se muestra sin el ruido de
+ * flotante que daría `0.018 × 100`.
+ */
+export const TASA_MENSUAL_PUNTOS_BASE = 180;
+
+/** La `i` de la fórmula de la cuota: exactamente el mismo número que el literal `0.018`. */
+export const TASA_MENSUAL = TASA_MENSUAL_PUNTOS_BASE / 10_000;
 
 /** Regla 1: intentos fallidos de verificación de identidad antes de bloquearla (aclaración Q2 del #9). */
 export const MAX_INTENTOS_VERIFICACION = 3;

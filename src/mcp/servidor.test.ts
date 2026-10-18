@@ -26,6 +26,10 @@ import {
   type Ejemplo,
 } from "../compartido/ingreso-ejemplos.ts";
 import { VERSION_POLITICA } from "../politica/politica.ts";
+import {
+  DESCRIPCION_CAPACIDAD_PAGO,
+  esquemaSimulacionCapacidadPago,
+} from "../compartido/capacidad-pago.ts";
 
 const PRINCIPAL = fileURLToPath(new URL("./principal.ts", import.meta.url));
 
@@ -855,5 +859,168 @@ describe("servidor MCP del core: registrar_extraccion con reextracción (#11, US
     assert.equal(r.isError, true);
     assert.equal(r.contenido.error?.categoria, "validacion");
     assert.equal(r.contenido.error?.campo, "reextraccion");
+  });
+});
+
+describe("servidor MCP del core: calcular_capacidad_pago (#12, US1)", () => {
+  let conexion: Conexion;
+  before(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  after(async () => {
+    await conexion.cerrar();
+  });
+
+  it("anuncia calcular_capacidad_pago con su descripción y sus esquemas", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "calcular_capacidad_pago");
+    assert.ok(herramienta, "falta calcular_capacidad_pago");
+    assert.equal(herramienta.description, DESCRIPCION_CAPACIDAD_PAGO);
+    for (const campo of ["monto", "plazoMeses", "ingresoMensual", "correlationId"]) {
+      assert.ok(herramienta.inputSchema.properties?.[campo], `falta ${campo}`);
+    }
+    assert.ok(herramienta.outputSchema, "falta el esquema de salida");
+  });
+
+  it("devuelve la cuota de referencia en structuredContent, sin isError", async () => {
+    const resultado = await conexion.cliente.callTool({
+      name: "calcular_capacidad_pago",
+      arguments: {
+        monto: 4_000_000,
+        plazoMeses: 24,
+        ingresoMensual: 3_800_000,
+        correlationId: randomUUID(),
+      },
+    });
+    assert.notEqual(resultado.isError, true);
+    const contenido = resultado.structuredContent as {
+      ok: boolean;
+      datos: { simulacion: unknown };
+    };
+    assert.equal(contenido.ok, true);
+    const simulacion = esquemaSimulacionCapacidadPago.parse(contenido.datos.simulacion);
+    assert.equal(simulacion.cuotaMensual, 206_723);
+    assert.equal(simulacion.fuenteIngreso, "declarado");
+    assert.equal(simulacion.vinculante, false);
+  });
+
+  it("US2: se anuncia como herramienta de solo lectura", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "calcular_capacidad_pago");
+    assert.equal(herramienta?.annotations?.readOnlyHint, true);
+  });
+
+  it("US2: el log lleva el resultado y la fuente, sin montos ni auditoría de decisión", async () => {
+    const correlationId = randomUUID();
+    await conexion.cliente.callTool({
+      name: "calcular_capacidad_pago",
+      arguments: { monto: 4_123_457, plazoMeses: 24, ingresoMensual: 3_876_543, correlationId },
+    });
+    const registros = await registrosDe(conexion, correlationId);
+    const llamada = registros.find((r) => r["evento"] === "herramienta");
+    assert.ok(llamada, "no se registró la llamada");
+    assert.equal(llamada["herramienta"], "calcular_capacidad_pago");
+    assert.equal(llamada["resultado"], "ok");
+    assert.equal(llamada["fuenteIngreso"], "declarado");
+    assert.deepEqual(
+      registros.filter((r) => String(r["evento"]).startsWith("auditoria")),
+      [],
+    );
+    // Ni el monto, ni el ingreso, ni la cuota resultante (213.104) aparecen en ninguna línea.
+    const texto = JSON.stringify(registros);
+    for (const dato of ["4123457", "3876543", "213104"]) {
+      assert.equal(texto.includes(dato), false, dato);
+    }
+  });
+});
+
+describe("servidor MCP del core: calcular_capacidad_pago con entradas inválidas (#12, US4)", () => {
+  let conexion: Conexion;
+  before(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  after(async () => {
+    await conexion.cerrar();
+  });
+
+  const valida = { monto: 4_000_000, plazoMeses: 24, ingresoMensual: 3_800_000 };
+
+  async function llamar(argumentos: Record<string, unknown>) {
+    const resultado = await conexion.cliente.callTool({
+      name: "calcular_capacidad_pago",
+      arguments: { correlationId: randomUUID(), ...argumentos },
+    });
+    return {
+      isError: resultado.isError,
+      contenido: resultado.structuredContent as {
+        ok: boolean;
+        datos?: unknown;
+        error?: { categoria: string; reintentable: boolean; codigo: string; campo?: string };
+      },
+    };
+  }
+
+  const casos: Array<[string, string, string, unknown]> = [
+    ["monto", "monto_invalido", "monto", 0],
+    ["monto", "monto_invalido", "monto", -4_000_000],
+    ["monto", "monto_invalido", "monto", 1.5],
+    ["monto", "monto_invalido", "monto", "4000000"],
+    ["plazoMeses", "plazo_invalido", "plazoMeses", 0],
+    ["plazoMeses", "plazo_invalido", "plazoMeses", -1],
+    ["plazoMeses", "plazo_invalido", "plazoMeses", 2.5],
+    ["ingresoMensual", "ingreso_invalido", "ingresoMensual", 0],
+    ["ingresoMensual", "ingreso_invalido", "ingresoMensual", -500_000],
+    ["ingresoMensual", "ingreso_invalido", "ingresoMensual", "3800000"],
+  ];
+  for (const [campo, codigo, esperado, valor] of casos) {
+    it(`${campo} = ${JSON.stringify(valor)} llega como ${codigo} sobre ${esperado}, sin cuota`, async () => {
+      const { isError, contenido } = await llamar({ ...valida, [campo]: valor });
+      assert.equal(isError, true);
+      assert.equal(contenido.ok, false);
+      assert.equal(contenido.error?.categoria, "validacion");
+      assert.equal(contenido.error?.reintentable, false);
+      assert.equal(contenido.error?.codigo, codigo);
+      assert.equal(contenido.error?.campo, esperado);
+      assert.equal(contenido.datos, undefined);
+    });
+  }
+
+  for (const [campo, codigo] of [
+    ["monto", "monto_invalido"],
+    ["plazoMeses", "plazo_invalido"],
+    ["ingresoMensual", "ingreso_invalido"],
+  ] as const) {
+    it(`${campo} ausente llega como ${codigo}, no como el error genérico del SDK`, async () => {
+      const entrada: Record<string, unknown> = { ...valida };
+      delete entrada[campo];
+      const { isError, contenido } = await llamar(entrada);
+      assert.equal(isError, true);
+      assert.equal(contenido.error?.codigo, codigo);
+      assert.equal(contenido.error?.campo, campo);
+    });
+  }
+
+  it("un campo de más es formato_invalido sobre ese campo", async () => {
+    const { isError, contenido } = await llamar({ ...valida, ingresoVerificado: 9_000_000 });
+    assert.equal(isError, true);
+    assert.equal(contenido.error?.codigo, "formato_invalido");
+    assert.equal(contenido.error?.campo, "ingresoVerificado");
+  });
+
+  it("un correlationId que no es un UUID es formato_invalido sobre correlationId", async () => {
+    const { isError, contenido } = await llamar({ ...valida, correlationId: "no-es-uuid" });
+    assert.equal(isError, true);
+    assert.equal(contenido.error?.codigo, "formato_invalido");
+    assert.equal(contenido.error?.campo, "correlationId");
+  });
+
+  it("un monto cuya cuota no es un entero seguro se rechaza como monto_invalido", async () => {
+    const { isError, contenido } = await llamar({
+      monto: Number.MAX_SAFE_INTEGER,
+      plazoMeses: 1,
+      ingresoMensual: 1,
+    });
+    assert.equal(isError, true);
+    assert.equal(contenido.error?.codigo, "monto_invalido");
   });
 });

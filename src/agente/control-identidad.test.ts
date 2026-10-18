@@ -458,3 +458,53 @@ describe("control de identidad: verificar_ingreso (#11, US1)", () => {
     assert.ok(!HERRAMIENTAS_CON_IDENTIDAD.includes("consultar_verificacion_ingreso"));
   });
 });
+
+describe("control de identidad: calcular_capacidad_pago no exige identidad (#12, US2)", () => {
+  const SIMULAR = "mcp__originacion__calcular_capacidad_pago";
+
+  function preparar() {
+    const estado = crearEstado(randomUUID());
+    const { core, llamadas } = coreCon([identidad(estado.correlationId, false)]);
+    const control = crearControlIdentidad({
+      core,
+      estado,
+      dormir: async () => {},
+      azar: () => 0.5,
+    });
+    const invocar = () =>
+      control(
+        {
+          ...entrada(SIMULAR),
+          tool_input: { monto: 4_000_000, plazoMeses: 24, ingresoMensual: 3_800_000 },
+        } as HookInput,
+        "uso-1",
+        { signal: new AbortController().signal },
+      );
+    return { estado, llamadas, invocar };
+  }
+
+  it("no está en la lista de herramientas que exigen identidad", () => {
+    assert.ok(!HERRAMIENTAS_CON_IDENTIDAD.includes("calcular_capacidad_pago"));
+  });
+
+  it("con la identidad sin verificar la deja pasar sin consultar al core ni bloquear", async () => {
+    const { invocar, estado, llamadas } = preparar();
+    assert.deepEqual(await invocar(), {});
+    assert.equal(llamadas(), 0);
+    assert.deepEqual(estado.eventos, []);
+  });
+
+  it("con la conversación ya escalada la niega, como a las demás", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado } = preparar();
+    estado.escalamiento = {
+      motivo: "pide_persona",
+      regla: "Regla 4 · el solicitante pide hablar con una persona",
+      resultado: "escalada",
+      correlationId: estado.correlationId,
+      ts: new Date().toISOString(),
+      herramienta: "solicitar_analista",
+    };
+    assert.equal(decision(await invocar()), "deny");
+  });
+});

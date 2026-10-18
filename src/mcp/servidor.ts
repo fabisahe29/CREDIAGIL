@@ -13,6 +13,10 @@ import {
   fallo,
   type Respuesta,
 } from "../compartido/errores.ts";
+import {
+  DESCRIPCION_CAPACIDAD_PAGO,
+  esquemaSimulacionCapacidadPago,
+} from "../compartido/capacidad-pago.ts";
 import { esquemaRegistroExtraccion } from "../compartido/extraccion.ts";
 import { esquemaVerificacionIngreso } from "../compartido/ingreso.ts";
 import { registrar } from "../compartido/logs.ts";
@@ -57,6 +61,16 @@ const ENTRADAS = {
   // #11: el ingreso verificado no es un campo de entrada; lo calcula el core (R8).
   verificar_ingreso: z.object({ ingresoDeclarado: z.unknown().optional(), correlationId }).strict(),
   consultar_verificacion_ingreso: z.object({ correlationId }).strict(),
+  // #12: los valores los valida el core, que rechaza cada dato inválido, o ausente, con su código y
+  // su campo; por eso aquí son opcionales: su falta debe llegar al core y no quedarse en este esquema.
+  calcular_capacidad_pago: z
+    .object({
+      monto: z.unknown().optional(),
+      plazoMeses: z.unknown().optional(),
+      ingresoMensual: z.unknown().optional(),
+      correlationId,
+    })
+    .strict(),
 } as const;
 
 type NombreHerramienta = keyof typeof ENTRADAS;
@@ -367,6 +381,36 @@ export function crearServidor(core: Core): McpServer {
       registrarHerramienta("consultar_verificacion_ingreso", argumentos, respuesta, {
         estado: respuesta.ok ? (respuesta.datos.verificacion?.estado ?? null) : null,
       });
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "calcular_capacidad_pago",
+    {
+      title: "Calcular capacidad de pago",
+      description: DESCRIPCION_CAPACIDAD_PAGO,
+      inputSchema: z.looseObject({
+        monto: anunciado("Obligatorio. Monto en pesos colombianos, entero positivo."),
+        plazoMeses: anunciado("Obligatorio. Plazo en meses, entero positivo."),
+        ingresoMensual: anunciado("Obligatorio. Ingreso mensual en pesos, entero positivo."),
+        correlationId: CORRELATION_ID_ANUNCIADO,
+      }),
+      outputSchema: salida({ simulacion: esquemaSimulacionCapacidadPago }),
+      annotations: { readOnlyHint: true },
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("calcular_capacidad_pago", argumentos);
+      const respuesta = validacion.ok
+        ? core.calcularCapacidadPago(validacion.entrada)
+        : validacion.respuesta;
+      // Solo el resultado y la fuente del ingreso: nunca el monto, el ingreso ni la cuota (FR-015).
+      registrarHerramienta(
+        "calcular_capacidad_pago",
+        argumentos,
+        respuesta,
+        respuesta.ok ? { fuenteIngreso: respuesta.datos.simulacion.fuenteIngreso } : {},
+      );
       return aResultadoMcp(respuesta);
     },
   );

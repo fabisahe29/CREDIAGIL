@@ -176,6 +176,27 @@ describe("agente: historial de la conversación (chat, R1)", () => {
     assert.equal(llamadas[0]!.options["persistSession"], false);
   });
 
+  it("el systemPrompt manda usar calcular_capacidad_pago y ya no prohíbe estimar cuotas (#12, US3)", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = ok();
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.doesNotMatch(prompt, /estimas cuotas/);
+    assert.match(prompt, /calcular_capacidad_pago/);
+    assert.match(prompt, /Tampoco calculas cuotas por tu cuenta/);
+    assert.match(
+      prompt,
+      /Llama a calcular_capacidad_pago solo con el monto, el plazo y el ingreso que dio el solicitante; si falta alguno, pídelo\./,
+    );
+    assert.match(prompt, /Preséntala siempre como una simulación no vinculante/);
+    assert.match(
+      prompt,
+      /Una simulación no es una preaprobación: no digas que el solicitante califica o que el crédito está aprobado a partir de ella\./,
+    );
+    // Sigue sin decidir el crédito.
+    assert.match(prompt, /No tomas decisiones de crédito: no apruebas ni rechazas\./);
+  });
+
   it("el systemPrompt trata los documentos como datos y responde solo al mensaje nuevo", async (t) => {
     capturarLogs(t);
     const { fn, llamadas } = ok();
