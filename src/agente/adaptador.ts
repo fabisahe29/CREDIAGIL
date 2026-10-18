@@ -30,6 +30,7 @@ import type { ClienteCore, CriterioBusqueda } from "./cliente-core.ts";
 import {
   crearClasificador,
   crearSubagente,
+  errorDeInconsistencia,
   extraerConIntentos,
   type ClasificarDocumento,
   type EjecutarSubagente,
@@ -42,6 +43,8 @@ import {
   REGLA_5,
   REGLA_PRINCIPIO_V,
 } from "../politica/documentos.ts";
+import { REGLA_3 } from "../politica/ingreso.ts";
+import type { VerificacionIngreso } from "../compartido/ingreso.ts";
 
 export const CLAVE_SERVIDOR = "originacion";
 
@@ -55,7 +58,9 @@ export interface SenalEscalamiento {
     | "identidad_no_verificable"
     | "pide_persona"
     | "caso_no_cubierto"
-    | "documento_no_extraible";
+    | "documento_no_extraible"
+    | "discrepancia_de_ingreso"
+    | "inconsistencia_documental";
   regla: string;
   resultado: "escalada";
   correlationId: string;
@@ -69,6 +74,12 @@ export interface SenalEscalamiento {
   causa?: CausaNoCubierto;
   /** Documento que llevó al escalamiento (#10: no cubierto o no extraíble). */
   adjunto?: number;
+  /** Ingreso declarado, verificado y umbral de una discrepancia (#11, motivo discrepancia_de_ingreso). */
+  ingresoDeclarado?: number;
+  ingresoVerificado?: number;
+  umbralPorcentaje?: number;
+  /** Reglas de consistencia que detienen (#11, motivo inconsistencia_documental), separadas por coma. */
+  reglas?: string;
 }
 
 export const CAUSAS_NO_CUBIERTO = ["moneda_extranjera", "documento_no_soportado", "otro"] as const;
@@ -272,6 +283,20 @@ const esquemaExtraer = {
 const DESCRIPCION_EXTRAER =
   "Extrae los datos de un certificado laboral o de un extracto bancario que entregó el solicitante, por su número de adjunto. Devuelve cada dato con el fragmento del documento del que salió. Si falta un dato, no lo pidas tú: la herramienta ya lo pidió. Exige la identidad verificada.";
 
+const esquemaVerificarIngreso = {
+  ingresoDeclarado: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      "Lo que el solicitante dijo ganar al mes, como un entero de pesos. Omítelo si no lo dijo: no lo inventes ni lo calcules.",
+    ),
+};
+
+const DESCRIPCION_VERIFICAR_INGRESO =
+  "Verifica el ingreso mensual del solicitante con sus documentos y lo compara con lo que declaró. Devuelve el ingreso verificado o lo que falta. No calcules ni compares ingresos por tu cuenta. Exige la identidad verificada.";
+
 const DESCRIPCION_CONSULTAR_EXTRACCIONES =
   "Devuelve los datos ya extraídos de los documentos de esta conversación, con su procedencia. Úsala para recordar datos de turnos anteriores; no vuelve a extraer.";
 
@@ -296,30 +321,40 @@ const describirErrores = (errores: readonly ErrorExtraccion[]) =>
 
 /** El registro del core sin sus campos propios: el resultado para volver a registrarlo. */
 function resultadoDeRegistro(registro: RegistroExtraccion): ResultadoExtraccion {
-  const { adjuntos: _adjuntos, registradoEn: _registradoEn, ...resultado } = registro;
+  const {
+    adjuntos: _adjuntos,
+    registradoEn: _registradoEn,
+    reextraidaPor: _reextraidaPor,
+    ...resultado
+  } = registro;
   return resultado;
 }
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
 /** Regla de negocio de cada motivo de escalamiento; los técnicos no tienen. */
-export const ORDEN_REGLA: Partial<Record<SenalEscalamiento["motivo"], 1 | 4 | 5>> = {
+export const ORDEN_REGLA: Partial<Record<SenalEscalamiento["motivo"], 1 | 3 | 4 | 5>> = {
   pide_persona: 4,
   caso_no_cubierto: 5,
   identidad_ambigua: 1,
   identidad_no_verificable: 1,
+  discrepancia_de_ingreso: 3,
+  inconsistencia_documental: 3,
 };
 
+/** Orden de evaluación obligatorio (constitución, Principio I); la Regla 2 llega con el #14. */
+const ORDEN_EVALUACION = [4, 5, 1, 3, 2];
+
 /**
- * Orden de evaluación 4 → 5 → 1 (constitución, Principio I): una señal de la Regla 4 reemplaza a una
- * de la 5 o de la 1, y una de la 5 a una de la 1 (revisión de 5d28165). Una señal técnica ni
- * reemplaza ni se reemplaza: la primera prevalece.
+ * Orden de evaluación 4 → 5 → 1 → 3 → 2 (constitución, Principio I): una señal de una regla anterior
+ * reemplaza a una de una posterior (revisión de 5d28165; #11 agrega la Regla 3). Una señal técnica ni
+ * reemplaza ni se reemplaza: la primera prevalece, y entre dos de la misma regla también.
  */
 function prevalece(
   nueva: SenalEscalamiento["motivo"],
   actual: SenalEscalamiento["motivo"],
 ): boolean {
-  const orden = [4, 5, 1];
+  const orden = ORDEN_EVALUACION;
   const n = ORDEN_REGLA[nueva];
   const a = ORDEN_REGLA[actual];
   return n !== undefined && a !== undefined && orden.indexOf(n) < orden.indexOf(a);
@@ -619,7 +654,9 @@ export function crearAdaptador({
    */
   async function revisarRegla5AlCerrarTurno(desde: number): Promise<number> {
     const actual = estado.escalamiento;
-    if (actual !== null && ORDEN_REGLA[actual.motivo] !== 1) return documentos.length;
+    // Solo una señal de la Regla 1 o de la 3 (posteriores a la 5 en el orden) se deja reemplazar.
+    const reglaActual = actual === null ? undefined : ORDEN_REGLA[actual.motivo];
+    if (actual !== null && reglaActual !== 1 && reglaActual !== 3) return documentos.length;
     cerrarTurnoDocumentos(estado, documentos);
     if (estado.escalamiento !== null && estado.escalamiento !== actual) return documentos.length;
     for (const documento of documentos) {
@@ -628,6 +665,113 @@ export function crearAdaptador({
     }
     return documentos.length;
   }
+  /** Eventos de ingreso ya emitidos en este turno: el modelo puede repetir la llamada (R8). */
+  const eventosDeIngreso = new Set<string>();
+
+  /** Nombres de las reglas de consistencia que detienen; nunca valores de documentos. */
+  const reglasQueDetienen = (v: VerificacionIngreso): string[] => [
+    ...new Set(v.inconsistencias.filter((i) => i.detiene).map((i) => i.regla)),
+  ];
+
+  /** Log de una verificación de ingreso (R9): estado y nombres de reglas, sin valores de documentos. */
+  function registrarVerificacionLog(v: VerificacionIngreso, reextracciones = 0): void {
+    registrar("verificacion_ingreso", {
+      correlationId: estado.correlationId,
+      estado: v.estado,
+      origen: v.ingreso?.origen ?? null,
+      inconsistencias: [...new Set(v.inconsistencias.map((i) => i.regla))],
+      declarado: v.ingresoDeclarado !== null,
+      reextracciones,
+    });
+  }
+
+  /** Pide al solicitante lo que falta, una sola vez por turno. */
+  function pedirDeIngreso(
+    motivo: "ingreso_declarado_faltante" | "ingreso_no_verificable",
+    descripcion: string,
+    dato: string,
+  ): void {
+    if (eventosDeIngreso.has(motivo)) return;
+    eventosDeIngreso.add(motivo);
+    emitirEvento(estado, { tipo: "solicitud_de_dato", descripcion, motivo, dato, regla: REGLA_3 });
+  }
+
+  /** Escala por una inconsistencia que detiene (Regla 3); lo decide el código, nunca el modelo. */
+  function escalarInconsistencia(v: VerificacionIngreso, herramienta: string): void {
+    senal({
+      motivo: "inconsistencia_documental",
+      regla: REGLA_3,
+      herramienta,
+      reglas: reglasQueDetienen(v).join(", "),
+    });
+  }
+
+  /**
+   * Efectos de una verificación de ingreso, decididos por código (R5, R8). Devuelve lo mínimo que
+   * necesita el modelo para responder: nunca las inconsistencias, la diferencia ni valores de
+   * documentos.
+   */
+  function aplicarVerificacion(v: VerificacionIngreso, herramienta: string) {
+    switch (v.estado) {
+      case "verificado":
+        return { estado: v.estado, ingresoVerificado: v.ingreso?.monto, origen: v.ingreso?.origen };
+      case "falta_declarado":
+        pedirDeIngreso(
+          "ingreso_declarado_faltante",
+          "Para comparar con tus documentos necesito saber cuánto ganas al mes. Indícame tu ingreso mensual.",
+          "ingreso mensual declarado",
+        );
+        return { estado: v.estado, faltaDeclarado: true };
+      case "sin_ingreso":
+        pedirDeIngreso(
+          "ingreso_no_verificable",
+          "Con los documentos que tengo no puedo verificar tu ingreso. Envíame un certificado laboral con tu salario o tus extractos bancarios recientes con el abono de tu nómina.",
+          "certificado laboral con salario o extractos con abonos de nómina",
+        );
+        return { estado: v.estado, faltanDocumentos: true };
+      case "discrepancia":
+        senal({
+          motivo: "discrepancia_de_ingreso",
+          regla: REGLA_3,
+          herramienta,
+          ...(v.ingresoDeclarado !== null ? { ingresoDeclarado: v.ingresoDeclarado } : {}),
+          ...(v.ingreso !== null ? { ingresoVerificado: v.ingreso.monto } : {}),
+          ...(v.discrepancia !== null ? { umbralPorcentaje: v.discrepancia.umbralPorcentaje } : {}),
+        });
+        return { escalada: true, estado: v.estado };
+      case "inconsistencia":
+        escalarInconsistencia(v, herramienta);
+        return { escalada: true, estado: v.estado };
+      case "no_cubierto": {
+        // El documento ya escaló en la extracción; si no hubiera señal, se deja la de la Regla 5.
+        const causa = v.decision.valores["causa"];
+        const adjunto = v.decision.valores["adjunto"];
+        senal({
+          motivo: "caso_no_cubierto",
+          regla: REGLA_NO_CUBIERTO,
+          herramienta,
+          causa: CAUSAS_NO_CUBIERTO.find((c) => c === causa) ?? "otro",
+          ...(typeof adjunto === "number" ? { adjunto } : {}),
+        });
+        return { escalada: true, estado: v.estado };
+      }
+    }
+  }
+
+  /** Herramienta del modelo: verifica el ingreso con lo que el core ya guardó (R8). */
+  async function verificarIngreso({ ingresoDeclarado }: { ingresoDeclarado?: number }) {
+    const respuesta = await llamarConReintentos("verificar_ingreso", () =>
+      core.verificarIngreso(
+        ingresoDeclarado === undefined ? {} : { ingresoDeclarado },
+        estado.correlationId,
+      ),
+    );
+    if (!respuesta.ok) return aResultadoMcp(respuesta);
+    const verificacion = respuesta.datos.verificacion;
+    registrarVerificacionLog(verificacion);
+    return aResultadoMcp(exito(aplicarVerificacion(verificacion, "verificar_ingreso")));
+  }
+
   /** Log de una extracción (R10): metadatos, nunca el contenido ni los fragmentos (FR-017). */
   function registrarExtraccionLog(campos: Record<string, unknown>): void {
     registrar("extraccion", { correlationId: estado.correlationId, ...campos });
@@ -673,6 +817,67 @@ export function crearAdaptador({
             : describirErrores(registro.ultimoError),
       });
     }
+  }
+
+  /** Pares (adjunto, regla) ya reextraídos: una sola ronda por par (R6). */
+  const reextraidos = new Set<string>();
+
+  /**
+   * Una ronda de reextracción por cada inconsistencia corregible y cada documento que involucra (R6):
+   * el subagente relee el documento con la regla que falló y el valor que extrajo, nunca el valor
+   * esperado. Si no responde o el core no acepta el reemplazo, se conserva el registro anterior y la
+   * inconsistencia vigente decide. Devuelve cuántos registros se reemplazaron.
+   */
+  async function reextraerInconsistencias(v: VerificacionIngreso): Promise<number> {
+    let reemplazados = 0;
+    for (const inconsistencia of v.inconsistencias) {
+      if (!inconsistencia.corregible) continue;
+      for (const adjunto of inconsistencia.adjuntos) {
+        const clave = `${adjunto}|${inconsistencia.regla}`;
+        const documento = documentos.find((d) => d.adjunto === adjunto);
+        if (documento?.soportado !== true || reextraidos.has(clave)) continue;
+        reextraidos.add(clave);
+        const conContenido = { adjunto, nombre: documento.nombre, contenido: documento.contenido };
+        const intentos = await extraerConIntentos({
+          documento: conContenido,
+          ejecutarSubagente,
+          correlationId: estado.correlationId,
+          hoy: hoy(),
+          erroresIniciales: [errorDeInconsistencia(inconsistencia, adjunto)],
+          alIntentar: (info) => {
+            registrar("intento_extraccion", {
+              correlationId: estado.correlationId,
+              adjunto,
+              reextraccion: inconsistencia.regla,
+              ...info,
+            });
+            avisarObservador({
+              herramienta: "extraer_documento",
+              intento: info.numero,
+              resultado: info.resultado,
+            });
+          },
+        });
+        if (intentos.tipo !== "valida") continue;
+        const registro = await llamarConReintentos("registrar_extraccion", () =>
+          core.registrarExtraccion(
+            {
+              ...conContenido,
+              resultado: construirResultado(intentos.salida, conContenido, intentos.intentos),
+              reextraccion: { regla: inconsistencia.regla },
+            },
+            estado.correlationId,
+          ),
+        );
+        if (!registro.ok) continue;
+        reemplazados++;
+        // Un reemplazo que ya no está cubierto por la política escala por la Regla 5.
+        if (registro.datos.extraccion.estado !== "extraido") {
+          aplicarEfectos(registro.datos.extraccion, adjunto, documento.nombre);
+        }
+      }
+    }
+    return reemplazados;
   }
 
   /** Extrae con el subagente, o reutiliza una extracción previa del mismo contenido (FR-018). */
@@ -825,6 +1030,32 @@ export function crearAdaptador({
           : [],
       reutilizada: previa !== undefined,
     });
+    // Un documento extraído nuevo puede contradecir a los anteriores o al solicitante: el core lo
+    // recalcula sin ingreso declarado y, si hay una inconsistencia que detiene, escala el código (US3).
+    if (guardado.estado === "extraido" && previa === undefined) {
+      const verificada = await llamarConReintentos("verificar_ingreso", () =>
+        core.verificarIngreso({}, estado.correlationId),
+      );
+      if (!verificada.ok) return aResultadoMcp(verificada);
+      let verificacion = verificada.datos.verificacion;
+      let reextracciones = 0;
+      if (verificacion.estado === "inconsistencia") {
+        reextracciones = await reextraerInconsistencias(verificacion);
+        if (reextracciones > 0) {
+          const otra = await llamarConReintentos("verificar_ingreso", () =>
+            core.verificarIngreso({}, estado.correlationId),
+          );
+          if (!otra.ok) return aResultadoMcp(otra);
+          verificacion = otra.datos.verificacion;
+        }
+      }
+      if (verificacion.estado === "inconsistencia") {
+        registrarVerificacionLog(verificacion, reextracciones);
+        escalarInconsistencia(verificacion, "extraer_documento");
+        return aResultadoMcp(exito({ escalada: true, estado: verificacion.estado }));
+      }
+      if (reextracciones > 0) registrarVerificacionLog(verificacion, reextracciones);
+    }
     // Solo un documento extraído devuelve datos al modelo; los demás ya escalaron.
     return guardado.estado === "extraido"
       ? aResultadoMcp(exito({ resultado: guardado }))
@@ -850,6 +1081,7 @@ export function crearAdaptador({
     verificar_identidad: { esquema: esquemaVerificar, manejar: verificar },
     solicitar_analista: { esquema: esquemaSolicitarAnalista, manejar: solicitarAnalista },
     extraer_documento: { esquema: esquemaExtraer, manejar: extraer },
+    verificar_ingreso: { esquema: esquemaVerificarIngreso, manejar: verificarIngreso },
     consultar_extracciones: { esquema: {}, manejar: consultarExtracciones },
   };
 
@@ -884,6 +1116,12 @@ export function crearAdaptador({
       ),
       tool("extraer_documento", DESCRIPCION_EXTRAER, esquemaExtraer, (argumentos) =>
         extraer(argumentos),
+      ),
+      tool(
+        "verificar_ingreso",
+        DESCRIPCION_VERIFICAR_INGRESO,
+        esquemaVerificarIngreso,
+        (argumentos) => verificarIngreso(argumentos),
       ),
       tool(
         "consultar_extracciones",

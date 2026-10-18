@@ -13,6 +13,7 @@ import {
   type ErrorExtraccion,
   type SalidaSubagente,
 } from "../compartido/extraccion.ts";
+import type { Inconsistencia } from "../compartido/ingreso.ts";
 import { MAX_INTENTOS_EXTRACCION, TIPOS_DOCUMENTO_SOPORTADOS } from "../politica/politica.ts";
 
 /** Tiempo máximo de un intento del subagente: tres caben en el límite de la conversación (R10). */
@@ -272,6 +273,50 @@ export function crearClasificador({
         };
   };
 }
+const VALOR_DE = (valor: string | number | undefined) =>
+  valor === undefined ? "no consta" : `«${valor}»`;
+
+/**
+ * El error que se le da al subagente al reextraer un documento por una inconsistencia (R6): la regla
+ * que falló y el valor que él extrajo, nunca el valor esperado (el nombre del solicitante o el
+ * empleador del otro documento): así no puede copiarlo y debe releer el documento.
+ */
+export function errorDeInconsistencia(
+  inconsistencia: Inconsistencia,
+  adjunto: number,
+): ErrorExtraccion {
+  const uso = inconsistencia.valores.find((u) => u.adjunto === adjunto);
+  const extraido = VALOR_DE(uso?.valor);
+  const regla = `Regla ${inconsistencia.regla}: `;
+  const relee = "Vuelve a leer el documento y copia el dato tal como aparece.";
+  switch (inconsistencia.regla) {
+    case "titular_vs_solicitante":
+      return {
+        campo: "titular",
+        motivo: "inconsistencia_entre_documentos",
+        detalle: `${regla}el titular del extracto debe ser el solicitante verificado. Valor extraído: ${extraido}. Vuelve a leer el documento y copia el titular tal como aparece.`,
+      };
+    case "empleador_vs_pagador":
+      return uso?.campo === "empleador"
+        ? {
+            campo: "empleador",
+            motivo: "inconsistencia_entre_documentos",
+            detalle: `${regla}el empleador del certificado debe ser quien paga la nómina de los extractos. Valor extraído: ${extraido}. ${relee}`,
+          }
+        : {
+            campo: uso?.campo ?? "movimientos",
+            motivo: "inconsistencia_entre_documentos",
+            detalle: `${regla}el pagador de los abonos de nómina debe ser el empleador del certificado. Valor extraído: ${extraido}. ${relee}`,
+          };
+    default:
+      return {
+        campo: uso?.campo ?? "periodo",
+        motivo: "inconsistencia_entre_documentos",
+        detalle: `${regla}el periodo de un extracto debe ser de un solo mes. Valor extraído: ${extraido}. ${relee}`,
+      };
+  }
+}
+
 /** Un intento terminado, para los logs del adaptador (R10). */
 export interface InfoIntento {
   numero: number;
@@ -294,6 +339,11 @@ export interface OpcionesIntentos {
   ejecutarSubagente: EjecutarSubagente;
   correlationId: string;
   hoy: Date;
+  /**
+   * Errores que recibe el primer intento: en una reextracción, la regla de consistencia que falló
+   * (US5). Sin ellos, la ronda es la del #10.
+   */
+  erroresIniciales?: readonly ErrorExtraccion[];
   alIntentar?: (info: InfoIntento) => void;
   reloj?: () => number;
 }
@@ -308,10 +358,13 @@ export async function extraerConIntentos({
   ejecutarSubagente,
   correlationId,
   hoy,
+  erroresIniciales = [],
   alIntentar,
   reloj = Date.now,
 }: OpcionesIntentos): Promise<ResultadoIntentos> {
-  let erroresPrevios: ErrorExtraccion[] = [];
+  let erroresPrevios: ErrorExtraccion[] = [...erroresIniciales];
+  // Solo cuentan como `invalida` los errores de validación; los iniciales no son un intento.
+  let erroresInvalidos: ErrorExtraccion[] = [];
   let ultimaCausa: CausaSinRespuesta = "sin_result";
   for (let numero = 1; numero <= MAX_INTENTOS_EXTRACCION; numero++) {
     const inicio = reloj();
@@ -328,9 +381,10 @@ export async function extraerConIntentos({
       return { tipo: "valida", salida: validacion.salida, intentos: numero };
     }
     erroresPrevios = validacion.errores;
+    erroresInvalidos = validacion.errores;
     alIntentar?.({ numero, resultado: "invalida", duracionMs, errores: validacion.errores.length });
   }
-  return erroresPrevios.length > 0
-    ? { tipo: "invalida", errores: erroresPrevios, intentos: MAX_INTENTOS_EXTRACCION }
+  return erroresInvalidos.length > 0
+    ? { tipo: "invalida", errores: erroresInvalidos, intentos: MAX_INTENTOS_EXTRACCION }
     : { tipo: "sin_respuesta", causa: ultimaCausa, intentos: MAX_INTENTOS_EXTRACCION };
 }

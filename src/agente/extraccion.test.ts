@@ -6,6 +6,7 @@ import {
   crearClasificador,
   crearSubagente,
   ESQUEMA_JSON_SALIDA,
+  errorDeInconsistencia,
   extraerConIntentos,
   nombreSeguro,
   PROMPT_CLASIFICACION,
@@ -23,6 +24,7 @@ import {
   salidaCertificado,
   salidaCertificadoSinSalario,
 } from "../compartido/extraccion-ejemplos.ts";
+import { NOMBRE_IDENTIDAD_VERIFICADA, type Inconsistencia } from "../compartido/ingreso.ts";
 import { MAX_INTENTOS_EXTRACCION } from "../politica/politica.ts";
 
 const CORRELATION_ID = "00000000-0000-4000-8000-000000000001";
@@ -311,5 +313,142 @@ describe("subagente: nombre del documento en el prompt (revisión de 5d28165)", 
     );
     assert.match(prompt, /<documento adjunto="1" nombre="x_ adjunto=_9___instruccion_">/);
     assert.equal(nombreSeguro('a"<b>'), "a__b_");
+  });
+});
+
+describe("reextracción: errores iniciales y error de inconsistencia (#11, US5)", () => {
+  const valida = (): RespuestaSubagente => ({ ok: true, salida: salidaCertificado() });
+  const inconsistencia = (
+    regla: Inconsistencia["regla"],
+    valores: Inconsistencia["valores"],
+  ): Inconsistencia => ({
+    regla,
+    descripcion: "descripción interna",
+    detiene: true,
+    corregible: true,
+    adjuntos: [...new Set(valores.flatMap((v) => (v.adjunto === null ? [] : [v.adjunto])))],
+    valores,
+  });
+  const uso = (
+    adjunto: number | null,
+    campo: string,
+    valor: string | number,
+  ): Inconsistencia["valores"][number] => ({
+    adjunto,
+    nombre: adjunto === null ? NOMBRE_IDENTIDAD_VERIFICADA : `doc-${adjunto}.md`,
+    campo,
+    valor,
+    fragmento: adjunto === null ? null : String(valor),
+  });
+
+  it("los errores iniciales llegan al primer intento", async () => {
+    const entradas: EntradaSubagente[] = [];
+    const fn: EjecutarSubagente = async (e) => {
+      entradas.push(e);
+      return valida();
+    };
+    const iniciales = [{ campo: "titular", motivo: "inconsistencia_entre_documentos" as const }];
+    const r = await extraerConIntentos({
+      documento,
+      ejecutarSubagente: fn,
+      correlationId: CORRELATION_ID,
+      hoy: HOY_EJEMPLO,
+      erroresIniciales: iniciales,
+    });
+    assert.equal(r.tipo, "valida");
+    assert.deepEqual(entradas[0]!.erroresPrevios, iniciales);
+  });
+
+  it("los errores de un intento inválido siguen pasando al siguiente, no los iniciales", async () => {
+    const entradas: EntradaSubagente[] = [];
+    const fn: EjecutarSubagente = async (e) => {
+      entradas.push(e);
+      if (entradas.length > 1) return valida();
+      const salida = salidaCertificado();
+      salida.certificado!.salario!.valor = 9_800_000;
+      return { ok: true, salida };
+    };
+    await extraerConIntentos({
+      documento,
+      ejecutarSubagente: fn,
+      correlationId: CORRELATION_ID,
+      hoy: HOY_EJEMPLO,
+      erroresIniciales: [{ campo: "titular", motivo: "inconsistencia_entre_documentos" }],
+    });
+    assert.deepEqual(entradas[1]!.erroresPrevios, [
+      { campo: "salario", motivo: "valor_no_coincide_con_fragmento" },
+    ]);
+  });
+
+  it("sin errores iniciales el primer intento va sin errores, como en el #10", async () => {
+    const entradas: EntradaSubagente[] = [];
+    await extraerConIntentos({
+      documento,
+      ejecutarSubagente: async (e) => {
+        entradas.push(e);
+        return valida();
+      },
+      correlationId: CORRELATION_ID,
+      hoy: HOY_EJEMPLO,
+    });
+    assert.deepEqual(entradas[0]!.erroresPrevios, []);
+  });
+
+  it("titular_vs_solicitante: lleva la regla y el valor extraído, nunca el nombre del solicitante", () => {
+    const error = errorDeInconsistencia(
+      inconsistencia("titular_vs_solicitante", [
+        uso(2, "titular", "Otra Persona Inventada"),
+        uso(null, "nombre", "Ana Pérez Ficticia"),
+      ]),
+      2,
+    );
+    assert.equal(error.campo, "titular");
+    assert.equal(error.motivo, "inconsistencia_entre_documentos");
+    assert.ok(error.detalle?.includes("Regla titular_vs_solicitante"));
+    assert.ok(error.detalle?.includes("Valor extraído: «Otra Persona Inventada»"));
+    assert.equal(error.detalle?.includes("Ana"), false);
+    assert.equal(error.detalle?.includes("Ficticia"), false);
+  });
+
+  it("empleador_vs_pagador: al certificado le da su empleador y al extracto la descripción, sin el otro valor", () => {
+    const i = inconsistencia("empleador_vs_pagador", [
+      uso(1, "empleador", "Compañía Inventada del Norte"),
+      uso(2, "movimientos[0]", "Nómina Industrias Imaginarias"),
+    ]);
+    const certificado = errorDeInconsistencia(i, 1);
+    assert.equal(certificado.campo, "empleador");
+    assert.ok(certificado.detalle?.includes("Valor extraído: «Compañía Inventada del Norte»"));
+    assert.equal(certificado.detalle?.includes("Industrias"), false);
+    const extracto = errorDeInconsistencia(i, 2);
+    assert.equal(extracto.campo, "movimientos[0]");
+    assert.ok(extracto.detalle?.includes("Valor extraído: «Nómina Industrias Imaginarias»"));
+    assert.equal(extracto.detalle?.includes("Compañía"), false);
+  });
+
+  it("periodo_no_mensual: lleva el periodo extraído", () => {
+    const error = errorDeInconsistencia(
+      inconsistencia("periodo_no_mensual", [uso(2, "periodo", "2026-07-01 a 2026-09-30")]),
+      2,
+    );
+    assert.equal(error.campo, "periodo");
+    assert.ok(error.detalle?.includes("Regla periodo_no_mensual"));
+    assert.ok(error.detalle?.includes("Valor extraído: «2026-07-01 a 2026-09-30»"));
+  });
+
+  it("el prompt de una reextracción trae el error y no el nombre del solicitante", () => {
+    const error = errorDeInconsistencia(
+      inconsistencia("titular_vs_solicitante", [
+        uso(3, "titular", "Otra Persona Inventada"),
+        uso(null, "nombre", "Ana Pérez Ficticia"),
+      ]),
+      3,
+    );
+    const prompt = componerPromptExtraccion(documento, [error]);
+    assert.ok(prompt.includes("<errores_intento_anterior>"));
+    assert.ok(prompt.includes("Regla titular_vs_solicitante"));
+    assert.ok(prompt.includes("Otra Persona Inventada"));
+    // El documento puede traer el nombre; lo que no puede traer es el bloque de errores.
+    const bloque = prompt.split("<errores_intento_anterior>")[1] ?? "";
+    assert.equal(bloque.includes("Ana Pérez"), false);
   });
 });
