@@ -26,9 +26,16 @@ const normalizar = (texto: string) =>
 
 const escaparRegex = (texto: string) => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** La expresión como palabra completa: `cop` no coincide con `copia`. */
-const comoPalabra = (expresion: string) =>
-  new RegExp(`(?<![a-z0-9])${escaparRegex(expresion)}(?![a-z0-9])`);
+/**
+ * La expresión como palabra: un extremo que es letra no puede pegarse a otra letra (`cop` no
+ * coincide con `copia`), pero sí a una cifra (`USD1.200`, `1.200usd`). Un extremo que es símbolo no
+ * pide límite: «US$1.200», «€900» o «900€» (revisión de 5d28165).
+ */
+const comoPalabra = (expresion: string) => {
+  const antes = /^[a-z]/.test(expresion) ? "(?<![a-z])" : "";
+  const despues = /[a-z]$/.test(expresion) ? "(?![a-z])" : "";
+  return new RegExp(`${antes}${escaparRegex(expresion)}${despues}`);
+};
 
 const menciona = (texto: string, expresiones: readonly string[]) =>
   expresiones.some((expresion) => comoPalabra(expresion).test(texto));
@@ -51,8 +58,9 @@ export function deducirMoneda(fragmento: string): MonedaDeducida | null {
   return null;
 }
 
-/** Longitud máxima de un fragmento citado (la misma del esquema de procedencia). */
-const LARGO_FRAGMENTO = 300;
+/** Longitud máxima de un fragmento citado; la usa también el esquema de procedencia. */
+export const LARGO_MAXIMO_FRAGMENTO = 300;
+const LARGO_FRAGMENTO = LARGO_MAXIMO_FRAGMENTO;
 
 /**
  * Busca en todo el documento, línea por línea, una mención de moneda extranjera. Devuelve el código

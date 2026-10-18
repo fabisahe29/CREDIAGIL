@@ -20,6 +20,8 @@ export interface Conversacion {
   readonly desambiguada: boolean;
   /** Documentos entregados, numerados desde 1; viajan a `conversar` en cada turno (#10). */
   readonly documentos: readonly DocumentoConversacion[];
+  /** Documentos que ya revisó la Regla 5; viaja a `conversar` en cada turno (#10). */
+  readonly documentosRevisados: number;
 }
 
 /** Un evento tal como llega a la interfaz, después de validarlo otra vez (R3). */
@@ -34,6 +36,7 @@ export const nuevaConversacion = (correlationId: string = randomUUID()): Convers
   busquedasAmbiguas: 0,
   desambiguada: false,
   documentos: [],
+  documentosRevisados: 0,
 });
 
 /** Lo que el chat sabe de un documento antes de numerarlo. */

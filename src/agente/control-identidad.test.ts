@@ -358,7 +358,7 @@ describe("control de identidad: Regla 5 antes que la Regla 1 (revisión de 0aa8c
     assert.equal(
       (salida as { hookSpecificOutput: { permissionDecisionReason: string } }).hookSpecificOutput
         .permissionDecisionReason,
-      "Regla 5: el caso no está cubierto por la política; pasa a un analista.",
+      "Regla 5 antes que la Regla 1: el caso pasa a un analista.",
     );
     assert.deepEqual(llamadas, [[HERRAMIENTA, { adjunto: 2 }]]);
     assert.deepEqual(estado.eventos, []);

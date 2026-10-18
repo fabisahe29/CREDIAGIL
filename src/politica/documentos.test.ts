@@ -285,3 +285,37 @@ describe("política: evaluarDocumento", () => {
     }
   });
 });
+
+describe("política: moneda pegada a la cifra (revisión de 5d28165)", () => {
+  for (const [fragmento, codigo] of [
+    ["US$1.200", "USD"],
+    ["u$s1.200", "USD"],
+    ["USD1.200", "USD"],
+    ["1.200usd", "USD"],
+    ["€900", "EUR"],
+    ["900€", "EUR"],
+    ["£800", "GBP"],
+  ] as const) {
+    it(`reconoce ${codigo} en «${fragmento}»`, () => {
+      assert.deepEqual(deducirMoneda(fragmento), { tipo: "extranjera", codigo });
+    });
+  }
+
+  it("la búsqueda en el documento y la revisión previa también la encuentran", () => {
+    assert.equal(buscarMonedaExtranjera("Salario: US$1.200 mensuales")?.codigo, "USD");
+    assert.equal(
+      evaluarRegla5Previa({ soportado: true, contenido: "Bono anual: €900" })?.causa,
+      "moneda_extranjera",
+    );
+  });
+
+  it("una palabra que empieza o termina con las letras de una moneda no la nombra", () => {
+    for (const texto of ["copia", "europa", "dolares" + "x", "usdx"]) {
+      assert.equal(deducirMoneda(texto), null, texto);
+    }
+  });
+
+  it("COP pegado a la cifra se reconoce", () => {
+    assert.deepEqual(deducirMoneda("3.800.000COP"), { tipo: "soportada", codigo: "COP" });
+  });
+});

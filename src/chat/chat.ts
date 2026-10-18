@@ -177,6 +177,7 @@ export function iniciarChat({
         busquedasAmbiguas: conv.busquedasAmbiguas,
         desambiguada: conv.desambiguada,
         documentos: conv.documentos,
+        documentosRevisados: conv.documentosRevisados,
         ...(demo
           ? { alUsarHerramienta: (info) => escribir(formatearHerramienta(info, color)) }
           : {}),
@@ -201,6 +202,7 @@ export function iniciarChat({
       ),
       busquedasAmbiguas: resultado.busquedasAmbiguas,
       desambiguada: resultado.desambiguada,
+      documentosRevisados: resultado.documentosRevisados,
     };
     escribir(formatearAgente(resultado.respuesta, color));
     const mostrados = (resultado.eventos as unknown[]).map(mostrar);

@@ -5,7 +5,12 @@
 
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { buscarMonedaExtranjera, deducirMoneda, evaluarDocumento } from "../politica/documentos.ts";
+import {
+  buscarMonedaExtranjera,
+  deducirMoneda,
+  evaluarDocumento,
+  LARGO_MAXIMO_FRAGMENTO,
+} from "../politica/documentos.ts";
 import {
   MAX_INTENTOS_EXTRACCION,
   MONEDA_SOPORTADA,
@@ -15,6 +20,9 @@ import {
 // ---------------------------------------------------------------------------------------------
 // Esquemas básicos
 // ---------------------------------------------------------------------------------------------
+
+/** Nombre del adjunto que nace de un bloque `/pegar` (FR-009); lo asigna el chat. */
+export const NOMBRE_TEXTO_PEGADO = "texto pegado";
 
 /** Caracteres máximos del contenido de un documento: el mismo tope de 256 KiB del chat (#8). */
 export const TAMANO_MAXIMO_CONTENIDO = 256 * 1024;
@@ -35,7 +43,7 @@ const fechaISO = z
   .string()
   .regex(FECHA_ISO)
   .refine(esFechaCalendario, "fecha de calendario inválida");
-const fragmento = z.string().min(1).max(300);
+const fragmento = z.string().min(1).max(LARGO_MAXIMO_FRAGMENTO);
 const texto = z.string().min(1);
 const pesos = z.int().positive();
 const sentido = z.enum(["abono", "cargo"]);
@@ -302,7 +310,13 @@ type ResultadoMonto = "ok" | "centavos" | "no_coincide";
  */
 function analizarMonto(valor: number, textoFragmento: string): ResultadoMonto {
   let hayCentavos = false;
-  for (const coincidencia of textoFragmento.matchAll(/\d[\d.,]*/g)) {
+  // Los números de una fecha no son montos: «2026-07-03», «1/02/2022» o «1 de febrero de 2022»
+  // no pueden respaldar un valor de 2026, 7 o 3 (revisión de 5d28165).
+  const sinFechas = textoFragmento
+    .replace(/\d{4}-\d{1,2}-\d{1,2}/g, " ")
+    .replace(/\d{1,2}\/\d{1,2}\/\d{2,4}/g, " ")
+    .replace(/\d{1,2}\s+de\s+\p{L}+\s+(?:de|del)\s+\d{4}/giu, " ");
+  for (const coincidencia of sinFechas.matchAll(/\d[\d.,]*/g)) {
     const numero = coincidencia[0].replace(/[.,]+$/, "");
     const ultimo = Math.max(numero.lastIndexOf("."), numero.lastIndexOf(","));
     let parteEntera = numero;

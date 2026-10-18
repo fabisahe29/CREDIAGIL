@@ -1155,6 +1155,7 @@ describe("agente: Regla 5 sobre los documentos al cerrar el turno (revisión de 
       documentos: [
         { adjunto: 1, nombre: "c.md", soportado: true, contenido: "Salario: $3.800.000 COP" },
       ],
+      clasificarDocumento: async () => ({ ok: true, tipo: "certificado_laboral" }),
       ...sinEspera,
     });
     assert.equal(r.tipo, "respuesta");
@@ -1206,8 +1207,56 @@ describe("agente: Regla 5 sobre los documentos al cerrar el turno (revisión de 
     assert.equal(
       (decisionHook as { hookSpecificOutput: { permissionDecisionReason: string } })
         .hookSpecificOutput.permissionDecisionReason,
-      "Regla 5: el caso no está cubierto por la política; pasa a un analista.",
+      "Regla 5 antes que la Regla 1: el caso pasa a un analista.",
     );
     assert.equal(r.escalamiento?.causa, "documento_no_soportado");
+  });
+});
+
+describe("agente: tipo no soportado antes de la identidad (revisión de 5d28165)", () => {
+  const DESPRENDIBLE = {
+    adjunto: 1,
+    nombre: "desprendible.md",
+    soportado: true as const,
+    contenido: "Desprendible ficticio. Neto a pagar: 3.496.000 COP",
+  };
+
+  it("escala por la Regla 5 al cerrar el turno aunque el modelo no llame a ninguna herramienta", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "¿Me das tu documento?")]]);
+    const r = await conversar("Adjunto el documento desprendible.md (adjunto 1).", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [DESPRENDIBLE],
+      clasificarDocumento: async () => ({ ok: true, tipo: "otro" }),
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(r.escalamiento?.causa, "documento_no_soportado");
+    assert.equal(r.documentosRevisados, 1);
+  });
+
+  it("devuelve cuántos documentos quedan revisados y no vuelve a clasificar los anteriores", async (t) => {
+    capturarLogs(t);
+    const vistos: number[] = [];
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "Recibido.")]]);
+    const r = await conversar("Otro documento", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [
+        { ...DESPRENDIBLE, contenido: "Certificado ficticio en COP" },
+        { ...DESPRENDIBLE, adjunto: 2, contenido: "Extracto ficticio en COP" },
+      ],
+      documentosRevisados: 1,
+      clasificarDocumento: async ({ documento }) => {
+        vistos.push(documento.adjunto);
+        return { ok: true, tipo: "extracto_bancario" };
+      },
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.documentosRevisados, 2);
+    assert.deepEqual(vistos, [2]);
   });
 });

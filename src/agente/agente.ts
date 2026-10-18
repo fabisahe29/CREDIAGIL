@@ -10,7 +10,6 @@ import { ETIQUETAS_CONVERSACION, neutralizarEtiquetas } from "../compartido/etiq
 import type { EventoNegocio } from "../compartido/eventos.ts";
 import {
   CLAVE_SERVIDOR,
-  cerrarTurnoDocumentos,
   cerrarTurnoIdentidad,
   crearAdaptador,
   crearEstado,
@@ -119,6 +118,8 @@ export interface ResultadoConversacion {
   busquedasAmbiguas: number;
   /** Si la conversación ya se desambiguó (una búsqueda con una sola coincidencia). */
   desambiguada: boolean;
+  /** Documentos que ya pasaron por la Regla 5 al cerrar un turno; el chat lo pasa en el siguiente (#10). */
+  documentosRevisados: number;
 }
 
 export interface OpcionesConversar {
@@ -131,6 +132,8 @@ export interface OpcionesConversar {
   desambiguada?: boolean;
   /** Documentos de la conversación, numerados por el chat; viajan en cada turno (#10, R2). */
   documentos?: readonly DocumentoConversacion[];
+  /** Documentos que ya revisó la Regla 5 en turnos anteriores; el chat lo guarda y lo pasa (#10). */
+  documentosRevisados?: number;
   /** Subagente de extracción; por defecto el real con el mismo modelo (#10, R1). */
   ejecutarSubagente?: EjecutarSubagente;
   /** Clasificador previo del tipo de documento (Regla 5 antes de la 1); inyectable en las pruebas. */
@@ -215,6 +218,7 @@ export async function conversar(
     busquedasAmbiguas = 0,
     desambiguada = false,
     documentos = [],
+    documentosRevisados = 0,
     ejecutarSubagente,
     clasificarDocumento,
     alUsarHerramienta,
@@ -231,6 +235,7 @@ export async function conversar(
   estado.busquedasAmbiguas = busquedasAmbiguas;
   estado.desambiguada = desambiguada;
   let turnos = 0;
+  let revisados = documentosRevisados;
 
   function escalar(
     motivo: Motivo,
@@ -283,6 +288,7 @@ export async function conversar(
       eventos: [...estado.eventos],
       busquedasAmbiguas: estado.busquedasAmbiguas,
       desambiguada: estado.desambiguada,
+      documentosRevisados: revisados,
     };
   }
 
@@ -401,7 +407,7 @@ export async function conversar(
     }
     // Al cerrar el turno, la Regla 5 sobre los documentos, sin modelo, va antes que el escalamiento
     // por identidad ambigua (#9, FR-006): orden 4 → 5 → 1 (revisión de 0aa8c2a).
-    cerrarTurnoDocumentos(estado, documentos);
+    revisados = await adaptador.revisarRegla5AlCerrarTurno(documentosRevisados);
     cerrarTurnoIdentidad(estado);
     // La señal del adaptador prevalece sobre cualquier result (contracts/agente.md).
     if (estado.escalamiento !== null) {
@@ -419,6 +425,7 @@ export async function conversar(
             eventos: [...estado.eventos],
             busquedasAmbiguas: estado.busquedasAmbiguas,
             desambiguada: estado.desambiguada,
+            documentosRevisados: revisados,
           },
           intento,
         );

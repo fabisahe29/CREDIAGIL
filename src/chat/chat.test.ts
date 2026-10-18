@@ -56,6 +56,7 @@ const resultado = (
   correlationId: ID_1,
   respuesta,
   tipo: "respuesta",
+  documentosRevisados: 0,
   escalamiento: null,
   turnos: 1,
   eventos: [],

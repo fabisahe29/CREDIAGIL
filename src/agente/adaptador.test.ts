@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
   cerrarTurnoDocumentos,
+  dejarSenal,
   cerrarTurnoIdentidad,
   crearAdaptador,
   crearEstado,
@@ -39,6 +40,7 @@ import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
 import type { DocumentoConversacion } from "./agente.ts";
 import type {
   ClasificarDocumento,
+  RespuestaClasificacion,
   EjecutarSubagente,
   EntradaSubagente,
   RespuestaSubagente,
@@ -1322,10 +1324,58 @@ describe("adaptador: Regla 5 antes que la Regla 1 (revisión de 0aa8c2a)", () =>
     assert.equal(p.estado.escalamiento, null);
   });
 
-  it("si el clasificador no responde, no escala: decide la Regla 1 y luego la extracción", async () => {
-    const p = prepararExtraccion([doc(1, CONTENIDO_OTRO)], [], { verificar: false });
+  it(`si el clasificador no responde en ${MAX_INTENTOS_EXTRACCION} intentos, escala por falla transitoria (revisión de 5d28165)`, async () => {
+    let llamadas = 0;
+    const p = prepararExtraccion([doc(1, CONTENIDO_OTRO)], [], {
+      verificar: false,
+      clasificar: async () => {
+        llamadas++;
+        return { ok: false, causa: "tiempo_agotado", detalle: "x" };
+      },
+    });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), true);
+    assert.equal(llamadas, MAX_INTENTOS_EXTRACCION);
+    assert.equal(p.estado.escalamiento?.motivo, "falla_transitoria_persistente");
+    assert.equal(p.estado.escalamiento?.herramienta, "clasificar_documento");
+  });
+
+  it("si el clasificador falla una vez y luego responde, decide con esa respuesta", async () => {
+    const respuestas: RespuestaClasificacion[] = [
+      { ok: false, causa: "error_sdk", detalle: "x" },
+      { ok: true, tipo: "otro" },
+    ];
+    const p = prepararExtraccion([doc(1, CONTENIDO_OTRO)], [], {
+      verificar: false,
+      clasificar: async () => respuestas.shift()!,
+    });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), true);
+    assert.equal(p.estado.escalamiento?.causa, "documento_no_soportado");
+  });
+
+  it("un texto pegado que no es un documento no escala: es conversación", async () => {
+    const p = prepararExtraccion(
+      [
+        {
+          adjunto: 1,
+          nombre: "texto pegado",
+          soportado: true,
+          contenido: "Quisiera saber la tasa",
+        },
+      ],
+      [],
+      { verificar: false, clasificar: async () => ({ ok: true, tipo: "no_es_documento" }) },
+    );
     assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), false);
     assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("un archivo adjunto que no es un documento sí escala como no soportado", async () => {
+    const p = prepararExtraccion([doc(1, "Notas sueltas", "notas.md")], [], {
+      verificar: false,
+      clasificar: async () => ({ ok: true, tipo: "no_es_documento" }),
+    });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), true);
+    assert.equal(p.estado.escalamiento?.causa, "documento_no_soportado");
   });
 
   it("un adjunto inexistente no escala", async () => {
@@ -1365,5 +1415,93 @@ describe("adaptador: Regla 5 antes que la Regla 1 (revisión de 0aa8c2a)", () =>
     };
     cerrarTurnoDocumentos(estado, [doc(3, CONTENIDO_CERTIFICADO_USD)]);
     assert.equal(estado.escalamiento.motivo, "pide_persona");
+  });
+});
+
+describe("adaptador: Regla 5 al cerrar el turno y prioridad de señales (revisión de 5d28165)", () => {
+  beforeEach(() => fijarDestino({ write: () => true }));
+  afterEach(() => fijarDestino(null));
+
+  it("un documento nuevo de tipo no soportado en COP escala al cerrar el turno, aunque el modelo no hiciera nada", async () => {
+    const p = prepararExtraccion(
+      [doc(1, "Desprendible ficticio. Neto: 3.496.000 COP", "d.md")],
+      [],
+      {
+        verificar: false,
+        clasificar: async () => ({ ok: true, tipo: "otro" }),
+      },
+    );
+    assert.equal(await p.adaptador.revisarRegla5AlCerrarTurno(0), 1);
+    assert.equal(p.estado.escalamiento?.causa, "documento_no_soportado");
+    assert.equal(p.estado.escalamiento?.herramienta, REGLA_5_DOCUMENTOS);
+  });
+
+  it("solo clasifica los documentos nuevos: los ya revisados en turnos anteriores no", async () => {
+    const vistos: number[] = [];
+    const p = prepararExtraccion(
+      [doc(1, CONTENIDO_CERTIFICADO), doc(2, CONTENIDO_EXTRACTO, "extracto.md")],
+      [],
+      {
+        verificar: false,
+        clasificar: async ({ documento }) => {
+          vistos.push(documento.adjunto);
+          return { ok: true, tipo: "certificado_laboral" };
+        },
+      },
+    );
+    assert.equal(await p.adaptador.revisarRegla5AlCerrarTurno(1), 2);
+    assert.deepEqual(vistos, [2]);
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("no vuelve a clasificar un documento que ya se extrajo en el mismo turno", async () => {
+    const vistos: number[] = [];
+    const p = prepararExtraccion([doc(1, CONTENIDO_CERTIFICADO)], [valida(salidaCertificado())], {
+      clasificar: async ({ documento }) => {
+        vistos.push(documento.adjunto);
+        return { ok: true, tipo: "certificado_laboral" };
+      },
+    });
+    await p.extraer(1);
+    await p.adaptador.revisarRegla5AlCerrarTurno(0);
+    assert.deepEqual(vistos, []);
+  });
+
+  it("una señal de la Regla 5 reemplaza a una de la Regla 1 del mismo turno", async () => {
+    const p = prepararExtraccion([doc(1, CONTENIDO_CERTIFICADO_USD)], [], { verificar: false });
+    dejarSenal(p.estado, {
+      motivo: "identidad_no_verificable",
+      regla: "Regla 1 · 3 intentos fallidos de verificación",
+      herramienta: "verificar_identidad",
+    });
+    await p.adaptador.revisarRegla5AlCerrarTurno(0);
+    assert.equal(p.estado.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(p.estado.escalamiento?.causa, "moneda_extranjera");
+  });
+
+  it("una señal de la Regla 4 nunca la reemplaza la Regla 5, y la 5 no la reemplaza la 1", () => {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "pide_persona",
+      regla: "Regla 4",
+      herramienta: "solicitar_analista",
+    });
+    dejarSenal(estado, { motivo: "caso_no_cubierto", regla: "Regla 5", herramienta: "x" });
+    assert.equal(estado.escalamiento?.motivo, "pide_persona");
+    const otro = crearEstado(randomUUID());
+    dejarSenal(otro, { motivo: "caso_no_cubierto", regla: "Regla 5", herramienta: "x" });
+    dejarSenal(otro, { motivo: "identidad_ambigua", regla: "Regla 1", herramienta: "y" });
+    assert.equal(otro.escalamiento?.motivo, "caso_no_cubierto");
+  });
+
+  it("una señal técnica no se reemplaza ni reemplaza", () => {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "falla_transitoria_persistente",
+      regla: "Principio VI",
+      herramienta: "z",
+    });
+    dejarSenal(estado, { motivo: "caso_no_cubierto", regla: "Regla 5", herramienta: "x" });
+    assert.equal(estado.escalamiento?.motivo, "falla_transitoria_persistente");
   });
 });

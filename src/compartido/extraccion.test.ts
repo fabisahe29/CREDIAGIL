@@ -878,3 +878,34 @@ describe("extraccion: validarResultado", () => {
     assert.ok(fallo(resultado).length > 0);
   });
 });
+
+describe("extraccion: un monto no puede salir de una fecha (revisión de 5d28165)", () => {
+  it("un valor igual a un trozo de la fecha de la cita se rechaza", () => {
+    for (const valor of [2026, 9, 5]) {
+      const salida = extractoCompleto();
+      salida.extracto!.movimientos[0]!.valor = valor;
+      const r = validarSalida(salida, { contenido: CONTENIDO_EXTRACTO }, HOY);
+      assert.equal(r.ok, false, String(valor));
+      if (!r.ok) {
+        assert.deepEqual(
+          r.errores.map((e) => [e.campo, e.motivo]),
+          [["movimientos.0.valor", "valor_no_coincide_con_fragmento"]],
+        );
+      }
+    }
+  });
+
+  it("un salario igual al año de la fecha escrita en letras se rechaza", () => {
+    const contenido = "Ingresó el 1 de febrero de 2022 con salario por definir";
+    const salida = certificadoCompleto();
+    salida.certificado = {
+      empleador: null,
+      cargo: null,
+      fechaIngreso: null,
+      salario: { valor: 2022, fragmento: "Ingresó el 1 de febrero de 2022 con salario" },
+      moneda: null,
+    };
+    const r = validarSalida(salida, { contenido }, HOY);
+    assert.equal(r.ok, false);
+  });
+});

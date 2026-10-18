@@ -38,7 +38,7 @@ const MOTIVO_SIN_IDENTIDAD = "Regla 1: la identidad del solicitante no está ver
 const MOTIVO_SIN_RESPUESTA = "No se pudo comprobar la identidad; no se continúa.";
 const MOTIVO_OTRO_SOLICITANTE = "Regla 1: la identidad verificada es de otro solicitante.";
 const MOTIVO_ESCALADA = "La conversación ya pasó a un analista; no se ejecutan más herramientas.";
-const MOTIVO_REGLA_5 = "Regla 5: el caso no está cubierto por la política; pasa a un analista.";
+const MOTIVO_REGLA_5 = "Regla 5 antes que la Regla 1: el caso pasa a un analista.";
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 

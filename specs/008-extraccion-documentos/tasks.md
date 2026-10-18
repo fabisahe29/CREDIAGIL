@@ -259,6 +259,15 @@ Las revisiones de código y de cumplimiento bloquearon el PR por la Regla 5. Se 
 
 Cada corrección tiene sus pruebas: política, validación compartida, core, clasificador, adaptador, control de identidad y agente.
 
+### Correcciones de la revisión de `5d28165`
+
+- Símbolos de moneda pegados a la cifra («US$1.200», «€900», «900€») y códigos pegados («USD1.200») se reconocen.
+- Un monto no puede salir de una fecha de su cita.
+- Al cerrar el turno se clasifica el tipo de cada documento nuevo; el clasificador reintenta y, si no responde, se escala.
+- Las señales siguen el orden 4 → 5 → 1.
+- El nombre del documento se escapa en los prompts, y el largo máximo del fragmento tiene una sola fuente.
+- Validado con el modelo real: certificado completo, desprendible y certificado antes de identificarse.
+
 ---
 
 ## Dependencies & Execution Order

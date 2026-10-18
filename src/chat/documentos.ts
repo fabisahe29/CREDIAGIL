@@ -5,6 +5,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve } from "node:path";
 import { neutralizarEtiquetas } from "../compartido/etiquetas.ts";
+import { NOMBRE_TEXTO_PEGADO } from "../compartido/extraccion.ts";
 
 export const TAMANO_MAXIMO_BYTES = 256 * 1024;
 const EXTENSIONES_SOPORTADAS = new Set([".txt", ".md"]);
@@ -84,8 +85,7 @@ export function componerMensaje(documento: DocumentoEnviable, adjunto: number): 
   return `${encabezado}\n<documento adjunto="${adjunto}" nombre="${documento.nombre}">\n${contenido}\n</documento>`;
 }
 
-/** Nombre del adjunto que nace de un bloque `/pegar` (specs/008-extraccion-documentos, FR-009). */
-export const NOMBRE_TEXTO_PEGADO = "texto pegado";
+export { NOMBRE_TEXTO_PEGADO };
 
 /** Un texto pegado de más de 256 KiB no se puede extraer: se registra como no soportado. */
 export const clasificarPegado = (texto: string): MotivoNoSoportado | null =>

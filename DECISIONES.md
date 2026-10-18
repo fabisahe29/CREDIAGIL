@@ -66,6 +66,7 @@ Las revisiones de `0aa8c2a` bloquearon el PR por tres razones: «pesos» suelto 
 - Al cerrar cada turno, el código revisa formato y moneda de los documentos sin modelo.
 - Al intentar extraer sin identidad, un clasificador que solo devuelve el tipo decide la Regla 5 antes de bloquear por la Regla 1.
 - Cada valor se contrasta con su cita: textos, fechas y el sentido de los movimientos, y «hoy» es el día en Bogotá.
+- Tras la segunda revisión (`5d28165`): al cerrar el turno se clasifica el tipo de cada documento nuevo, con reintentos y escalamiento si el clasificador no responde; las señales siguen el orden 4 → 5 → 1; los símbolos de moneda pegados a la cifra se reconocen, y un monto no puede salir de una fecha.
 
 **Motivo**: la Regla 5 es determinista y su orden es obligatorio (Principios I y III).
 
