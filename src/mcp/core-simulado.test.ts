@@ -1703,3 +1703,686 @@ describe("core simulado: calcularCapacidadPago con entradas inválidas (#12, US4
     assert.equal(error.campo, "ingresoVerificado");
   });
 });
+describe("core simulado: registrarSolicitud y consultarSolicitudRegistrada (#13, US1)", () => {
+  const ahora = () => HOY_EJEMPLO;
+  const CITA_MONTO = { tipo: "afirmacion", fragmento: "quiero 4 millones" };
+  const CITA_PLAZO = { tipo: "afirmacion", fragmento: "a 24 meses" };
+  const CITA_INGRESO = {
+    tipo: "afirmacion",
+    fragmento: "gano 3.800.000 al mes",
+  };
+
+  const entradaRegistro = (correlationId: string, cambios: Record<string, unknown> = {}) => ({
+    correlationId,
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    monto: 4_000_000,
+    plazoMeses: 24,
+    claveIdempotencia: "clave-ana-1",
+    procedencia: {
+      monto: CITA_MONTO,
+      plazoMeses: CITA_PLAZO,
+      ingresoDeclarado: CITA_INGRESO,
+    },
+    ...cambios,
+  });
+
+  function verificarA(core: ReturnType<typeof crearCore>, id: string, correlationId: string) {
+    const s = solicitante(id);
+    const r = core.verificarIdentidad({
+      idSolicitante: s.idSolicitante,
+      fechaExpedicion: s.fechaExpedicion,
+      idIntento: `intento-${id}`,
+      correlationId,
+    });
+    assert.equal(r.respuesta.ok, true);
+  }
+
+  function registrarDocumento(
+    core: ReturnType<typeof crearCore>,
+    correlationId: string,
+    e: Ejemplo,
+  ) {
+    const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+    if (!v.ok) assert.fail(JSON.stringify(v.errores));
+    const respuesta = core.registrarExtraccion({
+      correlationId,
+      adjunto: e.adjunto,
+      nombre: e.nombre,
+      contenido: e.contenido,
+      resultado: construirResultado(v.salida, e, 1),
+    }).respuesta;
+    assert.equal(respuesta.ok, true, JSON.stringify(respuesta));
+  }
+
+  /** Ana verificada, con certificado y tres extractos, y su ingreso ya verificado contra 3.800.000. */
+  function conIngreso(declarado: number | null = 3_800_000) {
+    const correlationId = randomUUID();
+    const core = crearCore({ ahora });
+    verificarA(core, ID_SOLICITANTE_UNICO, correlationId);
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      registrarDocumento(core, correlationId, e);
+    }
+    const v = core.verificarIngreso({
+      correlationId,
+      ...(declarado === null ? {} : { ingresoDeclarado: declarado }),
+    });
+    assert.ok(v.respuesta.ok);
+    return { core, correlationId };
+  }
+
+  type Registro = ReturnType<ReturnType<typeof crearCore>["registrarSolicitud"]>;
+
+  function exitoso(resultado: Registro) {
+    assert.ok(resultado.respuesta.ok, JSON.stringify(resultado.respuesta));
+    if (!resultado.respuesta.ok) throw new Error("se esperaba un éxito");
+    return resultado.respuesta.datos;
+  }
+
+  function rechazo(resultado: Registro) {
+    assert.equal(resultado.respuesta.ok, false);
+    if (resultado.respuesta.ok) throw new Error("se esperaba un rechazo");
+    return resultado.respuesta.error;
+  }
+
+  function sinSolicitud(core: ReturnType<typeof crearCore>, correlationId: string) {
+    const r = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(r.ok);
+    if (r.ok) assert.equal(r.datos.solicitud, null);
+  }
+
+  it("registra la solicitud con cada dato y su procedencia, y los datos del core", () => {
+    const { core, correlationId } = conIngreso();
+    const { solicitud, repetida } = exitoso(
+      core.registrarSolicitud(entradaRegistro(correlationId)),
+    );
+    assert.equal(repetida, false);
+    assert.equal(solicitud.idSolicitud, "SOL-0002000001");
+    assert.equal(solicitud.estado, "en_estudio");
+    assert.equal(solicitud.correlationId, correlationId);
+    assert.equal(solicitud.claveIdempotencia, "clave-ana-1");
+    assert.equal(solicitud.registradaEn, HOY_EJEMPLO.toISOString());
+    assert.equal(solicitud.versionPolitica, VERSION_POLITICA);
+    assert.deepEqual(solicitud.solicitante, {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      nombre: "Ana Pérez Ficticia",
+      documentoEnmascarado: enmascararDocumento(solicitante(ID_SOLICITANTE_UNICO).documento),
+    });
+    assert.deepEqual(solicitud.monto, {
+      valor: 4_000_000,
+      procedencia: CITA_MONTO,
+    });
+    assert.deepEqual(solicitud.plazoMeses, {
+      valor: 24,
+      procedencia: CITA_PLAZO,
+    });
+    assert.deepEqual(solicitud.ingresoDeclarado, {
+      valor: 3_800_000,
+      procedencia: CITA_INGRESO,
+    });
+    assert.equal(solicitud.verificacionIngreso?.estado, "verificado");
+    assert.equal(solicitud.verificacionIngreso?.ingresoVerificado?.monto, 3_800_000);
+    assert.ok((solicitud.verificacionIngreso?.ingresoVerificado?.usos.length ?? 0) > 0);
+    assert.equal(solicitud.verificacionIngreso?.discrepancia?.diferenciaPorcentaje, 0);
+    assert.deepEqual(
+      solicitud.datosExtraidos.map((r) => r.adjuntos[0]),
+      [1, 2, 3, 4],
+    );
+    for (const registro of solicitud.datosExtraidos) assert.equal(registro.estado, "extraido");
+  });
+
+  it("deja la auditoría de la Regla 1 con los enteros y sin fragmentos ni nombres de documentos", () => {
+    const { core, correlationId } = conIngreso();
+    const { auditoria } = core.registrarSolicitud(entradaRegistro(correlationId));
+    assert.deepEqual(auditoria, {
+      resultado: "registrada",
+      regla: "Regla 1 · identidad verificada antes de registrar",
+      idSolicitud: "SOL-0002000001",
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto: 4_000_000,
+      plazoMeses: 24,
+      ingresoDeclarado: 3_800_000,
+      ingresoVerificado: 3_800_000,
+      estadoVerificacion: "verificado",
+      documentos: 4,
+      versionPolitica: VERSION_POLITICA,
+    });
+    assert.doesNotMatch(JSON.stringify(auditoria), /quiero 4 millones|certificado|extracto/);
+  });
+
+  it("guarda la discrepancia con los dos valores y el porcentaje, sin corregirla ni ocultarla", () => {
+    const { core, correlationId } = conIngreso(4_300_000);
+    const { solicitud } = exitoso(core.registrarSolicitud(entradaRegistro(correlationId)));
+    assert.equal(solicitud.ingresoDeclarado?.valor, 4_300_000);
+    const v = solicitud.verificacionIngreso;
+    assert.equal(v?.estado, "discrepancia");
+    assert.equal(v?.discrepancia?.declarado, 4_300_000);
+    assert.equal(v?.discrepancia?.verificado, 3_800_000);
+    assert.equal(v?.discrepancia?.diferencia, 500_000);
+    assert.equal(v?.discrepancia?.supera, true);
+    assert.equal(v?.discrepancia?.diferenciaPorcentaje, 13.16);
+  });
+
+  it("conserva las inconsistencias entre documentos, con su procedencia", () => {
+    const correlationId = randomUUID();
+    const core = crearCore({ ahora });
+    verificarA(core, ID_SOLICITANTE_UNICO, correlationId);
+    for (const e of [
+      ejemploCertificado(),
+      ejemploExtracto({ titular: "Otra Persona Inventada" }),
+    ]) {
+      registrarDocumento(core, correlationId, e);
+    }
+    assert.ok(core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 }).respuesta.ok);
+    const { solicitud } = exitoso(core.registrarSolicitud(entradaRegistro(correlationId)));
+    assert.equal(solicitud.verificacionIngreso?.estado, "inconsistencia");
+    assert.equal(solicitud.verificacionIngreso?.ingresoVerificado, null);
+    const inconsistencia = solicitud.verificacionIngreso?.inconsistencias.find(
+      (i) => i.regla === "titular_vs_solicitante",
+    );
+    assert.ok(inconsistencia);
+    assert.ok(inconsistencia.valores.some((uso) => uso.adjunto !== null));
+  });
+
+  it("se registra igual sin verificación de ingreso ni ingreso declarado, sin inventar nada", () => {
+    const correlationId = randomUUID();
+    const core = crearCore({ ahora });
+    verificarA(core, ID_SOLICITANTE_UNICO, correlationId);
+    const { solicitud } = exitoso(
+      core.registrarSolicitud(
+        entradaRegistro(correlationId, {
+          procedencia: { monto: CITA_MONTO, plazoMeses: CITA_PLAZO },
+        }),
+      ),
+    );
+    assert.equal(solicitud.ingresoDeclarado, null);
+    assert.equal(solicitud.verificacionIngreso, null);
+    assert.deepEqual(solicitud.datosExtraidos, []);
+  });
+
+  it("ignora la verificación y el ingreso declarado de otra persona: no se transfieren", () => {
+    const { core, correlationId } = conIngreso();
+    verificarA(core, ID_HOMONIMO_1, correlationId);
+    const { solicitud } = exitoso(
+      core.registrarSolicitud(
+        entradaRegistro(correlationId, {
+          idSolicitante: ID_HOMONIMO_1,
+          procedencia: { monto: CITA_MONTO, plazoMeses: CITA_PLAZO },
+        }),
+      ),
+    );
+    assert.equal(solicitud.solicitante.idSolicitante, ID_HOMONIMO_1);
+    assert.equal(solicitud.verificacionIngreso, null);
+    assert.equal(solicitud.ingresoDeclarado, null);
+  });
+
+  it("no hay campo de entrada para lo que el core ya sabe: un campo de más se rechaza sin guardar", () => {
+    const { core, correlationId } = conIngreso();
+    for (const campo of ["ingresoVerificado", "discrepancias", "datosExtraidos", "solicitante"]) {
+      const resultado = core.registrarSolicitud(entradaRegistro(correlationId, { [campo]: 1 }));
+      const error = rechazo(resultado);
+      assert.equal(error.codigo, "formato_invalido");
+      assert.equal(error.campo, campo);
+      assert.equal(resultado.auditoria, null);
+    }
+    sinSolicitud(core, correlationId);
+  });
+
+  it("monto y plazo inválidos: monto_invalido y plazo_invalido con su campo, sin guardar", () => {
+    const { core, correlationId } = conIngreso();
+    for (const monto of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const error = rechazo(core.registrarSolicitud(entradaRegistro(correlationId, { monto })));
+      assert.equal(error.codigo, "monto_invalido");
+      assert.equal(error.campo, "monto");
+    }
+    for (const plazoMeses of [0, -1, 1.5]) {
+      const error = rechazo(
+        core.registrarSolicitud(entradaRegistro(correlationId, { plazoMeses })),
+      );
+      assert.equal(error.codigo, "plazo_invalido");
+      assert.equal(error.campo, "plazoMeses");
+    }
+    sinSolicitud(core, correlationId);
+  });
+
+  it("repetir la misma clave devuelve la misma solicitud, sin otro identificador ni auditoría", () => {
+    const { core, correlationId } = conIngreso();
+    const primera = exitoso(core.registrarSolicitud(entradaRegistro(correlationId)));
+    const segundo = core.registrarSolicitud(entradaRegistro(correlationId));
+    const repetida = exitoso(segundo);
+    assert.equal(repetida.repetida, true);
+    assert.deepEqual(repetida.solicitud, primera.solicitud);
+    assert.equal(segundo.auditoria, null);
+    // El contador no avanzó: la siguiente solicitud, de otra persona, es la 2.
+    const otra = randomUUID();
+    verificarA(core, ID_HOMONIMO_2, otra);
+    const siguiente = exitoso(
+      core.registrarSolicitud(
+        entradaRegistro(otra, {
+          idSolicitante: ID_HOMONIMO_2,
+          procedencia: { monto: CITA_MONTO, plazoMeses: CITA_PLAZO },
+        }),
+      ),
+    );
+    assert.equal(siguiente.solicitud.idSolicitud, "SOL-0002000002");
+  });
+
+  it("otra clave con la solicitud abierta se rechaza, con el identificador de la existente", () => {
+    const { core, correlationId } = conIngreso();
+    const primera = exitoso(core.registrarSolicitud(entradaRegistro(correlationId)));
+    const resultado = core.registrarSolicitud(
+      entradaRegistro(correlationId, {
+        monto: 3_000_000,
+        claveIdempotencia: "clave-ana-2",
+      }),
+    );
+    const error = rechazo(resultado);
+    assert.equal(error.categoria, "negocio");
+    assert.equal(error.reintentable, false);
+    assert.equal(error.codigo, "solicitud_abierta");
+    assert.ok(error.mensaje.includes(primera.solicitud.idSolicitud));
+    assert.equal(resultado.auditoria?.resultado, "rechazada");
+    assert.equal(resultado.auditoria?.codigo, "solicitud_abierta");
+    const guardada = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(guardada.ok);
+    if (guardada.ok) assert.deepEqual(guardada.datos.solicitud, primera.solicitud);
+  });
+
+  it("la solicitud abierta cuenta aunque la nueva sea de otra conversación del mismo solicitante", () => {
+    const { core, correlationId } = conIngreso();
+    const primera = exitoso(core.registrarSolicitud(entradaRegistro(correlationId)));
+    const otra = randomUUID();
+    verificarA(core, ID_SOLICITANTE_UNICO, otra);
+    const error = rechazo(
+      core.registrarSolicitud(
+        entradaRegistro(otra, {
+          claveIdempotencia: "clave-otra",
+          procedencia: { monto: CITA_MONTO, plazoMeses: CITA_PLAZO },
+        }),
+      ),
+    );
+    assert.equal(error.codigo, "solicitud_abierta");
+    assert.ok(error.mensaje.includes(primera.solicitud.idSolicitud));
+    sinSolicitud(core, otra);
+  });
+
+  it("la solicitud de ejemplo en estudio del #7 no cuenta como abierta", () => {
+    const { core, correlationId } = conIngreso();
+    const consulta = core.consultarSolicitud(ID_EN_ESTUDIO);
+    assert.ok(consulta.ok);
+    if (consulta.ok) assert.equal(consulta.datos.solicitud?.solicitante.documento, "0001234567");
+    assert.ok(core.registrarSolicitud(entradaRegistro(correlationId)).respuesta.ok);
+  });
+
+  it("un documento no cubierto o no extraíble impide el registro, con sus adjuntos", () => {
+    for (const registro of ["no_cubierto", "no_extraible"] as const) {
+      const { core, correlationId } = conIngreso();
+      if (registro === "no_cubierto") {
+        const usd = {
+          adjunto: 9,
+          nombre: "certificado-usd.md",
+          contenido: CONTENIDO_CERTIFICADO_USD,
+        };
+        const v = validarSalida(salidaCertificadoUsd(), usd, HOY_EJEMPLO);
+        if (!v.ok) assert.fail("la salida de ejemplo debía validar");
+        assert.ok(
+          core.registrarExtraccion({
+            correlationId,
+            ...usd,
+            resultado: construirResultado(v.salida, usd, 1),
+          }).respuesta.ok,
+        );
+      } else {
+        const contenido = "texto ilegible ficticio";
+        assert.ok(
+          core.registrarExtraccion({
+            correlationId,
+            adjunto: 9,
+            nombre: "ilegible.md",
+            contenido,
+            resultado: {
+              estado: "no_extraible",
+              adjunto: 9,
+              nombre: "ilegible.md",
+              huella: huella(contenido),
+              intentos: 3,
+              conflictos: ["ilegible"],
+              ultimoError: [],
+            },
+          }).respuesta.ok,
+        );
+      }
+      const error = rechazo(core.registrarSolicitud(entradaRegistro(correlationId)));
+      assert.equal(error.categoria, "negocio", registro);
+      assert.equal(error.codigo, "documentos_no_aptos", registro);
+      assert.ok(error.mensaje.includes("9"), registro);
+      sinSolicitud(core, correlationId);
+    }
+  });
+
+  it("consultarSolicitudRegistrada devuelve la de la conversación, una copia, y null en otra", () => {
+    const { core, correlationId } = conIngreso();
+    sinSolicitud(core, correlationId);
+    const { solicitud } = exitoso(core.registrarSolicitud(entradaRegistro(correlationId)));
+    const leida = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(leida.ok);
+    if (!leida.ok) return;
+    assert.deepEqual(leida.datos.solicitud, solicitud);
+    if (leida.datos.solicitud !== null) leida.datos.solicitud.monto.valor = 1;
+    const otraVez = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(otraVez.ok);
+    if (otraVez.ok) assert.equal(otraVez.datos.solicitud?.monto.valor, 4_000_000);
+    sinSolicitud(core, randomUUID());
+  });
+
+  it("consultarSolicitudRegistrada con un correlationId inválido es un error de validación", () => {
+    const respuesta = crearCore().consultarSolicitudRegistrada("no-es-uuid");
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) {
+      assert.equal(respuesta.error.codigo, "formato_invalido");
+      assert.equal(respuesta.error.campo, "correlationId");
+    }
+  });
+
+  it("consultarSolicitud encuentra la solicitud registrada por su identificador", () => {
+    const { core, correlationId } = conIngreso();
+    const { solicitud } = exitoso(core.registrarSolicitud(entradaRegistro(correlationId)));
+    const consulta = core.consultarSolicitud(solicitud.idSolicitud);
+    assert.ok(consulta.ok);
+    if (!consulta.ok) return;
+    assert.equal(consulta.datos.solicitud?.estado, "en_estudio");
+    assert.equal(consulta.datos.solicitud?.monto, 4_000_000);
+    assert.equal(consulta.datos.solicitud?.plazoMeses, 24);
+    assert.equal(consulta.datos.solicitud?.solicitante.nombre, "Ana Pérez Ficticia");
+  });
+
+  it("con la falla simulada devuelve el error transitorio y no guarda nada", () => {
+    const core = crearCore({ falla: "siempre" });
+    const resultado = core.registrarSolicitud(entradaRegistro(randomUUID()));
+    const error = rechazo(resultado);
+    assert.equal(error.categoria, "transitorio");
+    assert.equal(error.codigo, "core_no_disponible");
+    assert.equal(resultado.auditoria, null);
+  });
+});
+
+describe("core simulado: registrarSolicitud exige la Regla 1 del lado del servidor (#13, US2)", () => {
+  const ahora = () => HOY_EJEMPLO;
+  const citas = {
+    monto: { tipo: "afirmacion", fragmento: "quiero 4 millones" },
+    plazoMeses: { tipo: "afirmacion", fragmento: "a 24 meses" },
+  };
+  const entradaRegistro = (correlationId: string, idSolicitante = ID_SOLICITANTE_UNICO) => ({
+    correlationId,
+    idSolicitante,
+    monto: 4_000_000,
+    plazoMeses: 24,
+    claveIdempotencia: "clave-1",
+    procedencia: citas,
+  });
+
+  function verificarA(core: ReturnType<typeof crearCore>, id: string, correlationId: string) {
+    const s = solicitante(id);
+    assert.ok(
+      core.verificarIdentidad({
+        idSolicitante: s.idSolicitante,
+        fechaExpedicion: s.fechaExpedicion,
+        idIntento: `intento-${id}`,
+        correlationId,
+      }).respuesta.ok,
+    );
+  }
+
+  function noGuardoNada(core: ReturnType<typeof crearCore>, correlationId: string) {
+    const r = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(r.ok);
+    if (r.ok) assert.equal(r.datos.solicitud, null);
+  }
+
+  it("sin identidad verificada se rechaza con identidad_no_verificada y no se guarda nada", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const { respuesta, auditoria } = core.registrarSolicitud(entradaRegistro(correlationId));
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.categoria, "negocio");
+    assert.equal(respuesta.error.reintentable, false);
+    assert.equal(respuesta.error.codigo, "identidad_no_verificada");
+    assert.equal(auditoria?.resultado, "rechazada");
+    assert.equal(auditoria?.codigo, "identidad_no_verificada");
+    assert.equal(auditoria?.idSolicitud, undefined);
+    assert.doesNotMatch(JSON.stringify(auditoria), /quiero 4 millones/);
+    noGuardoNada(core, correlationId);
+  });
+
+  it("con la identidad verificada de otra persona se rechaza: la verificación no se transfiere", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    verificarA(core, ID_SOLICITANTE_UNICO, correlationId);
+    const { respuesta } = core.registrarSolicitud(entradaRegistro(correlationId, ID_HOMONIMO_1));
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.codigo, "identidad_no_verificada");
+    noGuardoNada(core, correlationId);
+  });
+
+  it("un solicitante con formato válido pero inexistente en el core se rechaza igual", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const { respuesta } = core.registrarSolicitud(entradaRegistro(correlationId, "CLI-0009999999"));
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) assert.equal(respuesta.error.codigo, "identidad_no_verificada");
+  });
+
+  it("la Regla 1 va antes que la repetición y que la solicitud abierta", () => {
+    const core = crearCore({ ahora });
+    const abierta = randomUUID();
+    verificarA(core, ID_SOLICITANTE_UNICO, abierta);
+    assert.ok(core.registrarSolicitud(entradaRegistro(abierta)).respuesta.ok);
+    const sinIdentidad = randomUUID();
+    const { respuesta } = core.registrarSolicitud(entradaRegistro(sinIdentidad));
+    assert.equal(respuesta.ok, false);
+    if (!respuesta.ok) {
+      assert.equal(respuesta.error.codigo, "identidad_no_verificada");
+      assert.doesNotMatch(respuesta.error.mensaje, /SOL-/);
+    }
+  });
+
+  it("un error de forma no se audita como rechazo de la regla", () => {
+    const core = crearCore({ ahora });
+    const { respuesta, auditoria } = core.registrarSolicitud({
+      ...entradaRegistro(randomUUID()),
+      monto: 0,
+    });
+    assert.equal(respuesta.ok, false);
+    assert.equal(auditoria, null);
+  });
+});
+
+describe("core simulado: registrarSolicitud rechaza un dato sin procedencia (#13, US3)", () => {
+  const ahora = () => HOY_EJEMPLO;
+  const CITA = (fragmento: string) => ({ tipo: "afirmacion", fragmento });
+
+  function coreVerificado(declarado?: number) {
+    const correlationId = randomUUID();
+    const core = crearCore({ ahora });
+    const s = solicitante(ID_SOLICITANTE_UNICO);
+    assert.ok(
+      core.verificarIdentidad({
+        idSolicitante: s.idSolicitante,
+        fechaExpedicion: s.fechaExpedicion,
+        idIntento: "intento-1",
+        correlationId,
+      }).respuesta.ok,
+    );
+    if (declarado !== undefined) {
+      assert.ok(core.verificarIngreso({ correlationId, ingresoDeclarado: declarado }).respuesta.ok);
+    }
+    return { core, correlationId };
+  }
+
+  const entrada = (correlationId: string, procedencia: unknown) => ({
+    correlationId,
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    monto: 4_000_000,
+    plazoMeses: 24,
+    claveIdempotencia: "clave-1",
+    procedencia,
+  });
+
+  const validas = {
+    monto: CITA("quiero 4 millones"),
+    plazoMeses: CITA("a 24 meses"),
+  };
+
+  function rechazo(core: ReturnType<typeof crearCore>, e: unknown) {
+    const resultado = core.registrarSolicitud(e);
+    assert.equal(resultado.respuesta.ok, false);
+    if (resultado.respuesta.ok) throw new Error("se esperaba un rechazo");
+    assert.equal(resultado.respuesta.error.categoria, "validacion");
+    assert.equal(resultado.respuesta.error.reintentable, false);
+    return { error: resultado.respuesta.error, auditoria: resultado.auditoria };
+  }
+
+  function sinSolicitud(core: ReturnType<typeof crearCore>, correlationId: string) {
+    const r = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(r.ok);
+    if (r.ok) assert.equal(r.datos.solicitud, null);
+  }
+
+  it("la procedencia de monto, plazo o ingreso declarado ausente o nula es procedencia_faltante", () => {
+    const { core, correlationId } = coreVerificado(3_800_000);
+    const completas = { ...validas, ingresoDeclarado: CITA("gano 3.800.000") };
+    for (const dato of ["monto", "plazoMeses", "ingresoDeclarado"] as const) {
+      for (const valor of [undefined, null]) {
+        const { error } = rechazo(core, entrada(correlationId, { ...completas, [dato]: valor }));
+        assert.equal(error.codigo, "procedencia_faltante", `${dato} ${String(valor)}`);
+        assert.equal(error.campo, `procedencia.${dato}`);
+      }
+    }
+    sinSolicitud(core, correlationId);
+  });
+
+  it("una procedencia mal formada es procedencia_invalida: fragmento vacío o largo, tipo o campos extra", () => {
+    const { core, correlationId } = coreVerificado();
+    const malas = [
+      CITA(""),
+      CITA("x".repeat(301)),
+      { tipo: "otro", fragmento: "x" },
+      { tipo: "afirmacion", fragmento: "x", adjunto: 1 },
+      "quiero 4 millones",
+    ];
+    for (const mala of malas) {
+      const { error } = rechazo(core, entrada(correlationId, { ...validas, monto: mala }));
+      assert.equal(error.codigo, "procedencia_invalida");
+      assert.equal(error.campo, "procedencia.monto");
+    }
+    sinSolicitud(core, correlationId);
+  });
+
+  it("un documento que no está entre los extraídos es procedencia_documento_desconocida", () => {
+    const { core, correlationId } = coreVerificado();
+    const inexistente = {
+      tipo: "documento",
+      adjunto: 7,
+      nombre: "carta.md",
+      fragmento: "x",
+    };
+    const { error, auditoria } = rechazo(
+      core,
+      entrada(correlationId, { ...validas, plazoMeses: inexistente }),
+    );
+    assert.equal(error.codigo, "procedencia_documento_desconocida");
+    assert.equal(error.campo, "procedencia.plazoMeses");
+    assert.equal(auditoria?.resultado, "rechazada");
+    assert.equal(auditoria?.campo, "procedencia.plazoMeses");
+    sinSolicitud(core, correlationId);
+  });
+
+  it("un documento extraído de la conversación sí es una procedencia válida; con otro nombre no", () => {
+    const { core, correlationId } = coreVerificado();
+    const e = ejemploCertificado();
+    const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+    if (!v.ok) assert.fail("la salida de ejemplo debía validar");
+    assert.ok(
+      core.registrarExtraccion({
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      }).respuesta.ok,
+    );
+    const real = {
+      tipo: "documento",
+      adjunto: e.adjunto,
+      nombre: e.nombre,
+      fragmento: "x",
+    };
+    const otroNombre = { ...real, nombre: "otro.md" };
+    const { error } = rechazo(core, entrada(correlationId, { ...validas, monto: otroNombre }));
+    assert.equal(error.codigo, "procedencia_documento_desconocida");
+    const bien = core.registrarSolicitud(entrada(correlationId, { ...validas, monto: real }));
+    assert.equal(bien.respuesta.ok, true);
+  });
+
+  it("un ingreso declarado que el core no tiene no admite procedencia", () => {
+    const { core, correlationId } = coreVerificado();
+    const { error } = rechazo(
+      core,
+      entrada(correlationId, {
+        ...validas,
+        ingresoDeclarado: CITA("gano mucho"),
+      }),
+    );
+    assert.equal(error.codigo, "ingreso_declarado_no_verificado");
+    assert.equal(error.campo, "procedencia.ingresoDeclarado");
+    sinSolicitud(core, correlationId);
+  });
+
+  it("un ingreso declarado que el core tiene exige su procedencia", () => {
+    const { core, correlationId } = coreVerificado(3_800_000);
+    const { error } = rechazo(core, entrada(correlationId, validas));
+    assert.equal(error.codigo, "procedencia_faltante");
+    assert.equal(error.campo, "procedencia.ingresoDeclarado");
+  });
+
+  it("informa el primer problema en el orden monto, plazo, ingreso declarado", () => {
+    const { core, correlationId } = coreVerificado(3_800_000);
+    const { error } = rechazo(
+      core,
+      entrada(correlationId, {
+        monto: null,
+        plazoMeses: null,
+        ingresoDeclarado: null,
+      }),
+    );
+    assert.equal(error.campo, "procedencia.monto");
+    const segundo = rechazo(
+      core,
+      entrada(correlationId, {
+        monto: CITA("a"),
+        plazoMeses: null,
+        ingresoDeclarado: null,
+      }),
+    );
+    assert.equal(segundo.error.campo, "procedencia.plazoMeses");
+  });
+
+  it("un rechazo no deja solicitud, ni parcial, ni consume el identificador", () => {
+    const { core, correlationId } = coreVerificado();
+    rechazo(core, entrada(correlationId, { ...validas, monto: null }));
+    sinSolicitud(core, correlationId);
+    const { respuesta } = core.registrarSolicitud(entrada(correlationId, validas));
+    assert.ok(respuesta.ok);
+    if (respuesta.ok) assert.equal(respuesta.datos.solicitud.idSolicitud, "SOL-0002000001");
+  });
+
+  it("la auditoría de un rechazo por procedencia no lleva el fragmento", () => {
+    const { core, correlationId } = coreVerificado();
+    const { auditoria } = rechazo(
+      core,
+      entrada(correlationId, { ...validas, monto: CITA("x".repeat(301)) }),
+    );
+    assert.equal(auditoria?.codigo, "procedencia_invalida");
+    assert.doesNotMatch(JSON.stringify(auditoria), /xxxx/);
+  });
+});

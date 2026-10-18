@@ -12,9 +12,20 @@ import {
   fallo,
   transitorioAgotado,
   type Categoria,
+  type ErrorCore,
   type Respuesta,
 } from "../compartido/errores.ts";
 import { DESCRIPCION_CAPACIDAD_PAGO } from "../compartido/capacidad-pago.ts";
+import {
+  DATOS_CON_PROCEDENCIA,
+  DESCRIPCION_REGISTRAR_SOLICITUD,
+  claveIdempotenciaSolicitud,
+  contieneFragmento,
+  validarProcedenciaDato,
+  type DatoConProcedencia,
+  type EntradaRegistroSolicitud,
+  type ProcedenciaRegistro,
+} from "../compartido/solicitud.ts";
 import { validarEvento, type DatosEvento, type EventoNegocio } from "../compartido/eventos.ts";
 import {
   construirResultado,
@@ -209,6 +220,11 @@ export interface OpcionesAdaptador {
   clasificarDocumento?: ClasificarDocumento;
   /** "Hoy" para validar fechas extraídas; inyectable en las pruebas. */
   hoy?: () => Date;
+  /**
+   * Lo que dijo el solicitante en la conversación: sus mensajes del historial y el mensaje nuevo.
+   * Contra ellos se comprueba que la cita de una afirmación esté, literal (#13, R3).
+   */
+  mensajesSolicitante?: readonly string[];
 }
 
 const esquemaConsultar = {
@@ -317,6 +333,46 @@ const esquemaCapacidadPago = {
     ),
 };
 
+/** Una cita del modelo: una frase literal del solicitante o, con `adjunto`, del documento (#13, R3). */
+const esquemaCita = z.object({
+  fragmento: z
+    .string()
+    .describe(
+      "Sin adjunto: una frase LITERAL que dijo el solicitante. Con adjunto: un fragmento literal de ese documento.",
+    ),
+  adjunto: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe("Solo si el dato salió de un documento: su número de adjunto."),
+});
+
+type CitaModelo = z.infer<typeof esquemaCita>;
+
+/**
+ * El modelo solo da lo que oyó y de dónde: el nombre de un documento, la clave de idempotencia, el
+ * ingreso verificado, las discrepancias y los datos extraídos no se envían (#13, R2 y R6).
+ */
+const esquemaRegistrarSolicitud = {
+  idSolicitante: z
+    .string()
+    .describe("Identificador del solicitante verificado que devolvió buscar_solicitante (CLI-…)."),
+  monto: z
+    .number()
+    .describe("Monto que dijo el solicitante, en pesos colombianos. No lo inventes."),
+  plazoMeses: z.number().describe("Plazo en meses que dijo el solicitante. No lo inventes."),
+  origen: z
+    .object({
+      monto: esquemaCita,
+      plazoMeses: esquemaCita,
+      ingresoDeclarado: esquemaCita
+        .optional()
+        .describe("Solo si ya enviaste el ingreso declarado a verificar_ingreso."),
+    })
+    .describe("De dónde salió cada dato: una cita literal del solicitante o de un documento."),
+};
+
 const DESCRIPCION_CONSULTAR_EXTRACCIONES =
   "Devuelve los datos ya extraídos de los documentos de esta conversación, con su procedencia. Úsala para recordar datos de turnos anteriores; no vuelve a extraer.";
 
@@ -361,6 +417,30 @@ export const ORDEN_REGLA: Partial<Record<SenalEscalamiento["motivo"], 1 | 3 | 4 
   discrepancia_de_ingreso: 3,
   inconsistencia_documental: 3,
 };
+
+/**
+ * Señales de la Regla 3: con ellas la solicitud todavía se registra, para que el analista la reciba
+ * con su procedencia (#13, R5). El registro no decide ni anticipa el escalamiento. Con la Regla 4, la 5
+ * o una falla técnica, el registro sigue denegado.
+ */
+export const MOTIVOS_QUE_ADMITEN_REGISTRO: readonly SenalEscalamiento["motivo"][] = [
+  "discrepancia_de_ingreso",
+  "inconsistencia_documental",
+];
+
+/**
+ * Lo que ve el modelo cuando la Regla 3 escala: el registro todavía está permitido y el analista debe
+ * recibir la solicitud con la discrepancia o la inconsistencia guardada (#13, R5). Sin esta indicación
+ * en el resultado, el modelo da por terminada la conversación y no registra.
+ */
+export const SIGUIENTE_PASO_REGISTRO =
+  "Antes de responder, si el solicitante ya dijo monto y plazo, llama a registrar_solicitud para que el analista reciba la solicitud registrada. Registrar no preaprueba ni decide.";
+
+/** Si la herramienta es el registro y la señal vigente es de la Regla 3 (#13, R5). */
+export const admiteRegistro = (herramienta: string, estado: EstadoConversacion): boolean =>
+  herramienta === "registrar_solicitud" &&
+  estado.escalamiento !== null &&
+  MOTIVOS_QUE_ADMITEN_REGISTRO.includes(estado.escalamiento.motivo);
 
 /** Orden de evaluación obligatorio (constitución, Principio I); la Regla 2 llega con el #14. */
 const ORDEN_EVALUACION = [4, 5, 1, 3, 2];
@@ -414,6 +494,7 @@ export function crearAdaptador({
   ejecutarSubagente = crearSubagente(),
   clasificarDocumento = crearClasificador(),
   hoy = () => new Date(),
+  mensajesSolicitante = [],
 }: OpcionesAdaptador) {
   const senal = (campos: Parameters<typeof dejarSenal>[1]) => dejarSenal(estado, campos);
   /**
@@ -445,7 +526,10 @@ export function crearAdaptador({
     operacion: () => Promise<Respuesta<T>>,
   ): Promise<Respuesta<T>> {
     // Con la conversación ya escalada, insistir solo gasta esperas: el resultado final es la escalada.
-    if (estado.escalamiento !== null) return fallo(transitorioAgotado());
+    // Una señal de la Regla 3 no impide registrar la solicitud para el analista (#13, R5).
+    if (estado.escalamiento !== null && !admiteRegistro(herramienta, estado)) {
+      return fallo(transitorioAgotado());
+    }
     const resultado = await conReintentos(operacion, {
       dormir,
       azar,
@@ -758,10 +842,10 @@ export function crearAdaptador({
           ...(v.ingreso !== null ? { ingresoVerificado: v.ingreso.monto } : {}),
           ...(v.discrepancia !== null ? { umbralPorcentaje: v.discrepancia.umbralPorcentaje } : {}),
         });
-        return { escalada: true, estado: v.estado };
+        return { escalada: true, estado: v.estado, siguientePaso: SIGUIENTE_PASO_REGISTRO };
       case "inconsistencia":
         escalarInconsistencia(v, herramienta);
-        return { escalada: true, estado: v.estado };
+        return { escalada: true, estado: v.estado, siguientePaso: SIGUIENTE_PASO_REGISTRO };
       case "no_cubierto": {
         // El documento ya escaló en la extracción; si no hubiera señal, se deja la de la Regla 5.
         const causa = v.decision.valores["causa"];
@@ -813,6 +897,94 @@ export function crearAdaptador({
       ),
     );
     return aResultadoMcp(respuesta);
+  }
+
+  /**
+   * La procedencia de un dato con lo que citó el modelo, comprobada contra la conversación: una
+   * afirmación debe estar en lo que dijo el solicitante y un fragmento de documento, en su contenido.
+   * Sin cita, el dato llega sin procedencia y lo rechaza el core (#13, R3).
+   */
+  function armarProcedencia(
+    dato: DatoConProcedencia,
+    cita: CitaModelo | undefined,
+  ): { ok: true; procedencia: ProcedenciaRegistro | undefined } | { ok: false; error: ErrorCore } {
+    if (cita === undefined) return { ok: true, procedencia: undefined };
+    const documento =
+      cita.adjunto === undefined ? undefined : documentos.find((d) => d.adjunto === cita.adjunto);
+    const candidata =
+      cita.adjunto === undefined
+        ? { tipo: "afirmacion", fragmento: cita.fragmento }
+        : {
+            tipo: "documento",
+            adjunto: cita.adjunto,
+            nombre: documento?.nombre ?? "",
+            fragmento: cita.fragmento,
+          };
+    const invalida = (mensaje: string) => ({
+      ok: false as const,
+      error: errorValidacion("procedencia_invalida", mensaje, `procedencia.${dato}`),
+    });
+    if (cita.adjunto !== undefined && (documento === undefined || !documento.soportado)) {
+      return invalida(
+        `El origen de ${dato} cita un documento que no está o no es soportado: usa el número de un adjunto de la conversación.`,
+      );
+    }
+    const forma = validarProcedenciaDato(dato, candidata);
+    if (!forma.ok) return forma;
+    const textos = documento?.soportado === true ? [documento.contenido] : mensajesSolicitante;
+    if (!contieneFragmento(textos, cita.fragmento)) {
+      return invalida(
+        cita.adjunto === undefined
+          ? `El origen de ${dato} no está en lo que dijo el solicitante: cita una frase literal suya.`
+          : `El origen de ${dato} no está en el documento ${cita.adjunto}: cita un fragmento literal suyo.`,
+      );
+    }
+    return { ok: true, procedencia: forma.procedencia };
+  }
+
+  /**
+   * Herramienta del modelo: registra la solicitud (#13). Comprueba las citas contra la conversación y
+   * calcula la clave de idempotencia con el código; la Regla 1 la aplica antes el control de identidad
+   * y otra vez el core. Al modelo le devuelve solo lo que necesita para responder.
+   */
+  async function registrarSolicitud({
+    idSolicitante,
+    monto,
+    plazoMeses,
+    origen,
+  }: {
+    idSolicitante: string;
+    monto: number;
+    plazoMeses: number;
+    origen: { monto: CitaModelo; plazoMeses: CitaModelo; ingresoDeclarado?: CitaModelo };
+  }) {
+    const procedencia: Partial<Record<DatoConProcedencia, ProcedenciaRegistro>> = {};
+    for (const dato of DATOS_CON_PROCEDENCIA) {
+      const armada = armarProcedencia(
+        dato,
+        (origen as Record<string, CitaModelo> | undefined)?.[dato],
+      );
+      if (!armada.ok) return aResultadoMcp(fallo(armada.error));
+      if (armada.procedencia !== undefined) procedencia[dato] = armada.procedencia;
+    }
+    const respuesta = await llamarConReintentos("registrar_solicitud", () =>
+      core.registrarSolicitud(
+        {
+          idSolicitante,
+          monto,
+          plazoMeses,
+          claveIdempotencia: claveIdempotenciaSolicitud(idSolicitante, monto, plazoMeses),
+          // El core comprueba que cada dato obligatorio traiga su procedencia: aquí puede faltar una.
+          procedencia: procedencia as EntradaRegistroSolicitud["procedencia"],
+        },
+        estado.correlationId,
+      ),
+    );
+    if (!respuesta.ok) return aResultadoMcp(respuesta);
+    const { solicitud, repetida } = respuesta.datos;
+    return aResultadoMcp(
+      exito({ idSolicitud: solicitud.idSolicitud, estado: solicitud.estado, repetida }),
+    );
   }
 
   /** Log de una extracción (R10): metadatos, nunca el contenido ni los fragmentos (FR-017). */
@@ -1095,7 +1267,13 @@ export function crearAdaptador({
       if (verificacion.estado === "inconsistencia") {
         registrarVerificacionLog(verificacion, reextracciones);
         escalarInconsistencia(verificacion, "extraer_documento");
-        return aResultadoMcp(exito({ escalada: true, estado: verificacion.estado }));
+        return aResultadoMcp(
+          exito({
+            escalada: true,
+            estado: verificacion.estado,
+            siguientePaso: SIGUIENTE_PASO_REGISTRO,
+          }),
+        );
       }
       if (reextracciones > 0) registrarVerificacionLog(verificacion, reextracciones);
     }
@@ -1127,6 +1305,7 @@ export function crearAdaptador({
     verificar_ingreso: { esquema: esquemaVerificarIngreso, manejar: verificarIngreso },
     consultar_extracciones: { esquema: {}, manejar: consultarExtracciones },
     calcular_capacidad_pago: { esquema: esquemaCapacidadPago, manejar: calcularCapacidadPago },
+    registrar_solicitud: { esquema: esquemaRegistrarSolicitud, manejar: registrarSolicitud },
   };
 
   const servidor = createSdkMcpServer({
@@ -1180,6 +1359,12 @@ export function crearAdaptador({
         esquemaCapacidadPago,
         (argumentos) => calcularCapacidadPago(argumentos),
         { annotations: { readOnlyHint: true } },
+      ),
+      tool(
+        "registrar_solicitud",
+        DESCRIPCION_REGISTRAR_SOLICITUD,
+        esquemaRegistrarSolicitud,
+        (argumentos) => registrarSolicitud(argumentos),
       ),
     ],
   });

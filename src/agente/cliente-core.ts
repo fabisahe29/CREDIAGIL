@@ -35,6 +35,13 @@ import {
   esquemaSimulacionCapacidadPago,
   type SimulacionCapacidadPago,
 } from "../compartido/capacidad-pago.ts";
+import {
+  esquemaResultadoRegistro,
+  esquemaSolicitudRegistrada,
+  type EntradaRegistroSolicitud,
+  type ResultadoRegistro,
+  type SolicitudRegistrada,
+} from "../compartido/solicitud.ts";
 
 const PRINCIPAL_CORE = fileURLToPath(new URL("../mcp/principal.ts", import.meta.url));
 export const TIEMPO_LIMITE_CORE_MS = 5_000;
@@ -67,7 +74,14 @@ const esquemaCapacidadPago = esquemaRespuesta(
   z.object({ simulacion: esquemaSimulacionCapacidadPago }).strict(),
 );
 
+const esquemaRegistroSolicitud = esquemaRespuesta(esquemaResultadoRegistro);
+const esquemaSolicitudConsultada = esquemaRespuesta(
+  z.object({ solicitud: esquemaSolicitudRegistrada.nullable() }).strict(),
+);
+
 export type RespuestaCapacidadPago = Respuesta<{ simulacion: SimulacionCapacidadPago }>;
+export type RespuestaRegistroSolicitud = Respuesta<ResultadoRegistro>;
+export type RespuestaSolicitudRegistrada = Respuesta<{ solicitud: SolicitudRegistrada | null }>;
 export type RespuestaVerificacionIngreso = Respuesta<{ verificacion: VerificacionIngreso }>;
 export type RespuestaVerificacionConsultada = Respuesta<{
   verificacion: VerificacionIngreso | null;
@@ -117,6 +131,16 @@ export interface ClienteCore {
     entrada: { monto: number; plazoMeses: number; ingresoMensual?: number },
     correlationId: string,
   ): Promise<RespuestaCapacidadPago>;
+  /**
+   * Registra la solicitud con la procedencia de cada dato (#13). El core toma el solicitante, el
+   * ingreso y los datos extraídos de su estado: aquí solo viaja lo que citó el solicitante.
+   */
+  registrarSolicitud(
+    entrada: Omit<EntradaRegistroSolicitud, "correlationId">,
+    correlationId: string,
+  ): Promise<RespuestaRegistroSolicitud>;
+  /** Solo lectura: la solicitud registrada en la conversación, o `null`. */
+  consultarSolicitudRegistrada(correlationId: string): Promise<RespuestaSolicitudRegistrada>;
   cerrar(): Promise<void>;
 }
 
@@ -251,6 +275,16 @@ export async function crearClienteCore({
           correlationId,
         },
         esquemaCapacidadPago,
+      );
+    },
+    registrarSolicitud(entrada, correlationId) {
+      return llamar("registrar_solicitud", { ...entrada, correlationId }, esquemaRegistroSolicitud);
+    },
+    consultarSolicitudRegistrada(correlationId) {
+      return llamar(
+        "consultar_solicitud_registrada",
+        { correlationId },
+        esquemaSolicitudConsultada,
       );
     },
     async cerrar() {

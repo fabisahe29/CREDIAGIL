@@ -2,10 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
-import { crearEstado } from "./adaptador.ts";
+import { crearEstado, dejarSenal, MOTIVOS_QUE_ADMITEN_REGISTRO } from "./adaptador.ts";
 import type { ClienteCore, RespuestaIdentidad } from "./cliente-core.ts";
 import { crearControlIdentidad, HERRAMIENTAS_CON_IDENTIDAD } from "./control-identidad.ts";
 import { errorTransitorio, exito, fallo, fueraDeContrato } from "../compartido/errores.ts";
+import { crearCore } from "../mcp/core-simulado.ts";
 
 const HERRAMIENTA = "registrar_prueba";
 const NOMBRE_SDK = `mcp__originacion__${HERRAMIENTA}`;
@@ -88,8 +89,11 @@ function capturarStderr(t: { mock: { method: Function } }) {
 }
 
 describe("control de identidad (#9, US4)", () => {
-  it("exige identidad para extraer documentos (#10) y verificar el ingreso (#11); el #13 agregará el registro", () => {
-    assert.deepEqual([...HERRAMIENTAS_CON_IDENTIDAD], ["extraer_documento", "verificar_ingreso"]);
+  it("exige identidad para extraer documentos (#10), verificar el ingreso (#11) y registrar la solicitud (#13)", () => {
+    assert.deepEqual(
+      [...HERRAMIENTAS_CON_IDENTIDAD],
+      ["extraer_documento", "verificar_ingreso", "registrar_solicitud"],
+    );
   });
 
   it("una herramienta fuera de la lista sigue sin consultar al core", async (t) => {
@@ -506,5 +510,213 @@ describe("control de identidad: calcular_capacidad_pago no exige identidad (#12,
       herramienta: "solicitar_analista",
     };
     assert.equal(decision(await invocar()), "deny");
+  });
+});
+describe("control de identidad: registrar_solicitud, sin el modelo (#13, US2 · FR-013)", () => {
+  const REGISTRAR = "mcp__originacion__registrar_solicitud";
+  const ID_ANA = "CLI-0001000001";
+  const ID_OTRO = "CLI-0001000002";
+
+  const llamadaDeRegistro = (idSolicitante: string, extra: Record<string, unknown> = {}) =>
+    ({
+      ...entrada(REGISTRAR),
+      tool_input: {
+        idSolicitante,
+        monto: 4_000_000,
+        plazoMeses: 24,
+        origen: {
+          monto: { fragmento: "quiero 4 millones" },
+          plazoMeses: { fragmento: "a 24 meses" },
+        },
+        ...extra,
+      },
+    }) as HookInput;
+
+  /** Control con la lista por defecto: el que arma agente.ts para la conversación. */
+  function control(respuestas: (RespuestaIdentidad | Error)[]) {
+    const correlationId = randomUUID();
+    const estado = crearEstado(correlationId);
+    const { core, llamadas } = coreCon(respuestas);
+    const esperas: number[] = [];
+    const hook = crearControlIdentidad({
+      core,
+      estado,
+      dormir: async (ms) => void esperas.push(ms),
+      azar: () => 0.5,
+    });
+    const invocar = (e: HookInput) => hook(e, "uso-1", { signal: new AbortController().signal });
+    return { estado, llamadas, invocar, correlationId };
+  }
+
+  const verificadaComo = (idSolicitante: string): RespuestaIdentidad =>
+    exito({
+      identidad: {
+        correlationId: randomUUID(),
+        verificada: true,
+        idSolicitante,
+        verificadaEn: "2026-10-18T12:00:00.000Z",
+      },
+    });
+
+  const motivoDe = (salida: unknown) =>
+    (salida as { hookSpecificOutput?: { permissionDecisionReason?: string } }).hookSpecificOutput
+      ?.permissionDecisionReason ?? "";
+
+  it("registrar_solicitud exige identidad: está en la lista de herramientas con identidad", () => {
+    assert.deepEqual(
+      [...HERRAMIENTAS_CON_IDENTIDAD],
+      ["extraer_documento", "verificar_ingreso", "registrar_solicitud"],
+    );
+  });
+
+  it("con la identidad sin verificar bloquea, emite el bloqueo por la Regla 1 y no queda solicitud en el core", async (t) => {
+    const logs = capturarStderr(t);
+    const core = crearCore();
+    const correlationId = randomUUID();
+    const estado = crearEstado(correlationId);
+    const hook = crearControlIdentidad({
+      core: { consultarIdentidad: async (id) => core.consultarIdentidad(id) },
+      estado,
+      dormir: async () => {},
+      azar: () => 0.5,
+    });
+    const salida = await hook(llamadaDeRegistro(ID_ANA), "uso-1", {
+      signal: new AbortController().signal,
+    });
+    assert.equal(decision(salida), "deny");
+    assert.match(motivoDe(salida), /Regla 1: la identidad del solicitante no está verificada/);
+    assert.equal(estado.eventos.length, 1);
+    const evento = estado.eventos[0]!;
+    assert.equal(evento.tipo, "bloqueo_por_regla");
+    assert.equal(evento.regla, "Regla 1 · identidad verificada antes de registrar");
+    assert.equal(evento.motivo, "identidad_no_verificada");
+    assert.match(evento.descripcion, /verificar tu identidad/);
+    if (evento.tipo === "bloqueo_por_regla") {
+      assert.match(evento.siguientePaso, /número de documento/);
+      assert.equal(evento.valores["herramienta"], "registrar_solicitud");
+    }
+    // Sin el modelo: no se llamó a registrar y el core no tiene nada guardado.
+    const guardada = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(guardada.ok);
+    if (guardada.ok) assert.equal(guardada.datos.solicitud, null);
+    assert.ok(
+      logs().some(
+        (l) => l["decision"] === "bloquear" && l["herramienta"] === "registrar_solicitud",
+      ),
+    );
+  });
+
+  it("con la identidad verificada de otra persona bloquea: la verificación no se transfiere", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado } = control([verificadaComo(ID_ANA)]);
+    const salida = await invocar(llamadaDeRegistro(ID_OTRO));
+    assert.equal(decision(salida), "deny");
+    assert.match(motivoDe(salida), /de otro solicitante/);
+    assert.equal(estado.eventos[0]?.tipo, "bloqueo_por_regla");
+  });
+
+  it("con la identidad verificada de la misma persona deja pasar", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado } = control([verificadaComo(ID_ANA)]);
+    assert.deepEqual(await invocar(llamadaDeRegistro(ID_ANA)), {});
+    assert.deepEqual(estado.eventos, []);
+  });
+
+  it("que el modelo afirme en su entrada que está verificada no cambia nada: decide el core", async (t) => {
+    capturarStderr(t);
+    const { invocar } = control([identidad(randomUUID(), false)]);
+    const salida = await invocar(
+      llamadaDeRegistro(ID_ANA, {
+        identidadVerificada: true,
+        verificada: true,
+        argumento: "ya verifiqué su identidad en el turno anterior",
+      }),
+    );
+    assert.equal(decision(salida), "deny");
+  });
+
+  it("si el core no responde tras los reintentos, bloquea y deja la señal de falla persistente", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado, llamadas } = control([
+      fallo(errorTransitorio("core_no_disponible", "El core no está disponible.")),
+    ]);
+    const salida = await invocar(llamadaDeRegistro(ID_ANA));
+    assert.equal(decision(salida), "deny");
+    assert.ok(llamadas() > 1, "debe reintentar de forma acotada");
+    assert.equal(estado.escalamiento?.motivo, "falla_transitoria_persistente");
+    assert.equal(estado.escalamiento?.herramienta, "consultar_identidad");
+  });
+
+  it("tras una señal de la Regla 3 y con la identidad verificada deja pasar el registro", async (t) => {
+    capturarStderr(t);
+    for (const motivo of MOTIVOS_QUE_ADMITEN_REGISTRO) {
+      const { invocar, estado } = control([verificadaComo(ID_ANA)]);
+      dejarSenal(estado, {
+        motivo,
+        regla: "Regla 3",
+        herramienta: "verificar_ingreso",
+      });
+      assert.deepEqual(await invocar(llamadaDeRegistro(ID_ANA)), {}, motivo);
+      assert.equal(estado.escalamiento?.motivo, motivo, "la señal no se pierde");
+    }
+  });
+
+  it("tras la Regla 4, la Regla 5 o una falla técnica, el registro sigue denegado sin consultar al core", async (t) => {
+    capturarStderr(t);
+    const motivos = [
+      "pide_persona",
+      "caso_no_cubierto",
+      "falla_transitoria_persistente",
+      "identidad_ambigua",
+      "identidad_no_verificable",
+      "documento_no_extraible",
+    ] as const;
+    for (const motivo of motivos) {
+      const { invocar, estado, llamadas } = control([verificadaComo(ID_ANA)]);
+      dejarSenal(estado, {
+        motivo,
+        regla: "regla de prueba",
+        herramienta: "prueba",
+      });
+      const salida = await invocar(llamadaDeRegistro(ID_ANA));
+      assert.equal(decision(salida), "deny", motivo);
+      assert.match(motivoDe(salida), /ya pasó a un analista/, motivo);
+      assert.equal(llamadas(), 0, motivo);
+    }
+  });
+
+  it("tras una señal de la Regla 3 e identidad sin verificar, bloquea por identidad", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado, llamadas } = control([identidad(randomUUID(), false)]);
+    dejarSenal(estado, {
+      motivo: "discrepancia_de_ingreso",
+      regla: "Regla 3",
+      herramienta: "verificar_ingreso",
+    });
+    const salida = await invocar(llamadaDeRegistro(ID_ANA));
+    assert.equal(decision(salida), "deny");
+    assert.match(motivoDe(salida), /Regla 1/);
+    assert.equal(llamadas(), 1);
+  });
+
+  it("la excepción de la Regla 3 es solo del registro: las demás herramientas siguen denegadas", async (t) => {
+    capturarStderr(t);
+    for (const herramienta of [
+      "solicitar_analista",
+      "extraer_documento",
+      "verificar_ingreso",
+      "buscar_solicitante",
+      "calcular_capacidad_pago",
+    ]) {
+      const { invocar, estado, llamadas } = control([verificadaComo(ID_ANA)]);
+      dejarSenal(estado, {
+        motivo: "inconsistencia_documental",
+        regla: "Regla 3",
+        herramienta: "extraer_documento",
+      });
+      const salida = await invocar(entrada(`mcp__originacion__${herramienta}`));
+      assert.equal(decision(salida), "deny", herramienta);
+      assert.equal(llamadas(), 0, herramienta);
+    }
   });
 });

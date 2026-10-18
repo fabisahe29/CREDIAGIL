@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   REGLA_3,
+  calcularDiferenciaPorcentaje,
   calcularIngresoVerificado,
   decidirIngreso,
   esAbonoDeNomina,
@@ -573,5 +574,49 @@ describe("política de ingreso: decidirIngreso con la consistencia (#11, US3)", 
   it("el nombre del solicitante se contrasta sin importar el orden ni las tildes", () => {
     const registros = registrosCon([ejemploExtracto({ titular: "PEREZ FICTICIA ANA" })]);
     assert.equal(decidir(registros, 3_800_000).inconsistencias.length, 0);
+  });
+});
+
+describe("política de ingreso: calcularDiferenciaPorcentaje (#13, R9)", () => {
+  const VERIFICADO = 3_800_000;
+  const casos: readonly [string, number, number, number][] = [
+    ["sin diferencia", 3_800_000, VERIFICADO, 0],
+    ["borde exacto del 10%", 4_180_000, VERIFICADO, 10],
+    ["un peso por encima del borde", 4_180_001, VERIFICADO, 10],
+    ["caso de la demo con discrepancia", 4_300_000, VERIFICADO, 13.16],
+    ["por debajo, la diferencia es absoluta", 3_420_000, VERIFICADO, 10],
+    ["un peso por debajo del borde", 3_419_999, VERIFICADO, 10],
+    ["mitad hacia arriba y dos decimales", 1, 3, 66.67],
+    ["declarado en cero", 0, VERIFICADO, 100],
+  ];
+
+  for (const [nombre, declarado, verificado, esperado] of casos) {
+    it(`${nombre}: ${declarado} contra ${verificado} da ${esperado}`, () => {
+      assert.equal(calcularDiferenciaPorcentaje(declarado, verificado), esperado);
+    });
+  }
+
+  it("la mitad exacta de la centésima va hacia arriba", () => {
+    // 1 / 8 = 12,5% exacto; 1 / 16 = 6,25% exacto; 1 / 32 = 3,125% → 3,13
+    assert.equal(calcularDiferenciaPorcentaje(33, 32), 3.13);
+  });
+
+  it("rechaza un declarado que no es un entero no negativo", () => {
+    for (const invalido of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => calcularDiferenciaPorcentaje(invalido, VERIFICADO), RangeError);
+    }
+  });
+
+  it("rechaza un verificado que no es un entero positivo: no divide por cero", () => {
+    for (const invalido of [0, -1, 1.5, Number.NaN]) {
+      assert.throws(() => calcularDiferenciaPorcentaje(4_000_000, invalido), RangeError);
+    }
+  });
+
+  it("el porcentaje informativo no cambia la decisión: en 4.180.000 y 4.180.001 ambos dan 10", () => {
+    assert.equal(evaluarDiscrepancia(4_180_000, VERIFICADO).supera, false);
+    assert.equal(evaluarDiscrepancia(4_180_001, VERIFICADO).supera, true);
+    assert.equal(calcularDiferenciaPorcentaje(4_180_000, VERIFICADO), 10);
+    assert.equal(calcularDiferenciaPorcentaje(4_180_001, VERIFICADO), 10);
   });
 });

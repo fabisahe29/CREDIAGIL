@@ -7,7 +7,13 @@
 import type { HookCallback, HookInput, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import { registrar } from "../compartido/logs.ts";
 import { evaluarRegla1, REGLA_1 } from "../politica/identidad.ts";
-import { CLAVE_SERVIDOR, dejarSenal, emitirEvento, type EstadoConversacion } from "./adaptador.ts";
+import {
+  CLAVE_SERVIDOR,
+  admiteRegistro,
+  dejarSenal,
+  emitirEvento,
+  type EstadoConversacion,
+} from "./adaptador.ts";
 import type { ClienteCore } from "./cliente-core.ts";
 import { conReintentos } from "./reintentos.ts";
 
@@ -15,11 +21,14 @@ import { conReintentos } from "./reintentos.ts";
  * Herramientas del servidor `originacion` que exigen identidad verificada. La extracción de
  * documentos (#10) entra aquí: así ningún documento se procesa sin identidad, por código y no solo
  * por el prompt (FR-011a del #9). La verificación de ingreso (#11) también: sin identidad no se
- * compara nada con el solicitante. El registro de la solicitud (#13) agregará la suya.
+ * compara nada con el solicitante. El registro de la solicitud (#13) también: la Regla 1 es que
+ * ninguna solicitud se registra sin la identidad verificada, y el hook la aplica por código, sin
+ * importar lo que digan el prompt o el modelo; el core la vuelve a aplicar.
  */
 export const HERRAMIENTAS_CON_IDENTIDAD: readonly string[] = [
   "extraer_documento",
   "verificar_ingreso",
+  "registrar_solicitud",
 ];
 
 export interface OpcionesControlIdentidad {
@@ -171,8 +180,10 @@ export function crearControlIdentidad({
     if (!entrada.tool_name.startsWith(PREFIJO)) return {};
     const herramienta = entrada.tool_name.slice(PREFIJO.length);
     // Una conversación escalada (p. ej. reglas 4 y 5 con solicitar_analista) no sigue: ninguna
-    // herramienta, tampoco las de identificación, se ejecuta después (orden 4 → 5 → 1).
-    if (estado.escalamiento !== null) {
+    // herramienta, tampoco las de identificación, se ejecuta después (orden 4 → 5 → 1). La única
+    // excepción es el registro tras una señal de la Regla 3: el analista debe recibir la solicitud
+    // con la discrepancia o la inconsistencia guardada (#13, R5); la Regla 1 se sigue comprobando.
+    if (estado.escalamiento !== null && !admiteRegistro(herramienta, estado)) {
       registrar("control_identidad", {
         correlationId: estado.correlationId,
         herramienta,
