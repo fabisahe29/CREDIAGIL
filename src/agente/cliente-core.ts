@@ -31,6 +31,10 @@ import {
   type ResultadoExtraccion,
 } from "../compartido/extraccion.ts";
 import { esquemaVerificacionIngreso, type VerificacionIngreso } from "../compartido/ingreso.ts";
+import {
+  esquemaSimulacionCapacidadPago,
+  type SimulacionCapacidadPago,
+} from "../compartido/capacidad-pago.ts";
 
 const PRINCIPAL_CORE = fileURLToPath(new URL("../mcp/principal.ts", import.meta.url));
 export const TIEMPO_LIMITE_CORE_MS = 5_000;
@@ -59,6 +63,11 @@ const esquemaVerificacionOpcional = esquemaRespuesta(
   z.object({ verificacion: esquemaVerificacionIngreso.nullable() }).strict(),
 );
 
+const esquemaCapacidadPago = esquemaRespuesta(
+  z.object({ simulacion: esquemaSimulacionCapacidadPago }).strict(),
+);
+
+export type RespuestaCapacidadPago = Respuesta<{ simulacion: SimulacionCapacidadPago }>;
 export type RespuestaVerificacionIngreso = Respuesta<{ verificacion: VerificacionIngreso }>;
 export type RespuestaVerificacionConsultada = Respuesta<{
   verificacion: VerificacionIngreso | null;
@@ -99,6 +108,15 @@ export interface ClienteCore {
   ): Promise<RespuestaVerificacionIngreso>;
   /** Solo lectura: la última verificación de ingreso de la conversación, o `null`. */
   consultarVerificacionIngreso(correlationId: string): Promise<RespuestaVerificacionConsultada>;
+  /**
+   * Simula la cuota y su proporción del ingreso (#12, R4). Solo lectura: no exige identidad ni deja
+   * efectos. `ingresoMensual` es opcional en el tipo para reenviar su falta y que el core la rechace
+   * con su error de validación.
+   */
+  calcularCapacidadPago(
+    entrada: { monto: number; plazoMeses: number; ingresoMensual?: number },
+    correlationId: string,
+  ): Promise<RespuestaCapacidadPago>;
   cerrar(): Promise<void>;
 }
 
@@ -221,6 +239,18 @@ export async function crearClienteCore({
         "consultar_verificacion_ingreso",
         { correlationId },
         esquemaVerificacionOpcional,
+      );
+    },
+    calcularCapacidadPago({ monto, plazoMeses, ingresoMensual }, correlationId) {
+      return llamar(
+        "calcular_capacidad_pago",
+        {
+          monto,
+          plazoMeses,
+          ...(ingresoMensual !== undefined ? { ingresoMensual } : {}),
+          correlationId,
+        },
+        esquemaCapacidadPago,
       );
     },
     async cerrar() {

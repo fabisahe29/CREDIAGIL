@@ -696,3 +696,125 @@ describe("cliente del core: reextracción (#11, US5)", () => {
     }
   });
 });
+
+describe("cliente del core: calcularCapacidadPago (#12, US1)", () => {
+  const entrada = { monto: 4_000_000, plazoMeses: 24, ingresoMensual: 3_800_000 };
+
+  it("contra el servidor real devuelve la simulación validada", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const r = await core.calcularCapacidadPago(entrada, randomUUID());
+      assert.ok(r.ok, JSON.stringify(r));
+      if (!r.ok) return;
+      assert.equal(r.datos.simulacion.cuotaMensual, 206_723);
+      assert.equal(r.datos.simulacion.fuenteIngreso, "declarado");
+      assert.equal(r.datos.simulacion.vinculante, false);
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("envía la herramienta, los tres datos y el correlationId", async () => {
+    const llamadas: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const correlationId = randomUUID();
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return { structuredContent: { ok: false, error: errorDeEjemplo } };
+        },
+        close: async () => {},
+      },
+    });
+    await core.calcularCapacidadPago(entrada, correlationId);
+    assert.deepEqual(llamadas, [
+      { name: "calcular_capacidad_pago", arguments: { ...entrada, correlationId } },
+    ]);
+  });
+
+  it("sin ingresoMensual no envía el campo: el core lo rechaza", async () => {
+    const llamadas: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return { structuredContent: { ok: false, error: errorDeEjemplo } };
+        },
+        close: async () => {},
+      },
+    });
+    await core.calcularCapacidadPago({ monto: 1_000_000, plazoMeses: 12 }, randomUUID());
+    assert.equal("ingresoMensual" in (llamadas[0]?.arguments ?? {}), false);
+  });
+
+  it("una respuesta fuera de contrato es respuesta_fuera_de_contrato, no reintentable", async () => {
+    for (const contenido of [
+      undefined,
+      { ok: true, datos: { simulacion: { cuotaMensual: 206_723 } } },
+      { ok: true, datos: { simulacion: { ...simulacionDeEjemplo, vinculante: true } } },
+      { ok: true, datos: { simulacion: { ...simulacionDeEjemplo, preaprobado: true } } },
+    ]) {
+      const core = await crearClienteCore({
+        llamador: {
+          callTool: async () => ({ structuredContent: contenido }),
+          close: async () => {},
+        },
+      });
+      const r = await core.calcularCapacidadPago(entrada, randomUUID());
+      assert.equal(r.ok, false);
+      if (r.ok) return;
+      assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
+      assert.equal(r.error.reintentable, false);
+    }
+  });
+
+  it("conserva el error de validación del core con su campo", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({
+          isError: true,
+          structuredContent: { ok: false, error: errorDeEjemplo },
+        }),
+        close: async () => {},
+      },
+    });
+    const r = await core.calcularCapacidadPago({ monto: 0, plazoMeses: 12 }, randomUUID());
+    assert.deepEqual(r, { ok: false, error: errorDeEjemplo });
+  });
+
+  it("un tiempo agotado es un error transitorio", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "tiempo");
+        },
+        close: async () => {},
+      },
+    });
+    const r = await core.calcularCapacidadPago(entrada, randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "tiempo_agotado");
+  });
+});
+
+const errorDeEjemplo = {
+  categoria: "validacion",
+  reintentable: false,
+  codigo: "monto_invalido",
+  mensaje: "El monto debe ser un entero de pesos mayor que 0.",
+  campo: "monto",
+} as const;
+
+const simulacionDeEjemplo = {
+  tipo: "simulacion",
+  vinculante: false,
+  monto: 4_000_000,
+  plazoMeses: 24,
+  ingresoMensual: 3_800_000,
+  fuenteIngreso: "declarado",
+  tasaMensualPuntosBase: 180,
+  cuotaMensual: 206_723,
+  relacionCuotaIngresoPorcentaje: 5.44,
+  aviso: "Simulación no vinculante.",
+  versionPolitica: "2026-10-18.2",
+} as const;

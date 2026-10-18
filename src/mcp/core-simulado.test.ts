@@ -26,7 +26,11 @@ import {
   extractosTrimestre,
   type Ejemplo,
 } from "../compartido/ingreso-ejemplos.ts";
-import { VERSION_POLITICA } from "../politica/politica.ts";
+import { TASA_MENSUAL_PUNTOS_BASE, VERSION_POLITICA } from "../politica/politica.ts";
+import {
+  AVISOS_CAPACIDAD_PAGO,
+  esquemaSimulacionCapacidadPago,
+} from "../compartido/capacidad-pago.ts";
 import {
   INGRESO_DECLARADO_MAXIMO,
   crearCore,
@@ -1391,5 +1395,311 @@ describe("core simulado: registrarExtraccion con reextracción (#11, US5)", () =
       assert.equal(respuesta.error.categoria, "validacion");
       assert.equal(respuesta.error.campo, "reextraccion");
     }
+  });
+});
+
+describe("core simulado: calcularCapacidadPago (#12, US1)", () => {
+  const ahora = () => HOY_EJEMPLO;
+  const referencia = { monto: 4_000_000, plazoMeses: 24, ingresoMensual: 3_800_000 };
+
+  function coreVerificado(correlationId = randomUUID()) {
+    const core = crearCore({ ahora });
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    const r = core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-1",
+      correlationId,
+    });
+    assert.equal(r.respuesta.ok, true);
+    return { core, correlationId };
+  }
+
+  /** Un core con identidad y los documentos del caso consistente: el ingreso verificado es 3.800.000. */
+  function conDocumentos() {
+    const { core, correlationId } = coreVerificado();
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = core.registrarExtraccion({
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      }).respuesta;
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    return { core, correlationId };
+  }
+
+  function simular(
+    core: ReturnType<typeof crearCore>,
+    correlationId: string,
+    entrada: Record<string, unknown> = {},
+  ) {
+    const respuesta = core.calcularCapacidadPago({ ...referencia, ...entrada, correlationId });
+    assert.ok(respuesta.ok, JSON.stringify(respuesta));
+    if (!respuesta.ok) throw new Error("se esperaba una simulación");
+    return respuesta.datos.simulacion;
+  }
+
+  it("valor de referencia: 4.000.000 a 24 meses da una cuota de 206.723", () => {
+    const simulacion = simular(crearCore({ ahora }), randomUUID());
+    assert.equal(simulacion.cuotaMensual, 206_723);
+    assert.equal(simulacion.relacionCuotaIngresoPorcentaje, 5.44);
+    assert.equal(simulacion.tasaMensualPuntosBase, TASA_MENSUAL_PUNTOS_BASE);
+    assert.equal(simulacion.versionPolitica, VERSION_POLITICA);
+    assert.equal(simulacion.monto, 4_000_000);
+    assert.equal(simulacion.plazoMeses, 24);
+    assert.equal(simulacion.ingresoMensual, 3_800_000);
+  });
+
+  it("es una simulación no vinculante y la respuesta cumple su esquema", () => {
+    const simulacion = simular(crearCore({ ahora }), randomUUID());
+    assert.equal(simulacion.tipo, "simulacion");
+    assert.equal(simulacion.vinculante, false);
+    assert.equal(esquemaSimulacionCapacidadPago.safeParse(simulacion).success, true);
+  });
+
+  it("el mismo ingreso con otro monto cambia la cuota y con otro ingreso solo cambia la proporción", () => {
+    const core = crearCore({ ahora });
+    const id = randomUUID();
+    const base = simular(core, id);
+    const otroIngreso = simular(core, id, { ingresoMensual: 7_600_000 });
+    assert.equal(otroIngreso.cuotaMensual, base.cuotaMensual);
+    assert.equal(otroIngreso.relacionCuotaIngresoPorcentaje, 2.72);
+  });
+
+  it("repetir la misma simulación da siempre el mismo resultado", () => {
+    const core = crearCore({ ahora });
+    const id = randomUUID();
+    const primera = simular(core, id);
+    for (let i = 0; i < 3; i++) assert.deepEqual(simular(core, id), primera);
+  });
+
+  it("sin verificación guardada el ingreso es declarado, con su aviso", () => {
+    const simulacion = simular(crearCore({ ahora }), randomUUID());
+    assert.equal(simulacion.fuenteIngreso, "declarado");
+    assert.equal(simulacion.aviso, AVISOS_CAPACIDAD_PAGO.declarado);
+  });
+
+  it("con la verificación en estado verificado y el mismo monto el ingreso es verificado", () => {
+    const { core, correlationId } = conDocumentos();
+    const verificada = core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    assert.ok(verificada.respuesta.ok);
+    if (!verificada.respuesta.ok) return;
+    assert.equal(verificada.respuesta.datos.verificacion.estado, "verificado");
+    const simulacion = simular(core, correlationId);
+    assert.equal(simulacion.fuenteIngreso, "verificado");
+    assert.equal(simulacion.aviso, AVISOS_CAPACIDAD_PAGO.verificado);
+  });
+
+  it("con la verificación en estado verificado pero otro monto el ingreso es declarado", () => {
+    const { core, correlationId } = conDocumentos();
+    core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+    for (const ingresoMensual of [3_800_001, 3_799_999, 6_000_000]) {
+      assert.equal(simular(core, correlationId, { ingresoMensual }).fuenteIngreso, "declarado");
+    }
+  });
+
+  it("con la verificación en otro estado el ingreso es declarado aunque el monto coincida", () => {
+    const { core, correlationId } = conDocumentos();
+    // Con documentos y sin declarar el estado es falta_declarado y ya hay un ingreso calculado.
+    const sinDeclarar = core.verificarIngreso({ correlationId });
+    assert.ok(sinDeclarar.respuesta.ok);
+    if (!sinDeclarar.respuesta.ok) return;
+    assert.equal(sinDeclarar.respuesta.datos.verificacion.estado, "falta_declarado");
+    assert.equal(simular(core, correlationId).fuenteIngreso, "declarado");
+    // Con un declarado muy distinto el estado es discrepancia: tampoco se rotula verificado.
+    core.verificarIngreso({ correlationId, ingresoDeclarado: 9_000_000 });
+    assert.equal(simular(core, correlationId).fuenteIngreso, "declarado");
+  });
+
+  it("la verificación de otra conversación no cuenta", () => {
+    const { core } = conDocumentos();
+    assert.equal(simular(core, randomUUID()).fuenteIngreso, "declarado");
+  });
+
+  it("con la falla simulada devuelve un error transitorio reintentable", () => {
+    const core = crearCore({ ahora, falla: "siempre" });
+    const respuesta = core.calcularCapacidadPago({ ...referencia, correlationId: randomUUID() });
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.categoria, "transitorio");
+    assert.equal(respuesta.error.codigo, "core_no_disponible");
+    assert.equal(respuesta.error.reintentable, true);
+  });
+
+  /** Todo lo que el core guarda y expone de una conversación, para comparar antes y después. */
+  function fotoDelCore(core: ReturnType<typeof crearCore>, correlationId: string) {
+    return JSON.stringify({
+      solicitud: core.consultarSolicitud(ID_EN_ESTUDIO),
+      identidad: core.consultarIdentidad(correlationId),
+      extracciones: core.consultarExtracciones(correlationId),
+      verificacion: core.consultarVerificacionIngreso(correlationId),
+    });
+  }
+
+  it("US2: sin identidad verificada responde y no pide identificarse", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const respuesta = core.calcularCapacidadPago({ ...referencia, correlationId });
+    assert.ok(respuesta.ok, JSON.stringify(respuesta));
+    const identidad = core.consultarIdentidad(correlationId);
+    assert.ok(identidad.ok);
+    if (identidad.ok) assert.equal(identidad.datos.identidad.verificada, false);
+  });
+
+  it("US2: no deja efectos: el core queda igual, con y sin verificación guardada", () => {
+    const sinNada = crearCore({ ahora });
+    const idSinNada = randomUUID();
+    const conVerificacion = conDocumentos();
+    conVerificacion.core.verificarIngreso({
+      correlationId: conVerificacion.correlationId,
+      ingresoDeclarado: 3_800_000,
+    });
+    for (const [core, correlationId] of [
+      [sinNada, idSinNada],
+      [conVerificacion.core, conVerificacion.correlationId],
+    ] as const) {
+      const antes = fotoDelCore(core, correlationId);
+      for (const entrada of [
+        referencia,
+        { monto: 1_000_000, plazoMeses: 1, ingresoMensual: 500_000 },
+        { monto: 9_000_000, plazoMeses: 60, ingresoMensual: 3_800_000 },
+        { ...referencia, ingresoMensual: 0 },
+        { ...referencia, monto: 0 },
+      ]) {
+        core.calcularCapacidadPago({ ...entrada, correlationId });
+      }
+      assert.equal(fotoDelCore(core, correlationId), antes);
+    }
+  });
+
+  it("US3: no trae ningún campo de decisión, aunque cumpla el 30% y el tope de monto", () => {
+    const core = crearCore({ ahora });
+    // 1.000.000 a 12 meses con un ingreso de 10.000.000: monto ≤ 5.000.000 y cuota muy por debajo del 30%.
+    const respuesta = core.calcularCapacidadPago({
+      monto: 1_000_000,
+      plazoMeses: 12,
+      ingresoMensual: 10_000_000,
+      correlationId: randomUUID(),
+    });
+    assert.ok(respuesta.ok);
+    if (!respuesta.ok) return;
+    const { simulacion } = respuesta.datos;
+    assert.ok(simulacion.relacionCuotaIngresoPorcentaje < 30);
+    assert.equal(simulacion.tipo, "simulacion");
+    assert.equal(simulacion.vinculante, false);
+    const campos = Object.keys(simulacion);
+    assert.deepEqual(campos.sort(), [
+      "aviso",
+      "cuotaMensual",
+      "fuenteIngreso",
+      "ingresoMensual",
+      "monto",
+      "plazoMeses",
+      "relacionCuotaIngresoPorcentaje",
+      "tasaMensualPuntosBase",
+      "tipo",
+      "versionPolitica",
+      "vinculante",
+    ]);
+    const texto = JSON.stringify(simulacion).toLowerCase();
+    for (const palabra of ["aprobad", "calific", "dentrodepolitica", "umbral", "tope"]) {
+      assert.equal(texto.includes(palabra), false, palabra);
+    }
+  });
+
+  it("US2: la respuesta es solo la simulación, sin auditoría de decisión", () => {
+    const respuesta = crearCore({ ahora }).calcularCapacidadPago({
+      ...referencia,
+      correlationId: randomUUID(),
+    });
+    assert.deepEqual(Object.keys(respuesta).sort(), ["datos", "ok"]);
+    if (respuesta.ok) assert.deepEqual(Object.keys(respuesta.datos), ["simulacion"]);
+  });
+});
+
+describe("core simulado: calcularCapacidadPago con entradas inválidas (#12, US4)", () => {
+  const valida = { monto: 4_000_000, plazoMeses: 24, ingresoMensual: 3_800_000 };
+
+  function rechazo(entrada: Record<string, unknown>) {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const respuesta = core.calcularCapacidadPago({ ...entrada, correlationId: randomUUID() });
+    assert.equal(respuesta.ok, false, JSON.stringify(entrada));
+    if (respuesta.ok) throw new Error("se esperaba un rechazo");
+    // Un error no lleva cuota ni dato parcial (FR-010).
+    assert.deepEqual(Object.keys(respuesta), ["ok", "error"]);
+    return respuesta.error;
+  }
+
+  const casos: Array<[string, string, string, unknown[]]> = [
+    ["monto", "monto_invalido", "monto", [0, -1, 1.5, "4000000", null]],
+    ["plazoMeses", "plazo_invalido", "plazoMeses", [0, -24, 2.5, "24", null]],
+    ["ingresoMensual", "ingreso_invalido", "ingresoMensual", [0, -1, 3_800_000.5, "3800000", null]],
+  ];
+  for (const [campo, codigo, esperado, valores] of casos) {
+    for (const valor of valores) {
+      it(`rechaza ${campo} = ${String(valor)} como ${codigo}`, () => {
+        const error = rechazo({ ...valida, [campo]: valor });
+        assert.equal(error.categoria, "validacion");
+        assert.equal(error.reintentable, false);
+        assert.equal(error.codigo, codigo);
+        assert.equal(error.campo, esperado);
+        assert.ok(error.mensaje.length > 10, "el mensaje dice el motivo");
+      });
+    }
+    it(`rechaza ${campo} ausente como ${codigo}`, () => {
+      const sinCampo: Record<string, unknown> = { ...valida };
+      delete sinCampo[campo];
+      const error = rechazo(sinCampo);
+      assert.equal(error.codigo, codigo);
+      assert.equal(error.campo, esperado);
+    });
+  }
+
+  it("un correlationId que no es un UUID es formato_invalido", () => {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const respuesta = core.calcularCapacidadPago({ ...valida, correlationId: "no-es-uuid" });
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.codigo, "formato_invalido");
+    assert.equal(respuesta.error.campo, "correlationId");
+  });
+
+  it("un monto cuya cuota no es un entero seguro es monto_invalido", () => {
+    const error = rechazo({ monto: Number.MAX_SAFE_INTEGER, plazoMeses: 1, ingresoMensual: 1 });
+    assert.equal(error.codigo, "monto_invalido");
+    assert.equal(error.campo, "monto");
+    assert.match(error.mensaje, /grande/);
+  });
+
+  it("un monto tan pequeño que la cuota sería de 0 pesos es monto_invalido", () => {
+    const error = rechazo({ monto: 1, plazoMeses: 24, ingresoMensual: 3_800_000 });
+    assert.equal(error.codigo, "monto_invalido");
+    assert.match(error.mensaje, /pequeño/);
+  });
+
+  it("no hay límites adicionales: un monto y un plazo altos se simulan igual (aclaración Q2)", () => {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const respuesta = core.calcularCapacidadPago({
+      monto: 9_000_000_000,
+      plazoMeses: 360,
+      ingresoMensual: 3_800_000,
+      correlationId: randomUUID(),
+    });
+    assert.ok(respuesta.ok, JSON.stringify(respuesta));
+    if (!respuesta.ok) return;
+    assert.ok(respuesta.datos.simulacion.cuotaMensual > 0);
+    // La cuota supera el ingreso: se informa tal cual, sin convertirlo en una decisión.
+    assert.ok(respuesta.datos.simulacion.relacionCuotaIngresoPorcentaje > 100);
+  });
+
+  it("un campo de más es formato_invalido sobre ese campo", () => {
+    const error = rechazo({ ...valida, ingresoVerificado: 9_000_000 });
+    assert.equal(error.codigo, "formato_invalido");
+    assert.equal(error.campo, "ingresoVerificado");
   });
 });

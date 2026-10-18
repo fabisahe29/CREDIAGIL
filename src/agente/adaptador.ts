@@ -14,6 +14,7 @@ import {
   type Categoria,
   type Respuesta,
 } from "../compartido/errores.ts";
+import { DESCRIPCION_CAPACIDAD_PAGO } from "../compartido/capacidad-pago.ts";
 import { validarEvento, type DatosEvento, type EventoNegocio } from "../compartido/eventos.ts";
 import {
   construirResultado,
@@ -296,6 +297,25 @@ const esquemaVerificarIngreso = {
 
 const DESCRIPCION_VERIFICAR_INGRESO =
   "Verifica el ingreso mensual del solicitante con sus documentos y lo compara con lo que declaró. Devuelve el ingreso verificado o lo que falta. No calcules ni compares ingresos por tu cuenta. Exige la identidad verificada.";
+
+/**
+ * El esquema no exige enteros ni positivos y deja el ingreso opcional: un valor inválido o ausente
+ * llega al core y vuelve con el error de validación tipado y su motivo (#12, FR-010).
+ */
+const esquemaCapacidadPago = {
+  monto: z
+    .number()
+    .describe(
+      "Monto que quiere el solicitante, en pesos colombianos. Solo lo que dijo; no lo inventes.",
+    ),
+  plazoMeses: z.number().describe("Plazo en meses que dijo el solicitante."),
+  ingresoMensual: z
+    .number()
+    .optional()
+    .describe(
+      "Ingreso mensual en pesos que dijo el solicitante o que devolvió verificar_ingreso. Omítelo si no lo dijo: no lo inventes.",
+    ),
+};
 
 const DESCRIPCION_CONSULTAR_EXTRACCIONES =
   "Devuelve los datos ya extraídos de los documentos de esta conversación, con su procedencia. Úsala para recordar datos de turnos anteriores; no vuelve a extraer.";
@@ -772,6 +792,29 @@ export function crearAdaptador({
     return aResultadoMcp(exito(aplicarVerificacion(verificacion, "verificar_ingreso")));
   }
 
+  /**
+   * Herramienta del modelo: simula la cuota y su proporción del ingreso (#12). Solo lectura: no deja
+   * señal de escalamiento, no emite eventos y no llama a otra herramienta. Un error de validación del
+   * core pasa tal cual al modelo, y al no ser reintentable no se vuelve a llamar.
+   */
+  async function calcularCapacidadPago({
+    monto,
+    plazoMeses,
+    ingresoMensual,
+  }: {
+    monto: number;
+    plazoMeses: number;
+    ingresoMensual?: number;
+  }) {
+    const respuesta = await llamarConReintentos("calcular_capacidad_pago", () =>
+      core.calcularCapacidadPago(
+        { monto, plazoMeses, ...(ingresoMensual !== undefined ? { ingresoMensual } : {}) },
+        estado.correlationId,
+      ),
+    );
+    return aResultadoMcp(respuesta);
+  }
+
   /** Log de una extracción (R10): metadatos, nunca el contenido ni los fragmentos (FR-017). */
   function registrarExtraccionLog(campos: Record<string, unknown>): void {
     registrar("extraccion", { correlationId: estado.correlationId, ...campos });
@@ -1083,6 +1126,7 @@ export function crearAdaptador({
     extraer_documento: { esquema: esquemaExtraer, manejar: extraer },
     verificar_ingreso: { esquema: esquemaVerificarIngreso, manejar: verificarIngreso },
     consultar_extracciones: { esquema: {}, manejar: consultarExtracciones },
+    calcular_capacidad_pago: { esquema: esquemaCapacidadPago, manejar: calcularCapacidadPago },
   };
 
   const servidor = createSdkMcpServer({
@@ -1128,6 +1172,13 @@ export function crearAdaptador({
         DESCRIPCION_CONSULTAR_EXTRACCIONES,
         {},
         () => consultarExtracciones({}),
+        { annotations: { readOnlyHint: true } },
+      ),
+      tool(
+        "calcular_capacidad_pago",
+        DESCRIPCION_CAPACIDAD_PAGO,
+        esquemaCapacidadPago,
+        (argumentos) => calcularCapacidadPago(argumentos),
         { annotations: { readOnlyHint: true } },
       ),
     ],

@@ -4,6 +4,59 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-18 · Simulación de cuota y capacidad de pago
+
+**Issue**: [#12 — Simulación de cuota y capacidad de pago](https://github.com/fabisahe29/CREDIAGIL/issues/12)
+
+**Detalle**: [specs/010-simulacion-cuota-capacidad-pago/research.md](specs/010-simulacion-cuota-capacidad-pago/research.md), decisiones R1 a R9
+
+### Decisión 1: la tasa se guarda en puntos base enteros, en `politica.ts`
+
+`TASA_MENSUAL_PUNTOS_BASE = 180` y `TASA_MENSUAL = 180 / 10_000`, que da exactamente `0.018`.
+
+**Motivo**: la constitución pide una única fuente. El entero se muestra como 1,8% sin el ruido de flotante que daría `0.018 × 100`.
+
+**Alternativas descartadas**: guardar `0.018` y derivar el porcentaje al mostrarlo, porque obliga a redondear para escribir 1,8; poner la tasa en el módulo del cálculo, porque parte la fuente única en dos archivos.
+
+### Decisión 2: la cuota se redondea al peso más cercano y la proporción se calcula con enteros
+
+La cuota es `P · i / (1 − (1 + i)^−n)` con un único redondeo, `redondearAlPesoMasCercano`, con la mitad hacia arriba. La proporción cuota/ingreso usa `BigInt`.
+
+**Motivo**: el redondeo al más cercano reproduce el valor de referencia del issue, $206.723 (el exacto es 206.723,34). La proporción exacta deja lista la comparación con el 30% del #14 sin decidir con flotantes (Principio III).
+
+**Alternativas descartadas**: redondear hacia arriba, que daría 206.724 y rompería la referencia; una librería decimal, porque agrega una dependencia para un solo cálculo; la proporción en flotante, por el error en los bordes.
+
+### Decisión 3: el core decide si el ingreso es `declarado` o `verificado`
+
+La herramienta recibe solo `ingresoMensual`. El core marca `verificado` únicamente si la verificación guardada de la conversación está en estado `verificado` y su monto es igual al recibido; en cualquier otro caso es `declarado`.
+
+**Motivo**: un ingreso que dice el solicitante nunca puede presentarse como verificado (Regla 3). Quien clasifica es código, no el modelo.
+
+**Alternativas descartadas**: un parámetro `fuente` que envía el modelo, porque pone la clasificación en el modelo; usar siempre el verificado si existe, porque impide simular un escenario hipotético que el issue permite.
+
+### Decisión 4: la simulación pasa por el core, con una sola descripción compartida
+
+La herramienta vive en el servidor del core y el adaptador la expone. Su esquema y la descripción que lee el modelo están una sola vez en `src/compartido/capacidad-pago.ts`. No entra en la lista de herramientas que exigen identidad.
+
+**Motivo**: el agente actúa solo por herramientas MCP (Principio IV), y el #14 recalculará la cuota con la misma función. La descripción es lo único con lo que el modelo distingue simular de preaprobar, así que no puede estar escrita en dos sitios.
+
+**Alternativas descartadas**: calcular en el adaptador, que deja dos caminos de cálculo; dos descripciones, que podrían divergir; exigir identidad por prudencia, que contradice el criterio de aceptación.
+
+### Decisión 5: la descripción no menciona el 30% ni el tope de monto
+
+Dice que solo simula, que no reemplaza a `preaprobar_credito` y cuándo corresponde cada una, sin dar los umbrales de la Regla 2.
+
+**Motivo**: darle el 30% al modelo lo invita a concluir «sí califica» desde la proporción, que es la confusión que el issue quiere evitar.
+
+**Alternativas descartadas**: citar el 30% para explicar la diferencia, y omitir `preaprobar_credito` hasta el #14, que incumple el criterio.
+
+### Riesgos residuales aceptados
+
+- `preaprobar_credito` se cita antes de existir (llega con el #14); si cambia de nombre, se actualiza la descripción.
+- El cambio del prompt, de «no estimas cuotas» a «usa la herramienta», podría llevar al modelo a simular por su cuenta; el quickstart lo comprueba.
+
+---
+
 ## 2026-10-18 · Ingreso verificado y validación de consistencia
 
 **Issue**: [#11 — Ingreso verificado y validación de consistencia](https://github.com/fabisahe29/CREDIAGIL/issues/11)

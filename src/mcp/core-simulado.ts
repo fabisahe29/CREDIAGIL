@@ -23,8 +23,16 @@ import { alcanzaLimite, evaluarRegla1, type EstadoIdentidad } from "../politica/
 import {
   MAX_INTENTOS_VERIFICACION,
   MAX_REEXTRACCIONES_POR_REGLA,
+  TASA_MENSUAL_PUNTOS_BASE,
   VERSION_POLITICA,
 } from "../politica/politica.ts";
+import { ErrorCuota, calcularCuota, calcularRelacionCuotaIngreso } from "../politica/cuota.ts";
+import {
+  AVISOS_CAPACIDAD_PAGO,
+  validarEntradaCapacidadPago,
+  type FuenteIngreso,
+  type SimulacionCapacidadPago,
+} from "../compartido/capacidad-pago.ts";
 import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
 import { validarConsistencia } from "../politica/consistencia.ts";
 import { decidirIngreso } from "../politica/ingreso.ts";
@@ -206,6 +214,11 @@ export interface Core {
   consultarVerificacionIngreso(
     correlationId: unknown,
   ): Respuesta<{ verificacion: VerificacionIngreso | null }>;
+  /**
+   * Solo lectura (#12, R3 y R4): simula la cuota y su proporción del ingreso. No exige identidad, no
+   * escribe nada y no audita. La fuente del ingreso la decide el core con la verificación guardada.
+   */
+  calcularCapacidadPago(entrada: unknown): Respuesta<{ simulacion: SimulacionCapacidadPago }>;
 }
 
 export interface OpcionesCore {
@@ -795,6 +808,47 @@ export function crearCore({
       }
       const guardada = verificaciones.get(id.data);
       return exito({ verificacion: guardada === undefined ? null : structuredClone(guardada) });
+    },
+
+    calcularCapacidadPago(argumentos) {
+      if (fallaSimulada.debeFallar()) return fallo(noDisponible());
+      const validacion = validarEntradaCapacidadPago(argumentos);
+      if (!validacion.ok) return fallo(validacion.error);
+      const { monto, plazoMeses, ingresoMensual, correlationId } = validacion.entrada;
+      let cuotaMensual: number;
+      let relacionCuotaIngresoPorcentaje: number;
+      try {
+        cuotaMensual = calcularCuota(monto, plazoMeses);
+        relacionCuotaIngresoPorcentaje = calcularRelacionCuotaIngreso(cuotaMensual, ingresoMensual);
+      } catch (error) {
+        // Un monto que no da una cuota calculable es una entrada inválida, no una falla del core.
+        if (error instanceof ErrorCuota) {
+          return fallo(errorValidacion("monto_invalido", error.message, "monto"));
+        }
+        throw error;
+      }
+      // Solo lectura: se mira la verificación guardada, no se escribe nada. La fuente `verificado` la
+      // asigna el core únicamente si el ingreso coincide con el que salió de los documentos (R3).
+      const verificacion = verificaciones.get(correlationId);
+      const fuenteIngreso: FuenteIngreso =
+        verificacion?.estado === "verificado" && verificacion.ingreso?.monto === ingresoMensual
+          ? "verificado"
+          : "declarado";
+      return exito({
+        simulacion: {
+          tipo: "simulacion",
+          vinculante: false,
+          monto,
+          plazoMeses,
+          ingresoMensual,
+          fuenteIngreso,
+          tasaMensualPuntosBase: TASA_MENSUAL_PUNTOS_BASE,
+          cuotaMensual,
+          relacionCuotaIngresoPorcentaje,
+          aviso: AVISOS_CAPACIDAD_PAGO[fuenteIngreso],
+          versionPolitica: VERSION_POLITICA,
+        },
+      });
     },
 
     consultarExtracciones(correlationId) {

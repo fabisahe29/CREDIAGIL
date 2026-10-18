@@ -20,6 +20,7 @@ import {
   type ClienteCore,
   type EntradaRegistroExtraccion,
   type RespuestaBusqueda,
+  type RespuestaCapacidadPago,
   type RespuestaConsulta,
   type RespuestaIdentidad,
 } from "./cliente-core.ts";
@@ -747,6 +748,7 @@ describe("adaptador: consultar_identidad no se expone al modelo (#9, US4)", () =
       "extraer_documento",
       "verificar_ingreso",
       "consultar_extracciones",
+      "calcular_capacidad_pago",
     ]);
   });
 });
@@ -857,6 +859,9 @@ function coreEnMemoria() {
     },
     async consultarVerificacionIngreso(correlationId) {
       return core.consultarVerificacionIngreso(correlationId);
+    },
+    async calcularCapacidadPago(entrada, correlationId) {
+      return core.calcularCapacidadPago({ ...entrada, correlationId });
     },
     async cerrar() {},
   };
@@ -2212,5 +2217,196 @@ describe("adaptador: reextracción de inconsistencias corregibles (#11, US5)", (
     await p.extraer(documento.adjunto);
     const verificaciones = logs.filter((l) => l["evento"] === "verificacion_ingreso");
     assert.equal(verificaciones.at(-1)?.["reextracciones"], 1);
+  });
+});
+
+describe("adaptador: calcular_capacidad_pago (#12, US1)", () => {
+  const entrada = { monto: 4_000_000, plazoMeses: 24, ingresoMensual: 3_800_000 };
+  const simulacion = {
+    tipo: "simulacion",
+    vinculante: false,
+    ...entrada,
+    fuenteIngreso: "declarado",
+    tasaMensualPuntosBase: 180,
+    cuotaMensual: 206_723,
+    relacionCuotaIngresoPorcentaje: 5.44,
+    aviso: "Simulación no vinculante.",
+    versionPolitica: "2026-10-18.2",
+  } as const;
+
+  /** Core falso que responde a la simulación con las respuestas dadas y registra cada llamada. */
+  function coreConCapacidad(respuestas: RespuestaCapacidadPago[]) {
+    const llamadas: { entrada: unknown; correlationId: string }[] = [];
+    const core: ClienteCore = {
+      ...coreFalso([exito({ solicitud: null })]).core,
+      async calcularCapacidadPago(entradaCore, correlationId) {
+        llamadas.push({ entrada: entradaCore, correlationId });
+        return respuestas[Math.min(llamadas.length - 1, respuestas.length - 1)]!;
+      },
+    };
+    return { core, llamadas };
+  }
+
+  it("expone calcular_capacidad_pago con monto, plazo e ingreso, sin correlationId", () => {
+    const { core } = coreConCapacidad([exito({ simulacion })]);
+    const adaptador = crearAdaptador({ core, estado: crearEstado(randomUUID()) });
+    const { esquema } = adaptador.herramientas.calcular_capacidad_pago;
+    assert.deepEqual(Object.keys(esquema), ["monto", "plazoMeses", "ingresoMensual"]);
+    assert.equal(esquema.ingresoMensual.safeParse(undefined).success, true);
+    // Un valor inválido llega al core, que lo rechaza con su campo y su motivo (FR-010).
+    for (const invalido of [0, -1, 1.5]) {
+      assert.equal(esquema.monto.safeParse(invalido).success, true, String(invalido));
+      assert.equal(esquema.plazoMeses.safeParse(invalido).success, true, String(invalido));
+    }
+    assert.equal(esquema.monto.safeParse("4000000").success, false);
+  });
+
+  it("llama al core con el correlationId del estado y devuelve la respuesta tal cual", async () => {
+    const correlationId = randomUUID();
+    const respuesta = exito({ simulacion });
+    const { core, llamadas } = coreConCapacidad([respuesta]);
+    const adaptador = crearAdaptador({ core, estado: crearEstado(correlationId) });
+    const resultado = await adaptador.herramientas.calcular_capacidad_pago.manejar(entrada);
+    assert.deepEqual(llamadas, [{ entrada, correlationId }]);
+    assert.deepEqual(resultado.structuredContent, respuesta);
+    assert.equal(resultado.isError, false);
+  });
+
+  it("sin ingresoMensual no lo completa: lo envía ausente al core", async () => {
+    const { core, llamadas } = coreConCapacidad([
+      fallo(errorValidacion("ingreso_invalido", "Falta el ingreso.", "ingresoMensual")),
+    ]);
+    const adaptador = crearAdaptador({ core, estado: crearEstado(randomUUID()) });
+    await adaptador.herramientas.calcular_capacidad_pago.manejar({
+      monto: 1_000_000,
+      plazoMeses: 12,
+    });
+    assert.deepEqual(llamadas[0]?.entrada, { monto: 1_000_000, plazoMeses: 12 });
+  });
+
+  it("ante un error transitorio reintenta y, agotados los intentos, deja la señal de escalamiento", async () => {
+    const transitorio = fallo<never>(
+      errorTransitorio("core_no_disponible", "El core no responde."),
+    );
+    const { core, llamadas } = coreConCapacidad([transitorio]);
+    const estado = crearEstado(randomUUID());
+    const esperas: number[] = [];
+    const adaptador = crearAdaptador({
+      core,
+      estado,
+      dormir: async (ms) => void esperas.push(ms),
+      azar: () => 0.5,
+    });
+    const resultado = await adaptador.herramientas.calcular_capacidad_pago.manejar(entrada);
+    const contenido = resultado.structuredContent as { error: { codigo: string } };
+    assert.equal(llamadas.length, 3);
+    assert.deepEqual(esperas, [500, 1000]);
+    assert.equal(contenido.error.codigo, "transitorio_agotado");
+    assert.equal(estado.escalamiento?.motivo, "falla_transitoria_persistente");
+    assert.equal(estado.escalamiento?.herramienta, "calcular_capacidad_pago");
+  });
+
+  it("US2: una simulación correcta no deja señal, ni eventos, ni llama a otra herramienta del core", async () => {
+    const base = coreConCapacidad([exito({ simulacion })]).core;
+    const otras: string[] = [];
+    const core = Object.fromEntries(
+      Object.entries(base).map(([nombre, metodo]) => [
+        nombre,
+        nombre === "calcularCapacidadPago"
+          ? metodo
+          : (...args: unknown[]) => {
+              otras.push(nombre);
+              return (metodo as (...a: unknown[]) => unknown)(...args);
+            },
+      ]),
+    ) as unknown as ClienteCore;
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    const resultado = await adaptador.herramientas.calcular_capacidad_pago.manejar(entrada);
+    assert.equal(resultado.isError, false);
+    assert.equal(estado.escalamiento, null);
+    assert.deepEqual(estado.eventos, []);
+    assert.deepEqual(otras, []);
+  });
+
+  it("contra el core simulado, la simulación de referencia llega con su cuota", async () => {
+    const adaptador = crearAdaptador({
+      core: coreEnMemoria().cliente,
+      estado: crearEstado(randomUUID()),
+    });
+    const resultado = await adaptador.herramientas.calcular_capacidad_pago.manejar(entrada);
+    const contenido = resultado.structuredContent as {
+      ok: boolean;
+      datos: { simulacion: { cuotaMensual: number } };
+    };
+    assert.equal(contenido.ok, true);
+    assert.equal(contenido.datos.simulacion.cuotaMensual, 206_723);
+  });
+});
+
+describe("adaptador: calcular_capacidad_pago con entradas inválidas (#12, US4)", () => {
+  const errorMonto = errorValidacion(
+    "monto_invalido",
+    "El monto debe ser un entero de pesos mayor que 0.",
+    "monto",
+  );
+
+  it("un error de validación del core pasa tal cual al modelo, sin cuota", async () => {
+    const respuesta = fallo<never>(errorMonto);
+    let llamadas = 0;
+    const core: ClienteCore = {
+      ...coreFalso([exito({ solicitud: null })]).core,
+      async calcularCapacidadPago() {
+        llamadas++;
+        return respuesta;
+      },
+    };
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado, dormir: async () => {}, azar: () => 0.5 });
+    const resultado = await adaptador.herramientas.calcular_capacidad_pago.manejar({
+      monto: 0,
+      plazoMeses: 12,
+      ingresoMensual: 3_000_000,
+    });
+    assert.equal(resultado.isError, true);
+    assert.deepEqual(resultado.structuredContent, respuesta);
+    assert.equal(JSON.stringify(resultado.structuredContent).includes("cuotaMensual"), false);
+    // No es reintentable: el core se llama una sola vez, y no se escala por esto.
+    assert.equal(llamadas, 1);
+    assert.equal(estado.escalamiento, null);
+  });
+
+  it("contra el core simulado, cada dato inválido vuelve con su código y su campo", async () => {
+    const adaptador = crearAdaptador({
+      core: coreEnMemoria().cliente,
+      estado: crearEstado(randomUUID()),
+    });
+    const { manejar } = adaptador.herramientas.calcular_capacidad_pago;
+    const casos: Array<[Parameters<typeof manejar>[0], string, string]> = [
+      [{ monto: 0, plazoMeses: 12, ingresoMensual: 3_000_000 }, "monto_invalido", "monto"],
+      [
+        { monto: 1_000_000, plazoMeses: -3, ingresoMensual: 3_000_000 },
+        "plazo_invalido",
+        "plazoMeses",
+      ],
+      [
+        { monto: 1_000_000, plazoMeses: 12, ingresoMensual: 0 },
+        "ingreso_invalido",
+        "ingresoMensual",
+      ],
+      [{ monto: 1_000_000, plazoMeses: 12 }, "ingreso_invalido", "ingresoMensual"],
+      [{ monto: 1.5, plazoMeses: 12, ingresoMensual: 3_000_000 }, "monto_invalido", "monto"],
+    ];
+    for (const [entrada, codigo, campo] of casos) {
+      const resultado = await manejar(entrada);
+      const contenido = resultado.structuredContent as {
+        ok: boolean;
+        error?: { codigo: string; campo?: string; reintentable: boolean };
+      };
+      assert.equal(resultado.isError, true, JSON.stringify(entrada));
+      assert.equal(contenido.error?.codigo, codigo, JSON.stringify(entrada));
+      assert.equal(contenido.error?.campo, campo, JSON.stringify(entrada));
+      assert.equal(contenido.error?.reintentable, false);
+    }
   });
 });
