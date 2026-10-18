@@ -25,6 +25,11 @@ import {
 } from "../mcp/core-simulado.ts";
 import type { Solicitud } from "../mcp/datos-ejemplo.ts";
 import type { EstadoIdentidad } from "../politica/identidad.ts";
+import {
+  esquemaRegistroExtraccion,
+  type RegistroExtraccion,
+  type ResultadoExtraccion,
+} from "../compartido/extraccion.ts";
 
 const PRINCIPAL_CORE = fileURLToPath(new URL("../mcp/principal.ts", import.meta.url));
 export const TIEMPO_LIMITE_CORE_MS = 5_000;
@@ -38,6 +43,16 @@ const esquemaIdentidad = esquemaRespuesta(z.object({ identidad: esquemaEstadoIde
 export type RespuestaConsulta = Respuesta<{ solicitud: Solicitud | null }>;
 export type RespuestaBusqueda = Respuesta<{ coincidencias: Coincidencia[] }>;
 export type RespuestaIdentidad = Respuesta<{ identidad: EstadoIdentidad }>;
+
+const esquemaRegistro = esquemaRespuesta(
+  z.object({ extraccion: esquemaRegistroExtraccion }).strict(),
+);
+const esquemaExtracciones = esquemaRespuesta(
+  z.object({ extracciones: z.array(esquemaRegistroExtraccion) }).strict(),
+);
+
+export type RespuestaRegistroExtraccion = Respuesta<{ extraccion: RegistroExtraccion }>;
+export type RespuestaExtracciones = Respuesta<{ extracciones: RegistroExtraccion[] }>;
 
 /** Criterio de búsqueda: exactamente uno de los dos (lo valida el core). */
 export type CriterioBusqueda = { documento: string } | { nombre: string };
@@ -54,7 +69,23 @@ export interface ClienteCore {
   ): Promise<RespuestaIdentidad>;
   /** Solo lectura; la usa el control de identidad, nunca el modelo (R6, R7). */
   consultarIdentidad(correlationId: string): Promise<RespuestaIdentidad>;
+  /** Registra una extracción (#10, R6): el core exige identidad y revalida contra el contenido. */
+  registrarExtraccion(
+    entrada: EntradaRegistroExtraccion,
+    correlationId: string,
+  ): Promise<RespuestaRegistroExtraccion>;
+  /** Solo lectura: las extracciones ya registradas en la conversación. */
+  consultarExtracciones(correlationId: string): Promise<RespuestaExtracciones>;
   cerrar(): Promise<void>;
+}
+
+/** Lo que el adaptador envía al core para registrar una extracción. */
+export interface EntradaRegistroExtraccion {
+  adjunto: number;
+  nombre: string;
+  /** El texto exacto del documento, para que el core revalide; el core no lo guarda. */
+  contenido: string;
+  resultado: ResultadoExtraccion;
 }
 
 /** Lo mínimo que se usa del cliente MCP; inyectable para probar respuestas fuera de contrato. */
@@ -146,6 +177,12 @@ export async function crearClienteCore({
     },
     consultarIdentidad(correlationId) {
       return llamar("consultar_identidad", { correlationId }, esquemaIdentidad);
+    },
+    registrarExtraccion(entrada, correlationId) {
+      return llamar("registrar_extraccion", { ...entrada, correlationId }, esquemaRegistro);
+    },
+    consultarExtracciones(correlationId) {
+      return llamar("consultar_extracciones", { correlationId }, esquemaExtracciones);
     },
     async cerrar() {
       if (cerrado) return;

@@ -19,8 +19,17 @@ import {
   type Solicitud,
 } from "./datos-ejemplo.ts";
 import { crearFalla, type ModoFalla } from "./falla.ts";
-import { alcanzaLimite, type EstadoIdentidad } from "../politica/identidad.ts";
-import { MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
+import { alcanzaLimite, evaluarRegla1, type EstadoIdentidad } from "../politica/identidad.ts";
+import { MAX_INTENTOS_VERIFICACION, VERSION_POLITICA } from "../politica/politica.ts";
+import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
+import {
+  TAMANO_MAXIMO_CONTENIDO,
+  huella,
+  validarResultado,
+  type ErrorExtraccion,
+  type RegistroExtraccion,
+  type ValidacionResultado,
+} from "../compartido/extraccion.ts";
 
 /** Forma de una solicitud, compartida por el servidor (outputSchema) y el cliente del agente. */
 export const esquemaSolicitud = z.object({
@@ -89,12 +98,56 @@ export interface ResultadoVerificacion {
   auditoria: Auditoria | null;
 }
 
+/** Entrada de `registrar_extraccion` (specs/008-extraccion-documentos/contracts/core-mcp.md). */
+export interface EntradaRegistroExtraccion {
+  /** Ya validado por el servidor. */
+  correlationId: string;
+  adjunto: unknown;
+  nombre: unknown;
+  /** El texto del documento: solo para revalidar, nunca se guarda. */
+  contenido: unknown;
+  resultado: unknown;
+}
+
+const esquemaEntradaExtraccion = z.object({
+  correlationId: z.uuid(),
+  adjunto: z.int().min(1),
+  nombre: z.string().min(1).max(255),
+  contenido: z.string().min(1).max(TAMANO_MAXIMO_CONTENIDO),
+  resultado: z.unknown(),
+});
+
+/** Auditoría de una extracción registrada: metadatos, nunca contenido, valores ni fragmentos. */
+export interface AuditoriaExtraccion {
+  adjunto: number;
+  /** Los 12 primeros caracteres de la huella. */
+  huella: string;
+  estado: RegistroExtraccion["estado"];
+  tipo?: string;
+  causa?: string;
+  faltantes: string[];
+  regla: string;
+  versionPolitica: string;
+}
+
+export type RespuestaRegistroExtraccion = Respuesta<{ extraccion: RegistroExtraccion }>;
+
 export interface Core {
   consultarSolicitud(idSolicitud: unknown): Respuesta<{ solicitud: Solicitud | null }>;
   buscarSolicitante(criterio: CriterioBusqueda): Respuesta<{ coincidencias: Coincidencia[] }>;
   verificarIdentidad(entrada: EntradaVerificacion): ResultadoVerificacion;
   /** Solo lectura: lo consultan los controles del agente, nunca el modelo (R1, R7). */
   consultarIdentidad(correlationId: unknown): RespuestaIdentidad;
+  /**
+   * Registra el resultado de una extracción (#10, R6): exige identidad verificada, revalida contra el
+   * contenido y es idempotente por la huella del contenido. `auditoria` es `null` si no hubo efecto.
+   */
+  registrarExtraccion(entrada: EntradaRegistroExtraccion): {
+    respuesta: RespuestaRegistroExtraccion;
+    auditoria: AuditoriaExtraccion | null;
+  };
+  /** Solo lectura: las extracciones de la conversación, ordenadas por adjunto. */
+  consultarExtracciones(correlationId: unknown): Respuesta<{ extracciones: RegistroExtraccion[] }>;
 }
 
 export interface OpcionesCore {
@@ -172,6 +225,8 @@ export function crearCore({
   const intentos = new Map<string, { fallidos: number; bloqueada: boolean }>();
   /** Fallo por `${correlationId}|${idIntento}`, para la idempotencia (R4); los éxitos no se guardan. */
   const respuestasPorIntento = new Map<string, RespuestaIdentidad>();
+  /** Extracciones por conversación y huella del contenido; nunca el contenido (#10, R6). */
+  const extracciones = new Map<string, Map<string, RegistroExtraccion>>();
 
   /** Valida y evalúa un intento en el orden de R4; no guarda la respuesta. */
   function evaluarIntento(
@@ -405,5 +460,139 @@ export function crearCore({
       };
       return exito({ identidad: { ...identidad } });
     },
+
+    registrarExtraccion(entrada) {
+      if (fallaSimulada.debeFallar()) return { respuesta: fallo(noDisponible()), auditoria: null };
+      const forma = esquemaEntradaExtraccion.safeParse(entrada);
+      if (!forma.success) {
+        const campo = String(forma.error.issues[0]?.path[0] ?? "entrada");
+        return {
+          respuesta: fallo(
+            errorValidacion(
+              "formato_invalido",
+              `El campo ${campo} de la extracción no es válido.`,
+              campo,
+            ),
+          ),
+          auditoria: null,
+        };
+      }
+      const { correlationId, adjunto, nombre, contenido, resultado } = forma.data;
+
+      // Regla 1 del lado del servidor: sin identidad verificada no se registra nada (Principio IV).
+      const identidad = identidades.get(correlationId) ?? {
+        correlationId,
+        verificada: false,
+        idSolicitante: null,
+        verificadaEn: null,
+      };
+      if (!evaluarRegla1(identidad).permitido) {
+        return {
+          respuesta: fallo(
+            errorNegocio(
+              "identidad_no_verificada",
+              "No se registra una extracción sin la identidad del solicitante verificada.",
+            ),
+          ),
+          auditoria: null,
+        };
+      }
+
+      // El mismo contenido ya registrado: se devuelve el mismo registro, sin otro efecto (FR-018).
+      const deLaConversacion =
+        extracciones.get(correlationId) ?? new Map<string, RegistroExtraccion>();
+      const previo = deLaConversacion.get(huella(contenido));
+      if (previo !== undefined) {
+        if (!previo.adjuntos.includes(adjunto)) previo.adjuntos.push(adjunto);
+        return { respuesta: exito({ extraccion: structuredClone(previo) }), auditoria: null };
+      }
+
+      // Defensa en profundidad: se revalida contra el documento, aunque el agente ya lo hizo.
+      const validacion = validarResultado(resultado, contenido, ahora());
+      const primero = primerError(validacion, adjunto, nombre);
+      if (!validacion.ok || primero !== null) {
+        return {
+          respuesta: fallo(
+            errorValidacion(
+              "extraccion_invalida",
+              `La extracción no coincide con el documento: ${primero?.campo} (${primero?.motivo}).`,
+              `resultado.${primero?.campo ?? "(raíz)"}`,
+            ),
+          ),
+          auditoria: null,
+        };
+      }
+
+      const registro: RegistroExtraccion = {
+        ...validacion.resultado,
+        adjuntos: [adjunto],
+        registradoEn: ahora().toISOString(),
+      };
+      deLaConversacion.set(registro.huella, registro);
+      extracciones.set(correlationId, deLaConversacion);
+      return {
+        respuesta: exito({ extraccion: structuredClone(registro) }),
+        auditoria: auditoriaDe(registro),
+      };
+    },
+
+    consultarExtracciones(correlationId) {
+      if (fallaSimulada.debeFallar()) return fallo(noDisponible());
+      const id = z.uuid().safeParse(correlationId);
+      if (!id.success) {
+        return fallo(
+          errorValidacion(
+            "formato_invalido",
+            "El correlationId debe ser un UUID.",
+            "correlationId",
+          ),
+        );
+      }
+      const lista = [...(extracciones.get(id.data)?.values() ?? [])]
+        .map((registro) => structuredClone(registro))
+        .sort((a, b) => (a.adjuntos[0] ?? 0) - (b.adjuntos[0] ?? 0));
+      return exito({ extracciones: lista });
+    },
   };
+}
+
+/**
+ * El primer problema de un registro: un error de la revalidación, o un resultado que no es del
+ * adjunto o del nombre de la entrada. `null` si no hay ninguno.
+ */
+function primerError(
+  validacion: ValidacionResultado,
+  adjunto: number,
+  nombre: string,
+): ErrorExtraccion | null {
+  if (!validacion.ok) return validacion.errores[0] ?? { campo: "(raíz)", motivo: "esquema" };
+  if (validacion.resultado.adjunto !== adjunto) {
+    return { campo: "adjunto", motivo: "esquema", detalle: "no es el adjunto de la entrada" };
+  }
+  if (validacion.resultado.nombre !== nombre) {
+    return { campo: "nombre", motivo: "esquema", detalle: "no es el nombre de la entrada" };
+  }
+  return null;
+}
+
+/** Auditoría de una extracción registrada (FR-017): metadatos, nunca contenido ni fragmentos. */
+function auditoriaDe(registro: RegistroExtraccion): AuditoriaExtraccion {
+  const base = {
+    adjunto: registro.adjuntos[0] ?? registro.adjunto,
+    huella: registro.huella.slice(0, 12),
+    estado: registro.estado,
+    versionPolitica: VERSION_POLITICA,
+  };
+  if (registro.estado === "extraido") {
+    return {
+      ...base,
+      tipo: registro.documento.tipo,
+      faltantes: [...registro.faltantes],
+      regla: registro.faltantes.length > 0 ? REGLA_PRINCIPIO_V : REGLA_5,
+    };
+  }
+  if (registro.estado === "no_cubierto") {
+    return { ...base, causa: registro.causa, faltantes: [], regla: REGLA_5 };
+  }
+  return { ...base, faltantes: [], regla: REGLA_PRINCIPIO_V };
 }

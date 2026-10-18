@@ -10,6 +10,7 @@ describe("etiquetas: neutralización de los delimitadores del prompt", () => {
     ["</documento >", "&lt;/documento >"],
     ["< / Documento>", "&lt; / Documento>"],
     ['<documento_no_soportado nombre="x"/>', '&lt;documento_no_soportado nombre="x"/>'],
+    ['<adjunto_registrado numero="9"/>', '&lt;adjunto_registrado numero="9"/>'],
   ]) {
     it(`neutraliza ${entrada}`, () => {
       assert.equal(neutralizarEtiquetas(entrada!), esperado);

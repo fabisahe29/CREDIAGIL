@@ -13,6 +13,7 @@ import {
   fallo,
   type Respuesta,
 } from "../compartido/errores.ts";
+import { esquemaRegistroExtraccion } from "../compartido/extraccion.ts";
 import { registrar } from "../compartido/logs.ts";
 import { MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
 import {
@@ -41,6 +42,16 @@ const ENTRADAS = {
     })
     .strict(),
   consultar_identidad: z.object({ correlationId }).strict(),
+  registrar_extraccion: z
+    .object({
+      adjunto: z.unknown(),
+      nombre: z.unknown(),
+      contenido: z.unknown(),
+      resultado: z.unknown(),
+      correlationId,
+    })
+    .strict(),
+  consultar_extracciones: z.object({ correlationId }).strict(),
 } as const;
 
 type NombreHerramienta = keyof typeof ENTRADAS;
@@ -217,6 +228,71 @@ export function crearServidor(core: Core): McpServer {
         : validacion.respuesta;
       registrarHerramienta("consultar_identidad", argumentos, respuesta, {
         verificada: respuesta.ok ? respuesta.datos.identidad.verificada : null,
+      });
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "registrar_extraccion",
+    {
+      title: "Registrar extracción",
+      description:
+        "Registra el resultado de extraer un documento de soporte, con la procedencia de cada dato. Exige la identidad verificada, revalida cada fragmento contra el contenido y es idempotente por la huella del contenido; no guarda el contenido.",
+      inputSchema: z.looseObject({
+        adjunto: anunciado(
+          "Obligatorio. Número de adjunto del documento en la conversación (≥ 1).",
+        ),
+        nombre: anunciado("Obligatorio. Nombre del documento (1 a 255 caracteres)."),
+        contenido: anunciado(
+          "Obligatorio. Texto del documento, solo para revalidar; no se guarda ni va a los logs.",
+        ),
+        resultado: anunciado(
+          "Obligatorio. Resultado de la extracción: extraido, no_cubierto o no_extraible.",
+        ),
+        correlationId: CORRELATION_ID_ANUNCIADO,
+      }),
+      outputSchema: salida({ extraccion: esquemaRegistroExtraccion }),
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("registrar_extraccion", argumentos);
+      if (!validacion.ok) {
+        registrarHerramienta("registrar_extraccion", argumentos, validacion.respuesta);
+        return aResultadoMcp(validacion.respuesta);
+      }
+      const { respuesta, auditoria } = core.registrarExtraccion(validacion.entrada);
+      // Solo metadatos: nunca el contenido, los valores ni los fragmentos (FR-017).
+      registrarHerramienta("registrar_extraccion", argumentos, respuesta, {
+        adjunto: typeof validacion.entrada.adjunto === "number" ? validacion.entrada.adjunto : null,
+        estado: respuesta.ok ? respuesta.datos.extraccion.estado : null,
+      });
+      if (auditoria !== null) {
+        registrar("auditoria_extraccion", {
+          correlationId: validacion.entrada.correlationId,
+          ...auditoria,
+        });
+      }
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "consultar_extracciones",
+    {
+      title: "Consultar extracciones",
+      description:
+        "Devuelve las extracciones de documentos registradas en la conversación, ordenadas por adjunto. Solo lectura.",
+      inputSchema: z.looseObject({ correlationId: CORRELATION_ID_ANUNCIADO }),
+      outputSchema: salida({ extracciones: z.array(esquemaRegistroExtraccion) }),
+      annotations: { readOnlyHint: true },
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("consultar_extracciones", argumentos);
+      const respuesta = validacion.ok
+        ? core.consultarExtracciones(validacion.entrada.correlationId)
+        : validacion.respuesta;
+      registrarHerramienta("consultar_extracciones", argumentos, respuesta, {
+        extracciones: respuesta.ok ? respuesta.datos.extracciones.length : null,
       });
       return aResultadoMcp(respuesta);
     },

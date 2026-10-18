@@ -16,8 +16,12 @@ export const TRABAJANDO = "Agente · trabajando…";
 export const formatearSolicitante = (texto: string, color: boolean) =>
   `${pintar("bold", "Tú:", color)} ${texto}`;
 
-export const formatearAdjunto = (nombre: string, detalle: string, color: boolean) =>
-  `${pintar("bold", "Tú · adjunto", color)} ${nombre} (${detalle})`;
+export const formatearAdjunto = (
+  adjunto: number,
+  nombre: string,
+  detalle: string,
+  color: boolean,
+) => `${pintar("bold", "Tú · adjunto", color)} ${adjunto} · ${nombre} (${detalle})`;
 
 export const formatearAgente = (texto: string, color: boolean) =>
   `${pintar(["bold", "cyan"], "Agente:", color)} ${texto}`;

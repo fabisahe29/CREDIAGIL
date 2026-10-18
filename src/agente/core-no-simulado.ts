@@ -13,4 +13,6 @@ export const CORE_NO_SIMULADO: Omit<ClienteCore, "consultarSolicitud" | "cerrar"
   buscarSolicitante: () => noSimulado("buscarSolicitante"),
   verificarIdentidad: () => noSimulado("verificarIdentidad"),
   consultarIdentidad: () => noSimulado("consultarIdentidad"),
+  registrarExtraccion: () => noSimulado("registrarExtraccion"),
+  consultarExtracciones: () => noSimulado("consultarExtracciones"),
 };

@@ -32,8 +32,8 @@ describe("presentación: mensajes (US1)", () => {
 
   it("muestra el adjunto con su detalle", () => {
     assert.equal(
-      formatearAdjunto("certificado.md", "812 bytes", false),
-      "Tú · adjunto certificado.md (812 bytes)",
+      formatearAdjunto(2, "certificado.md", "812 bytes", false),
+      "Tú · adjunto 2 · certificado.md (812 bytes)",
     );
   });
 

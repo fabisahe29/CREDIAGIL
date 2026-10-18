@@ -1,0 +1,13 @@
+{
+  "nombre": "extraccion-extractos",
+  "descripcion": "Extracción (#10): tres extractos consistentes y una consulta posterior de lo extraído",
+  "pasos": [
+    { "mensaje": "Hola, quiero pedir un crédito" },
+    { "mensaje": "Mi número de documento es 0001234567" },
+    { "mensaje": "La fecha de expedición de mi documento es 2012-05-14" },
+    { "adjuntar": "extracto-2026-07.md" },
+    { "adjuntar": "extracto-2026-08.md" },
+    { "adjuntar": "extracto-2026-09.md" },
+    { "mensaje": "¿Qué datos tienes de mis extractos?" }
+  ]
+}

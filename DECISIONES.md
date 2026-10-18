@@ -4,6 +4,76 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-17 · Extracción estructurada de documentos con subagente
+
+**Issue**: [#10 — Extracción estructurada de documentos con subagente](https://github.com/fabisahe29/CREDIAGIL/issues/10)
+
+**Detalle**: [specs/008-extraccion-documentos/research.md](specs/008-extraccion-documentos/research.md), decisiones R1 a R11
+
+### Decisión 1: el subagente es un `query()` aparte que lanza el código
+
+El manejador de `extraer_documento` lanza una consulta propia por intento, sin herramientas y con salida estructurada. Recibe solo el documento, lo que se espera de él y, al reintentar, el error del intento anterior. Hace hasta 3 intentos.
+
+**Motivo**: el contexto explícito queda garantizado por construcción, y el código valida el resultado antes de que el modelo principal lo use (Principio III).
+
+**Alternativas descartadas**: subagentes del SDK con la herramienta `Task` (el modelo redactaría el contexto y vería el resultado sin validar); que el modelo principal extraiga los datos; llamar directo a la API de Messages (otra dependencia).
+
+### Decisión 2: los documentos se numeran y la herramienta recibe solo el número
+
+El chat numera cada `/adjuntar` y cada `/pegar` de la conversación y pasa los documentos a `conversar`. El código toma el texto exacto. Un bloque pegado se llama «texto pegado» y sigue llegando como mensaje del solicitante, con una marca final `<adjunto_registrado …/>` que compone el chat; así un mensaje pegado que pide hablar con una persona conserva su valor (Regla 4).
+
+**Motivo**: la procedencia se comprueba contra el documento real, y el número lo hace único aunque se repita el nombre.
+
+**Alternativas descartadas**: que el modelo pase el contenido como argumento (podría alterarlo); dejar `/pegar` sin registrar (no se podrían extraer documentos pegados, que la constitución admite); enviar `/pegar` como bloque `<documento>` (el prompt lo trataría como dato y la Regla 4 dejaría de valer en un mensaje pegado; se descartó al implementar).
+
+### Decisión 3: el código comprueba fragmento, monto y moneda
+
+Cada dato trae la cita literal de la que salió. Un módulo compartido comprueba que la cita está en el documento y que los dígitos del monto están en la cita. La moneda la deduce la política a partir de la cita.
+
+**Motivo**: impide datos inventados, en especial el salario, que decide las reglas 2 y 3.
+
+**Alternativa descartada**: confiar en la salida estructurada del SDK, que solo garantiza la forma.
+
+### Decisión 4: la Regla 5 y los límites de documentos van en la política
+
+`evaluarDocumento` decide extraído, no cubierto (moneda extranjera o tipo no soportado) o no extraíble. Los tipos soportados, la moneda y el límite de intentos viven en `src/politica/politica.ts`.
+
+**Motivo**: una sola fuente para el agente y el core.
+
+**Alternativa descartada**: que el subagente responda "caso no cubierto" (la Regla 5 la decidiría el modelo).
+
+### Decisión 5: el resultado se registra en el core, que revalida
+
+`registrar_extraccion` exige identidad verificada, revalida contra el contenido y es idempotente por la huella del contenido. No guarda el contenido. `consultar_extracciones` lo lee en turnos posteriores.
+
+**Motivo**: lo que devuelve una herramienta no sobrevive entre turnos, y el #11 y el #13 necesitan que el core sepa qué datos salieron de documentos (Principio IV).
+
+**Alternativas descartadas**: guardarlo en el estado del chat (el core no podría defender la Regla 3); ejecutar el subagente dentro del core (el core simula el sistema del banco, no razona).
+
+### Decisión 6: un dato faltante se pide siempre como documento
+
+El código emite un `solicitud_de_dato` por documento con los campos que faltan y pide un documento que los traiga. Tres intentos inválidos o valores en conflicto escalan con el motivo nuevo `documento_no_extraible`.
+
+**Motivo**: el ingreso verificado no puede salir de lo declarado (Regla 3; aclaración Q2), y los eventos los decide el código.
+
+**Alternativa descartada**: dejar que el modelo pida los faltantes (no sería determinista y podría aceptar un salario escrito).
+
+### Decisión 7: la Regla 5 va antes que la Regla 1 y no depende de lo que cite el modelo
+
+Las revisiones de `0aa8c2a` bloquearon el PR por tres razones: «pesos» suelto se tomaba como COP, la moneda solo se miraba en el fragmento que citaba el modelo, y sin identidad se bloqueaba por la Regla 1 antes de evaluar la Regla 5. Ahora:
+- COP solo se reconoce con expresiones inequívocas, y los pesos de otros países son moneda extranjera.
+- La moneda extranjera se busca en todo el documento, en el agente y en el core.
+- Al cerrar cada turno, el código revisa formato y moneda de los documentos sin modelo.
+- Al intentar extraer sin identidad, un clasificador que solo devuelve el tipo decide la Regla 5 antes de bloquear por la Regla 1.
+- Cada valor se contrasta con su cita: textos, fechas y el sentido de los movimientos, y «hoy» es el día en Bogotá.
+- Tras la segunda revisión (`5d28165`): al cerrar el turno se clasifica el tipo de cada documento nuevo, con reintentos y escalamiento si el clasificador no responde; las señales siguen el orden 4 → 5 → 1; los símbolos de moneda pegados a la cifra se reconocen, y un monto no puede salir de una fecha.
+
+**Motivo**: la Regla 5 es determinista y su orden es obligatorio (Principios I y III).
+
+**Alternativas descartadas**: clasificar cada documento con el modelo al llegar, antes de la Regla 4 (un mensaje pegado que pide una persona escalaría por la Regla 5); dejar la detección al prompt.
+
+---
+
 ## 2026-10-17 · Identificación y verificación del solicitante
 
 **Issue**: [#9 — Identificación y verificación del solicitante](https://github.com/fabisahe29/CREDIAGIL/issues/9)

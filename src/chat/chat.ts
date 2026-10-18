@@ -10,7 +10,15 @@ import { validarEvento } from "../compartido/eventos.ts";
 import { registrar } from "../compartido/logs.ts";
 import { cargarCaso } from "./casos.ts";
 import { interpretarLinea, TEXTO_AYUDA } from "./comandos.ts";
-import { componerMensaje, detalleAdjunto, leerDocumento, metadatosParaLog } from "./documentos.ts";
+import {
+  NOMBRE_TEXTO_PEGADO,
+  clasificarPegado,
+  componerMensaje,
+  componerPegado,
+  detalleAdjunto,
+  leerDocumento,
+  metadatosParaLog,
+} from "./documentos.ts";
 import {
   TRABAJANDO,
   formatearAdjunto,
@@ -26,6 +34,7 @@ import {
   aplicarEventos,
   estaCerrada,
   nuevaConversacion,
+  registrarDocumento,
   registrarTurno,
   type EventoMostrado,
 } from "./sesion.ts";
@@ -167,6 +176,8 @@ export function iniciarChat({
         historial: conv.historial,
         busquedasAmbiguas: conv.busquedasAmbiguas,
         desambiguada: conv.desambiguada,
+        documentos: conv.documentos,
+        documentosRevisados: conv.documentosRevisados,
         ...(demo
           ? { alUsarHerramienta: (info) => escribir(formatearHerramienta(info, color)) }
           : {}),
@@ -191,6 +202,7 @@ export function iniciarChat({
       ),
       busquedasAmbiguas: resultado.busquedasAmbiguas,
       desambiguada: resultado.desambiguada,
+      documentosRevisados: resultado.documentosRevisados,
     };
     escribir(formatearAgente(resultado.respuesta, color));
     const mostrados = (resultado.eventos as unknown[]).map(mostrar);
@@ -222,12 +234,46 @@ export function iniciarChat({
       escribir(`El archivo ${documento.nombre} está vacío; no se envió.`);
       return;
     }
-    escribir(formatearAdjunto(documento.nombre, detalleAdjunto(documento), color));
+    // El número se asigna antes del turno: el documento ya viaja en los de la conversación.
+    const registro = registrarDocumento(
+      conv,
+      documento.tipo === "soportado"
+        ? { nombre: documento.nombre, soportado: true, contenido: documento.contenido }
+        : { nombre: documento.nombre, soportado: false },
+    );
+    conv = registro.conversacion;
+    const adjunto = registro.documento.adjunto;
+    escribir(formatearAdjunto(adjunto, documento.nombre, detalleAdjunto(documento), color));
     registrar("documento_adjunto", {
       correlationId: conv.correlationId,
+      adjunto,
       ...metadatosParaLog(documento),
     });
-    await turno(componerMensaje(documento));
+    await turno(componerMensaje(documento, adjunto));
+  }
+
+  /**
+   * Un texto pegado sigue siendo un mensaje del solicitante y, además, queda registrado como un
+   * adjunto numerado: el agente puede pedir su extracción por el número de la marca (#10, R2).
+   */
+  async function enviarPegado(texto: string): Promise<void> {
+    const motivo = clasificarPegado(texto);
+    const registro = registrarDocumento(
+      conv,
+      motivo === null
+        ? { nombre: NOMBRE_TEXTO_PEGADO, soportado: true, contenido: texto }
+        : { nombre: NOMBRE_TEXTO_PEGADO, soportado: false },
+    );
+    conv = registro.conversacion;
+    registrar("documento_pegado", {
+      correlationId: conv.correlationId,
+      adjunto: registro.documento.adjunto,
+      caracteres: texto.length,
+      soportado: motivo === null,
+      ...(motivo !== null ? { motivo } : {}),
+    });
+    escribir(formatearSolicitante(texto, color));
+    await turno(componerPegado(texto, registro.documento.adjunto, motivo));
   }
 
   async function reproducirCaso(ruta: string): Promise<void> {
@@ -274,7 +320,7 @@ export function iniciarChat({
         pedir();
         return;
       }
-      ejecutar(() => enviarMensaje(texto));
+      ejecutar(() => enviarPegado(texto));
       return;
     }
 

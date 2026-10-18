@@ -7,6 +7,7 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import {
   aResultadoMcp,
+  errorValidacion,
   exito,
   fallo,
   transitorioAgotado,
@@ -14,10 +15,33 @@ import {
   type Respuesta,
 } from "../compartido/errores.ts";
 import { validarEvento, type DatosEvento, type EventoNegocio } from "../compartido/eventos.ts";
+import {
+  construirResultado,
+  huella,
+  NOMBRE_TEXTO_PEGADO,
+  type DocumentoConContenido,
+  type ErrorExtraccion,
+  type RegistroExtraccion,
+  type ResultadoExtraccion,
+} from "../compartido/extraccion.ts";
 import { registrar } from "../compartido/logs.ts";
+import type { DocumentoConversacion } from "./agente.ts";
 import type { ClienteCore, CriterioBusqueda } from "./cliente-core.ts";
+import {
+  crearClasificador,
+  crearSubagente,
+  extraerConIntentos,
+  type ClasificarDocumento,
+  type EjecutarSubagente,
+} from "./extraccion.ts";
 import { conReintentos } from "./reintentos.ts";
-import { MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
+import { MAX_INTENTOS_EXTRACCION, MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
+import {
+  evaluarDocumento,
+  evaluarRegla5Previa,
+  REGLA_5,
+  REGLA_PRINCIPIO_V,
+} from "../politica/documentos.ts";
 
 export const CLAVE_SERVIDOR = "originacion";
 
@@ -30,7 +54,8 @@ export interface SenalEscalamiento {
     | "identidad_ambigua"
     | "identidad_no_verificable"
     | "pide_persona"
-    | "caso_no_cubierto";
+    | "caso_no_cubierto"
+    | "documento_no_extraible";
   regla: string;
   resultado: "escalada";
   correlationId: string;
@@ -42,6 +67,8 @@ export interface SenalEscalamiento {
   coincidencias?: number;
   /** Causa de un caso no cubierto (motivo caso_no_cubierto). */
   causa?: CausaNoCubierto;
+  /** Documento que llevó al escalamiento (#10: no cubierto o no extraíble). */
+  adjunto?: number;
 }
 
 export const CAUSAS_NO_CUBIERTO = ["moneda_extranjera", "documento_no_soportado", "otro"] as const;
@@ -90,6 +117,36 @@ export const REGLA_AMBIGUA = "Regla 1 · coincidencias sin desambiguar";
  * en la llamada, hace que el resultado no dependa del orden en que el modelo llama a las
  * herramientas: una búsqueda por documento en el mismo turno desambigua (revisión de dea0951).
  */
+export const REGLA_5_DOCUMENTOS = "revision_documentos";
+
+/** Espera base entre intentos del clasificador previo, con la variación de los reintentos del #7. */
+const ESPERA_CLASIFICACION_MS = 500;
+const VARIACION_ESPERA = 0.2;
+
+/**
+ * Al cerrar el turno, la Regla 5 sobre los documentos de la conversación, sin modelo: un archivo no
+ * soportado o una moneda extranjera en cualquier parte escalan, aunque el modelo no haya hecho nada
+ * (revisión de 0aa8c2a). Va después de la Regla 4, que el modelo resuelve durante el turno, y antes
+ * que el cierre por identidad (orden 4 → 5 → 1). La primera señal prevalece.
+ */
+export function cerrarTurnoDocumentos(
+  estado: EstadoConversacion,
+  documentos: readonly DocumentoConversacion[],
+): void {
+  for (const documento of documentos) {
+    const decision = evaluarRegla5Previa(documento);
+    if (decision === null) continue;
+    dejarSenal(estado, {
+      motivo: "caso_no_cubierto",
+      regla: REGLA_NO_CUBIERTO,
+      herramienta: REGLA_5_DOCUMENTOS,
+      causa: decision.causa ?? "documento_no_soportado",
+      adjunto: documento.adjunto,
+    });
+    return;
+  }
+}
+
 export function cerrarTurnoIdentidad(estado: EstadoConversacion): void {
   if (estado.busquedasAmbiguas < 2) return;
   dejarSenal(estado, {
@@ -132,6 +189,14 @@ export interface OpcionesAdaptador {
   alUsarHerramienta?: (info: InfoHerramienta) => void;
   /** Genera la clave de idempotencia de cada intento de verificación; inyectable en las pruebas. */
   generarIdIntento?: () => string;
+  /** Documentos de la conversación, numerados por el chat (#10, R2). */
+  documentos?: readonly DocumentoConversacion[];
+  /** Subagente de extracción; por defecto el real (#10, R1). */
+  ejecutarSubagente?: EjecutarSubagente;
+  /** Clasificador previo del tipo de documento, para la Regla 5 antes de la identidad. */
+  clasificarDocumento?: ClasificarDocumento;
+  /** "Hoy" para validar fechas extraídas; inyectable en las pruebas. */
+  hoy?: () => Date;
 }
 
 const esquemaConsultar = {
@@ -191,26 +256,96 @@ const DESCRIPCION_SOLICITAR_ANALISTA =
   "Pasa el caso a un analista de crédito. Úsala antes que cualquier otra herramienta si el solicitante pide hablar con una persona, o si su caso no está cubierto por la política (ingresos en moneda extranjera, documento no soportado). No pide ni envía datos del solicitante.";
 
 export const REGLA_PIDE_PERSONA = "Regla 4 · el solicitante pide hablar con una persona";
-export const REGLA_NO_CUBIERTO = "Regla 5 · caso no cubierto por la política";
+export const REGLA_NO_CUBIERTO = REGLA_5;
+export const REGLA_NO_EXTRAIBLE = `${REGLA_PRINCIPIO_V} · documento no extraíble`;
+
+const esquemaExtraer = {
+  adjunto: z
+    .number()
+    .int()
+    .min(1)
+    .describe(
+      'Número de adjunto del documento: el atributo adjunto de <documento adjunto="N"> o el numero de <adjunto_registrado numero="N"/>.',
+    ),
+};
+
+const DESCRIPCION_EXTRAER =
+  "Extrae los datos de un certificado laboral o de un extracto bancario que entregó el solicitante, por su número de adjunto. Devuelve cada dato con el fragmento del documento del que salió. Si falta un dato, no lo pidas tú: la herramienta ya lo pidió. Exige la identidad verificada.";
+
+const DESCRIPCION_CONSULTAR_EXTRACCIONES =
+  "Devuelve los datos ya extraídos de los documentos de esta conversación, con su procedencia. Úsala para recordar datos de turnos anteriores; no vuelve a extraer.";
+
+/** Cómo se nombra cada campo al pedírselo al solicitante. */
+const NOMBRES_CAMPO: Readonly<Record<string, string>> = {
+  empleador: "el empleador",
+  cargo: "el cargo",
+  fechaIngreso: "la fecha de ingreso",
+  salario: "el salario",
+  moneda: "la moneda",
+  titular: "el titular",
+  periodo: "el periodo",
+};
+
+const enumerar = (elementos: readonly string[]) =>
+  elementos.length <= 1
+    ? elementos.join("")
+    : `${elementos.slice(0, -1).join(", ")} y ${elementos.at(-1)}`;
+
+const describirErrores = (errores: readonly ErrorExtraccion[]) =>
+  errores.map((e) => `${e.campo}: ${e.motivo}`).join("; ");
+
+/** El registro del core sin sus campos propios: el resultado para volver a registrarlo. */
+function resultadoDeRegistro(registro: RegistroExtraccion): ResultadoExtraccion {
+  const { adjuntos: _adjuntos, registradoEn: _registradoEn, ...resultado } = registro;
+  return resultado;
+}
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
+/** Regla de negocio de cada motivo de escalamiento; los técnicos no tienen. */
+export const ORDEN_REGLA: Partial<Record<SenalEscalamiento["motivo"], 1 | 4 | 5>> = {
+  pide_persona: 4,
+  caso_no_cubierto: 5,
+  identidad_ambigua: 1,
+  identidad_no_verificable: 1,
+};
+
 /**
- * Deja la señal de escalamiento si no hay otra: la primera señal prevalece. La usan el adaptador y
- * el control de identidad; el escalamiento lo decide el código, nunca el modelo.
+ * Orden de evaluación 4 → 5 → 1 (constitución, Principio I): una señal de la Regla 4 reemplaza a una
+ * de la 5 o de la 1, y una de la 5 a una de la 1 (revisión de 5d28165). Una señal técnica ni
+ * reemplaza ni se reemplaza: la primera prevalece.
+ */
+function prevalece(
+  nueva: SenalEscalamiento["motivo"],
+  actual: SenalEscalamiento["motivo"],
+): boolean {
+  const orden = [4, 5, 1];
+  const n = ORDEN_REGLA[nueva];
+  const a = ORDEN_REGLA[actual];
+  return n !== undefined && a !== undefined && orden.indexOf(n) < orden.indexOf(a);
+}
+
+/**
+ * Deja la señal de escalamiento. Si ya hay una, solo la reemplaza una de una regla anterior en el
+ * orden 4 → 5 → 1 (`prevalece`); si no, la primera prevalece. La usan el adaptador y el control de
+ * identidad; el escalamiento lo decide el código, nunca el modelo.
  */
 export function dejarSenal(
   estado: EstadoConversacion,
   campos: Pick<SenalEscalamiento, "motivo" | "regla" | "herramienta"> & Partial<SenalEscalamiento>,
 ): void {
-  if (estado.escalamiento !== null) return;
+  const anterior = estado.escalamiento;
+  if (anterior !== null && !prevalece(campos.motivo, anterior.motivo)) return;
   estado.escalamiento = {
     resultado: "escalada",
     correlationId: estado.correlationId,
     ts: new Date().toISOString(),
     ...campos,
   };
-  registrar("escalamiento", { ...estado.escalamiento });
+  registrar("escalamiento", {
+    ...estado.escalamiento,
+    ...(anterior !== null ? { reemplaza: anterior.motivo } : {}),
+  });
 }
 
 export function crearAdaptador({
@@ -220,6 +355,10 @@ export function crearAdaptador({
   azar = Math.random,
   alUsarHerramienta,
   generarIdIntento = randomUUID,
+  documentos = [],
+  ejecutarSubagente = crearSubagente(),
+  clasificarDocumento = crearClasificador(),
+  hoy = () => new Date(),
 }: OpcionesAdaptador) {
   const senal = (campos: Parameters<typeof dejarSenal>[1]) => dejarSenal(estado, campos);
   /**
@@ -382,11 +521,336 @@ export function crearAdaptador({
     return aResultadoMcp(exito({ escalada: true }));
   }
 
+  /** Regla 5: el caso no está cubierto; escala el código, nunca el modelo. */
+  function escalarRegla5(adjunto: number, causa: CausaNoCubierto, herramienta: string): void {
+    senal({ motivo: "caso_no_cubierto", regla: REGLA_NO_CUBIERTO, herramienta, causa, adjunto });
+  }
+
+  /** Documentos que ya pasaron por la Regla 5 en este turno: al cerrar el turno no se repiten. */
+  const revisadosEnTurno = new Set<number>();
+
+  /**
+   * El tipo del documento con el clasificador, con reintentos acotados y espera creciente
+   * (Principio VI). `null` si no respondió en ningún intento.
+   */
+  async function clasificarConReintentos(documento: DocumentoConContenido): Promise<string | null> {
+    for (let intento = 1; intento <= MAX_INTENTOS_EXTRACCION; intento++) {
+      const respuesta = await clasificarDocumento({
+        documento,
+        correlationId: estado.correlationId,
+      });
+      registrar("clasificacion_previa", {
+        correlationId: estado.correlationId,
+        adjunto: documento.adjunto,
+        intento,
+        resultado: respuesta.ok ? respuesta.tipo : respuesta.causa,
+      });
+      if (respuesta.ok) return respuesta.tipo;
+      if (intento < MAX_INTENTOS_EXTRACCION) {
+        await dormir(ESPERA_CLASIFICACION_MS * intento * (1 + (azar() * 2 - 1) * VARIACION_ESPERA));
+      }
+    }
+    return null;
+  }
+
+  /**
+   * La Regla 5 sobre un documento, decidida por código: primero la revisión sin modelo (formato y
+   * moneda) y luego el tipo con el clasificador, que no extrae datos personales. Un texto pegado que
+   * no es un documento es conversación, no un caso no cubierto. Si el clasificador no responde tras
+   * los reintentos, escala por falla transitoria: nunca se decide sin respuesta (revisión de 5d28165).
+   * Devuelve `true` si escaló.
+   */
+  async function aplicarRegla5(
+    documento: DocumentoConversacion,
+    herramienta: string,
+  ): Promise<boolean> {
+    revisadosEnTurno.add(documento.adjunto);
+    const previa = evaluarRegla5Previa(documento);
+    if (previa !== null || !documento.soportado) {
+      escalarRegla5(documento.adjunto, previa?.causa ?? "documento_no_soportado", herramienta);
+      return true;
+    }
+    const tipo = await clasificarConReintentos({
+      adjunto: documento.adjunto,
+      nombre: documento.nombre,
+      contenido: documento.contenido,
+    });
+    if (tipo === null) {
+      senal({
+        motivo: "falla_transitoria_persistente",
+        regla: "constitución, Principio VI · reintentos agotados",
+        herramienta: "clasificar_documento",
+        intentos: MAX_INTENTOS_EXTRACCION,
+        ultimoError: "el clasificador no respondió",
+        adjunto: documento.adjunto,
+      });
+      return true;
+    }
+    if (tipo === "no_es_documento" && documento.nombre === NOMBRE_TEXTO_PEGADO) return false;
+    const decision = evaluarDocumento({
+      tipo,
+      fragmentoMoneda: null,
+      monedaExtranjeraEnContenido: null,
+      conflictos: [],
+      faltantes: [],
+      tieneMontos: false,
+    });
+    if (decision.resultado !== "no_cubierto") return false;
+    escalarRegla5(documento.adjunto, decision.causa ?? "documento_no_soportado", herramienta);
+    return true;
+  }
+
+  /**
+   * Regla 5 antes que la Regla 1 (orden 4 → 5 → 1; revisión de 0aa8c2a). Si se intenta extraer sin
+   * identidad, el control de identidad llama aquí antes de bloquear. Devuelve `true` si escaló. No
+   * registra ni devuelve ningún dato del documento.
+   */
+  async function evaluarRegla5AntesDeIdentidad(adjunto: unknown): Promise<boolean> {
+    const documento = documentos.find((d) => d.adjunto === adjunto);
+    if (documento === undefined) return false;
+    return aplicarRegla5(documento, "regla_5_previa");
+  }
+
+  /**
+   * Al cerrar el turno, la Regla 5 sobre los documentos por código (revisión de 5d28165): la
+   * revisión sin modelo de todos y el tipo de los nuevos (`adjunto > desde`) que no se revisaron en
+   * el turno. Va después del turno del modelo, que resuelve la Regla 4, y su señal reemplaza a una de
+   * la Regla 1 del mismo turno (orden 4 → 5 → 1). Devuelve cuántos documentos quedan revisados.
+   */
+  async function revisarRegla5AlCerrarTurno(desde: number): Promise<number> {
+    const actual = estado.escalamiento;
+    if (actual !== null && ORDEN_REGLA[actual.motivo] !== 1) return documentos.length;
+    cerrarTurnoDocumentos(estado, documentos);
+    if (estado.escalamiento !== null && estado.escalamiento !== actual) return documentos.length;
+    for (const documento of documentos) {
+      if (documento.adjunto <= desde || revisadosEnTurno.has(documento.adjunto)) continue;
+      if (await aplicarRegla5(documento, REGLA_5_DOCUMENTOS)) break;
+    }
+    return documentos.length;
+  }
+  /** Log de una extracción (R10): metadatos, nunca el contenido ni los fragmentos (FR-017). */
+  function registrarExtraccionLog(campos: Record<string, unknown>): void {
+    registrar("extraccion", { correlationId: estado.correlationId, ...campos });
+  }
+
+  /**
+   * Faltantes: un solo evento por documento, que pide un documento nuevo, nunca que el solicitante
+   * escriba el dato (aclaración Q2 del #10; Regla 3). Lo emite el código, no el modelo.
+   */
+  function pedirFaltantes(adjunto: number, nombre: string, faltantes: readonly string[]): void {
+    const lista = enumerar(faltantes.map((campo) => NOMBRES_CAMPO[campo] ?? campo));
+    emitirEvento(estado, {
+      tipo: "solicitud_de_dato",
+      descripcion: `Al documento que enviaste (adjunto ${adjunto} · ${nombre}) le falta ${lista}. Envíame un documento que lo indique, por ejemplo un certificado laboral o un extracto bancario actualizado.`,
+      motivo: "dato_faltante_en_documento",
+      dato: faltantes.join(", "),
+      regla: REGLA_PRINCIPIO_V,
+      valores: { adjunto, documento: nombre, faltantes: faltantes.join(", ") },
+    });
+  }
+
+  /** Efectos de un resultado registrado, decididos por código (R7). */
+  function aplicarEfectos(registro: RegistroExtraccion, adjunto: number, nombre: string): void {
+    if (registro.estado === "extraido") {
+      if (registro.faltantes.length > 0) pedirFaltantes(adjunto, nombre, registro.faltantes);
+    } else if (registro.estado === "no_cubierto") {
+      senal({
+        motivo: "caso_no_cubierto",
+        regla: REGLA_NO_CUBIERTO,
+        herramienta: "extraer_documento",
+        causa: registro.causa,
+        adjunto,
+      });
+    } else {
+      senal({
+        motivo: "documento_no_extraible",
+        regla: REGLA_NO_EXTRAIBLE,
+        herramienta: "extraer_documento",
+        adjunto,
+        ultimoError:
+          registro.conflictos.length > 0
+            ? `conflictos: ${registro.conflictos.join(", ")}`
+            : describirErrores(registro.ultimoError),
+      });
+    }
+  }
+
+  /** Extrae con el subagente, o reutiliza una extracción previa del mismo contenido (FR-018). */
+  async function obtenerResultado(
+    documento: { adjunto: number; nombre: string; contenido: string },
+    previa: RegistroExtraccion | undefined,
+  ): Promise<{ resultado: ResultadoExtraccion } | { sinRespuesta: string; intentos: number }> {
+    if (previa !== undefined) return { resultado: resultadoDeRegistro(previa) };
+    const intentos = await extraerConIntentos({
+      documento,
+      ejecutarSubagente,
+      correlationId: estado.correlationId,
+      hoy: hoy(),
+      alIntentar: (info) => {
+        registrar("intento_extraccion", {
+          correlationId: estado.correlationId,
+          adjunto: documento.adjunto,
+          ...info,
+        });
+        avisarObservador({
+          herramienta: "extraer_documento",
+          intento: info.numero,
+          resultado: info.resultado,
+        });
+      },
+    });
+    if (intentos.tipo === "sin_respuesta") {
+      return { sinRespuesta: intentos.causa, intentos: intentos.intentos };
+    }
+    if (intentos.tipo === "valida") {
+      return { resultado: construirResultado(intentos.salida, documento, intentos.intentos) };
+    }
+    return {
+      resultado: {
+        estado: "no_extraible",
+        adjunto: documento.adjunto,
+        nombre: documento.nombre,
+        huella: huella(documento.contenido),
+        intentos: intentos.intentos,
+        conflictos: [],
+        ultimoError: intentos.errores,
+      },
+    };
+  }
+
+  /**
+   * Extracción de un documento por su número (R7). El modelo solo da el número: el texto sale de los
+   * documentos de la conversación. La Regla 1 la aplica antes el control de identidad, y el core
+   * otra vez al registrar.
+   */
+  async function extraer({ adjunto }: { adjunto: number }) {
+    const documento = documentos.find((d) => d.adjunto === adjunto);
+    if (documento !== undefined) revisadosEnTurno.add(adjunto);
+    if (documento === undefined) {
+      return aResultadoMcp(
+        fallo(
+          errorValidacion(
+            "adjunto_inexistente",
+            `No hay un documento con el número de adjunto ${adjunto} en la conversación.`,
+            "adjunto",
+          ),
+        ),
+      );
+    }
+    // Regla 5 sin modelo: un archivo no soportado o una moneda extranjera en cualquier parte del
+    // documento escalan antes de extraer nada (FR-016; revisión de 0aa8c2a).
+    const regla5 = evaluarRegla5Previa(documento);
+    if (regla5 !== null || !documento.soportado) {
+      const causa = regla5?.causa ?? "documento_no_soportado";
+      escalarRegla5(adjunto, causa, "extraer_documento");
+      registrarExtraccionLog({
+        adjunto,
+        nombre: documento.nombre,
+        estado: "no_cubierto",
+        causa,
+        intentos: 0,
+      });
+      return aResultadoMcp(exito({ escalada: true, causa }));
+    }
+
+    const conContenido = { adjunto, nombre: documento.nombre, contenido: documento.contenido };
+    const huellaDocumento = huella(documento.contenido);
+    const previas = await llamarConReintentos("consultar_extracciones", () =>
+      core.consultarExtracciones(estado.correlationId),
+    );
+    if (!previas.ok) return aResultadoMcp(previas);
+    const previa = previas.datos.extracciones.find((e) => e.huella === huellaDocumento);
+
+    const obtenido = await obtenerResultado(conContenido, previa);
+    if ("sinRespuesta" in obtenido) {
+      // Nunca se usa un resultado parcial: sin respuesta del subagente se escala (Principio VI).
+      senal({
+        motivo: "falla_transitoria_persistente",
+        regla: "constitución, Principio VI · reintentos agotados",
+        herramienta: "extraer_documento",
+        intentos: obtenido.intentos,
+        ultimoError: obtenido.sinRespuesta,
+        adjunto,
+      });
+      registrarExtraccionLog({
+        adjunto,
+        nombre: documento.nombre,
+        huella: huellaDocumento.slice(0, 12),
+        estado: "sin_respuesta",
+        intentos: obtenido.intentos,
+      });
+      return aResultadoMcp(fallo(transitorioAgotado()));
+    }
+
+    const registro = await llamarConReintentos("registrar_extraccion", () =>
+      core.registrarExtraccion(
+        { ...conContenido, resultado: obtenido.resultado },
+        estado.correlationId,
+      ),
+    );
+    if (!registro.ok) {
+      // El core no aceptó el resultado contra el documento: no se usa ningún dato (Principio V).
+      if (registro.error.codigo === "extraccion_invalida") {
+        senal({
+          motivo: "documento_no_extraible",
+          regla: REGLA_NO_EXTRAIBLE,
+          herramienta: "registrar_extraccion",
+          adjunto,
+          ultimoError: registro.error.campo ?? registro.error.codigo,
+        });
+      }
+      registrarExtraccionLog({
+        adjunto,
+        nombre: documento.nombre,
+        estado: "rechazada",
+        codigo: registro.error.codigo,
+      });
+      return aResultadoMcp(registro);
+    }
+
+    const guardado = registro.datos.extraccion;
+    aplicarEfectos(guardado, adjunto, documento.nombre);
+    registrarExtraccionLog({
+      adjunto,
+      nombre: documento.nombre,
+      huella: guardado.huella.slice(0, 12),
+      estado: guardado.estado,
+      ...(guardado.estado === "extraido" ? { tipo: guardado.documento.tipo } : {}),
+      ...(guardado.estado === "no_cubierto" ? { causa: guardado.causa } : {}),
+      intentos: guardado.intentos,
+      faltantes: guardado.estado === "extraido" ? guardado.faltantes : [],
+      errores:
+        guardado.estado === "no_extraible"
+          ? guardado.ultimoError.map((e) => `${e.campo}: ${e.motivo}`)
+          : [],
+      reutilizada: previa !== undefined,
+    });
+    // Solo un documento extraído devuelve datos al modelo; los demás ya escalaron.
+    return guardado.estado === "extraido"
+      ? aResultadoMcp(exito({ resultado: guardado }))
+      : aResultadoMcp(
+          exito({
+            escalada: true,
+            estado: guardado.estado,
+            ...(guardado.estado === "no_cubierto" ? { causa: guardado.causa } : {}),
+          }),
+        );
+  }
+
+  async function consultarExtracciones(_entrada: Record<string, never>) {
+    const respuesta = await llamarConReintentos("consultar_extracciones", () =>
+      core.consultarExtracciones(estado.correlationId),
+    );
+    return aResultadoMcp(respuesta);
+  }
+
   const herramientas = {
     consultar_solicitud: { esquema: esquemaConsultar, manejar: consultar },
     buscar_solicitante: { esquema: esquemaBuscar, manejar: buscar },
     verificar_identidad: { esquema: esquemaVerificar, manejar: verificar },
     solicitar_analista: { esquema: esquemaSolicitarAnalista, manejar: solicitarAnalista },
+    extraer_documento: { esquema: esquemaExtraer, manejar: extraer },
+    consultar_extracciones: { esquema: {}, manejar: consultarExtracciones },
   };
 
   const servidor = createSdkMcpServer({
@@ -418,8 +882,24 @@ export function crearAdaptador({
         esquemaSolicitarAnalista,
         (argumentos) => Promise.resolve(solicitarAnalista(argumentos)),
       ),
+      tool("extraer_documento", DESCRIPCION_EXTRAER, esquemaExtraer, (argumentos) =>
+        extraer(argumentos),
+      ),
+      tool(
+        "consultar_extracciones",
+        DESCRIPCION_CONSULTAR_EXTRACCIONES,
+        {},
+        () => consultarExtracciones({}),
+        { annotations: { readOnlyHint: true } },
+      ),
     ],
   });
 
-  return { servidor, herramientas, estado };
+  return {
+    servidor,
+    herramientas,
+    estado,
+    evaluarRegla5AntesDeIdentidad,
+    revisarRegla5AlCerrarTurno,
+  };
 }

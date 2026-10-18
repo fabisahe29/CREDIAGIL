@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { conversar, MODELO_POR_DEFECTO, type ContextoConsulta, type QueryFn } from "./agente.ts";
 import { errorNegocio, errorTransitorio, exito, fallo } from "../compartido/errores.ts";
 import type { ClienteCore } from "./cliente-core.ts";
-import { emitirEvento } from "./adaptador.ts";
+import { dejarSenal, emitirEvento, REGLA_NO_EXTRAIBLE } from "./adaptador.ts";
 import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
 
 const core: ClienteCore = {
@@ -798,8 +798,130 @@ describe("agente: identidad no verificable (#9, US3)", () => {
     const prompt = String(llamadas[0]!.options["systemPrompt"]);
     assert.match(
       prompt,
-      /Verifica la identidad con verificar_identidad y la fecha de expedición del documento\. No pidas ni uses documentos de soporte antes de verificar\. Si el dato no coincide, no reveles el correcto\./,
+      /Verifica la identidad con verificar_identidad y la fecha de expedición del documento\. Si el dato no coincide, no reveles el correcto\./,
     );
+  });
+});
+
+describe("agente: extracción de documentos (#10)", () => {
+  const DOCUMENTO = {
+    adjunto: 1,
+    nombre: "certificado.md",
+    soportado: true as const,
+    contenido: "Certificado ficticio",
+  };
+
+  it("pasa los documentos y el subagente al adaptador (US1)", async (t) => {
+    capturarLogs(t);
+    const entradas: unknown[] = [];
+    const coreExtraccion: ClienteCore = {
+      ...core,
+      async consultarExtracciones() {
+        return exito({ extracciones: [] });
+      },
+      async registrarExtraccion() {
+        return fallo(errorNegocio("identidad_no_verificada", "Sin identidad."));
+      },
+    };
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.extraer_documento.manejar({ adjunto: 1 });
+        return [resultado("success", "end_turn", "Listo")];
+      },
+    ]);
+    await conversar("Te envío mi certificado", {
+      ejecutarConsulta: fn,
+      core: coreExtraccion,
+      documentos: [DOCUMENTO],
+      ejecutarSubagente: async (entrada) => {
+        entradas.push(entrada.documento);
+        return { ok: false, causa: "tiempo_agotado", detalle: "x" };
+      },
+      ...sinEspera,
+    });
+    assert.deepEqual(entradas[0], {
+      adjunto: 1,
+      nombre: "certificado.md",
+      contenido: "Certificado ficticio",
+    });
+  });
+
+  it("el systemPrompt pide extraer por número de adjunto y no leer datos por cuenta propia (US1)", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.match(prompt, /llama a extraer_documento con su número de adjunto/);
+    assert.match(prompt, /No leas datos de los documentos por tu cuenta/);
+  });
+
+  it("un dato escrito por el solicitante no reemplaza a un documento y no se registra (US2)", async (t) => {
+    capturarLogs(t);
+    let registros = 0;
+    const coreContado: ClienteCore = {
+      ...core,
+      async registrarExtraccion() {
+        registros++;
+        return fallo(errorNegocio("no_simulado", "x"));
+      },
+    };
+    const { fn, llamadas } = consultaFalsa([
+      [resultado("success", "end_turn", "Necesito un documento con tu salario.")],
+    ]);
+    const r = await conversar("Gano 3.800.000 al mes", {
+      ejecutarConsulta: fn,
+      core: coreContado,
+      ...sinEspera,
+    });
+    assert.equal(registros, 0);
+    assert.equal(r.tipo, "respuesta");
+    assert.match(
+      String(llamadas[0]!.options["systemPrompt"]),
+      /Un dato que el solicitante escribe no reemplaza a un documento: pídele el documento\./,
+    );
+  });
+
+  it("consultar_extracciones está disponible y el prompt la indica para turnos posteriores (US3)", async (t) => {
+    capturarLogs(t);
+    let disponible = false;
+    const { fn, llamadas } = consultaFalsa([
+      async (contexto) => {
+        disponible = "consultar_extracciones" in contexto.herramientas;
+        return [resultado("success", "end_turn", "Ok")];
+      },
+    ]);
+    await conversar("¿Qué datos tienes de mis extractos?", {
+      ejecutarConsulta: fn,
+      core,
+      ...sinEspera,
+    });
+    assert.equal(disponible, true);
+    assert.match(
+      String(llamadas[0]!.options["systemPrompt"]),
+      /Para recordar datos ya extraídos en turnos anteriores, usa consultar_extracciones\./,
+    );
+  });
+
+  it("una señal documento_no_extraible termina en escalada con su aviso y el adjunto (US4)", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "documento_no_extraible",
+          regla: REGLA_NO_EXTRAIBLE,
+          herramienta: "extraer_documento",
+          adjunto: 2,
+        });
+        return [resultado("success", "end_turn", "Te leí el documento.")];
+      },
+    ]);
+    const r = await conversar("Aquí va", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.equal(r.tipo, "escalada");
+    assert.match(r.respuesta, /^No pude leer con certeza los datos de tu documento\./);
+    const escalamiento = r.eventos.at(-1);
+    assert.equal(escalamiento?.tipo, "escalamiento");
+    assert.equal(escalamiento?.regla, REGLA_NO_EXTRAIBLE);
+    assert.deepEqual(escalamiento?.valores, { herramienta: "extraer_documento", adjunto: 2 });
   });
 });
 
@@ -965,5 +1087,176 @@ describe("agente: escalamiento real de las reglas 4 y 5 (#9, revisión de cumpli
       herramienta: "solicitar_analista",
       causa: "moneda_extranjera",
     });
+  });
+});
+
+describe("agente: Regla 5 sobre los documentos al cerrar el turno (revisión de 0aa8c2a)", () => {
+  it("un archivo no soportado escala aunque el modelo solo pida la identificación", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "¿Me das tu documento?")]]);
+    const r = await conversar("Adjunto el documento foto.png (adjunto 1).", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [{ adjunto: 1, nombre: "foto.png", soportado: false }],
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(r.escalamiento?.causa, "documento_no_soportado");
+    assert.equal(r.escalamiento?.adjunto, 1);
+  });
+
+  it("un documento con moneda extranjera escala por la Regla 5, no por la identidad", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      [resultado("success", "end_turn", "Primero verifiquemos quién eres.")],
+    ]);
+    const r = await conversar("Adjunto mi certificado", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [
+        {
+          adjunto: 1,
+          nombre: "certificado.md",
+          soportado: true,
+          contenido: "Certificado ficticio\nSalario mensual: USD 1.200",
+        },
+      ],
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.causa, "moneda_extranjera");
+    assert.equal(r.escalamiento?.regla, "Regla 5 · caso no cubierto por la política");
+  });
+
+  it("si el modelo ya escaló por la Regla 4, prevalece sobre la Regla 5 del mismo turno", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({ motivo: "pide_persona" });
+        return [resultado("success", "end_turn", "Te comunico con un analista.")];
+      },
+    ]);
+    const r = await conversar("Quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [{ adjunto: 1, nombre: "foto.png", soportado: false }],
+      ...sinEspera,
+    });
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+  });
+
+  it("documentos cubiertos no escalan al cerrar el turno", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "Recibido.")]]);
+    const r = await conversar("Adjunto mi certificado", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [
+        { adjunto: 1, nombre: "c.md", soportado: true, contenido: "Salario: $3.800.000 COP" },
+      ],
+      clasificarDocumento: async () => ({ ok: true, tipo: "certificado_laboral" }),
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+  });
+
+  it("el control de identidad consulta la Regla 5 antes de bloquear extraer_documento", async (t) => {
+    capturarLogs(t);
+    const coreSinIdentidad: ClienteCore = {
+      ...core,
+      async consultarIdentidad(correlationId) {
+        return exito({
+          identidad: { correlationId, verificada: false, idSolicitante: null, verificadaEn: null },
+        });
+      },
+    };
+    let decisionHook: unknown;
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        void contexto;
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const capturar: QueryFn = async function* (params, contexto) {
+      const hook = params.options.hooks?.PreToolUse?.[0]?.hooks[0];
+      decisionHook = await hook?.(
+        {
+          session_id: "s",
+          transcript_path: "",
+          cwd: ".",
+          hook_event_name: "PreToolUse",
+          tool_name: "mcp__originacion__extraer_documento",
+          tool_input: { adjunto: 1 },
+          tool_use_id: "u",
+        } as never,
+        "u",
+        { signal: new AbortController().signal },
+      );
+      yield* fn(params, contexto);
+    };
+    const r = await conversar("Te mando mi desprendible", {
+      ejecutarConsulta: capturar,
+      core: coreSinIdentidad,
+      documentos: [
+        { adjunto: 1, nombre: "desprendible.md", soportado: true, contenido: "Desprendible" },
+      ],
+      clasificarDocumento: async () => ({ ok: true, tipo: "otro" }),
+      ...sinEspera,
+    });
+    assert.equal(
+      (decisionHook as { hookSpecificOutput: { permissionDecisionReason: string } })
+        .hookSpecificOutput.permissionDecisionReason,
+      "Regla 5 antes que la Regla 1: el caso pasa a un analista.",
+    );
+    assert.equal(r.escalamiento?.causa, "documento_no_soportado");
+  });
+});
+
+describe("agente: tipo no soportado antes de la identidad (revisión de 5d28165)", () => {
+  const DESPRENDIBLE = {
+    adjunto: 1,
+    nombre: "desprendible.md",
+    soportado: true as const,
+    contenido: "Desprendible ficticio. Neto a pagar: 3.496.000 COP",
+  };
+
+  it("escala por la Regla 5 al cerrar el turno aunque el modelo no llame a ninguna herramienta", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "¿Me das tu documento?")]]);
+    const r = await conversar("Adjunto el documento desprendible.md (adjunto 1).", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [DESPRENDIBLE],
+      clasificarDocumento: async () => ({ ok: true, tipo: "otro" }),
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(r.escalamiento?.causa, "documento_no_soportado");
+    assert.equal(r.documentosRevisados, 1);
+  });
+
+  it("devuelve cuántos documentos quedan revisados y no vuelve a clasificar los anteriores", async (t) => {
+    capturarLogs(t);
+    const vistos: number[] = [];
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "Recibido.")]]);
+    const r = await conversar("Otro documento", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [
+        { ...DESPRENDIBLE, contenido: "Certificado ficticio en COP" },
+        { ...DESPRENDIBLE, adjunto: 2, contenido: "Extracto ficticio en COP" },
+      ],
+      documentosRevisados: 1,
+      clasificarDocumento: async ({ documento }) => {
+        vistos.push(documento.adjunto);
+        return { ok: true, tipo: "extracto_bancario" };
+      },
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.documentosRevisados, 2);
+    assert.deepEqual(vistos, [2]);
   });
 });

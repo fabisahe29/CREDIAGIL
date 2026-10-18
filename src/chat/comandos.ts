@@ -15,8 +15,8 @@ const CON_ARGUMENTO: readonly NombreComando[] = ["adjuntar", "caso"];
 export const TEXTO_AYUDA = [
   "Comandos:",
   "  /ayuda             muestra esta ayuda",
-  "  /adjuntar <ruta>   envía un documento .txt o .md al agente",
-  "  /pegar             abre un bloque de varias líneas; ciérralo con una línea /fin",
+  "  /adjuntar <ruta>   envía un documento .txt o .md al agente; queda numerado como adjunto",
+  "  /pegar             abre un bloque de varias líneas; ciérralo con una línea /fin (queda como adjunto «texto pegado»)",
   "  /caso <ruta>       reproduce un caso de prueba (carpeta con caso.json)",
   "  /nueva             empieza una conversación nueva",
   "  /salir             termina",
