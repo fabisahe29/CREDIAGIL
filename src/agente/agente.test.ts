@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { conversar, MODELO_POR_DEFECTO, type ContextoConsulta, type QueryFn } from "./agente.ts";
 import { errorNegocio, errorTransitorio, exito, fallo } from "../compartido/errores.ts";
 import type { ClienteCore } from "./cliente-core.ts";
-import { emitirEvento } from "./adaptador.ts";
+import { dejarSenal, emitirEvento, REGLA_NO_EXTRAIBLE } from "./adaptador.ts";
 import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
 
 const core: ClienteCore = {
@@ -798,8 +798,130 @@ describe("agente: identidad no verificable (#9, US3)", () => {
     const prompt = String(llamadas[0]!.options["systemPrompt"]);
     assert.match(
       prompt,
-      /Verifica la identidad con verificar_identidad y la fecha de expedición del documento\. No pidas ni uses documentos de soporte antes de verificar\. Si el dato no coincide, no reveles el correcto\./,
+      /Verifica la identidad con verificar_identidad y la fecha de expedición del documento\. Si el dato no coincide, no reveles el correcto\./,
     );
+  });
+});
+
+describe("agente: extracción de documentos (#10)", () => {
+  const DOCUMENTO = {
+    adjunto: 1,
+    nombre: "certificado.md",
+    soportado: true as const,
+    contenido: "Certificado ficticio",
+  };
+
+  it("pasa los documentos y el subagente al adaptador (US1)", async (t) => {
+    capturarLogs(t);
+    const entradas: unknown[] = [];
+    const coreExtraccion: ClienteCore = {
+      ...core,
+      async consultarExtracciones() {
+        return exito({ extracciones: [] });
+      },
+      async registrarExtraccion() {
+        return fallo(errorNegocio("identidad_no_verificada", "Sin identidad."));
+      },
+    };
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.extraer_documento.manejar({ adjunto: 1 });
+        return [resultado("success", "end_turn", "Listo")];
+      },
+    ]);
+    await conversar("Te envío mi certificado", {
+      ejecutarConsulta: fn,
+      core: coreExtraccion,
+      documentos: [DOCUMENTO],
+      ejecutarSubagente: async (entrada) => {
+        entradas.push(entrada.documento);
+        return { ok: false, causa: "tiempo_agotado", detalle: "x" };
+      },
+      ...sinEspera,
+    });
+    assert.deepEqual(entradas[0], {
+      adjunto: 1,
+      nombre: "certificado.md",
+      contenido: "Certificado ficticio",
+    });
+  });
+
+  it("el systemPrompt pide extraer por número de adjunto y no leer datos por cuenta propia (US1)", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.match(prompt, /llama a extraer_documento con su número de adjunto/);
+    assert.match(prompt, /No leas datos de los documentos por tu cuenta/);
+  });
+
+  it("un dato escrito por el solicitante no reemplaza a un documento y no se registra (US2)", async (t) => {
+    capturarLogs(t);
+    let registros = 0;
+    const coreContado: ClienteCore = {
+      ...core,
+      async registrarExtraccion() {
+        registros++;
+        return fallo(errorNegocio("no_simulado", "x"));
+      },
+    };
+    const { fn, llamadas } = consultaFalsa([
+      [resultado("success", "end_turn", "Necesito un documento con tu salario.")],
+    ]);
+    const r = await conversar("Gano 3.800.000 al mes", {
+      ejecutarConsulta: fn,
+      core: coreContado,
+      ...sinEspera,
+    });
+    assert.equal(registros, 0);
+    assert.equal(r.tipo, "respuesta");
+    assert.match(
+      String(llamadas[0]!.options["systemPrompt"]),
+      /Un dato que el solicitante escribe no reemplaza a un documento: pídele el documento\./,
+    );
+  });
+
+  it("consultar_extracciones está disponible y el prompt la indica para turnos posteriores (US3)", async (t) => {
+    capturarLogs(t);
+    let disponible = false;
+    const { fn, llamadas } = consultaFalsa([
+      async (contexto) => {
+        disponible = "consultar_extracciones" in contexto.herramientas;
+        return [resultado("success", "end_turn", "Ok")];
+      },
+    ]);
+    await conversar("¿Qué datos tienes de mis extractos?", {
+      ejecutarConsulta: fn,
+      core,
+      ...sinEspera,
+    });
+    assert.equal(disponible, true);
+    assert.match(
+      String(llamadas[0]!.options["systemPrompt"]),
+      /Para recordar datos ya extraídos en turnos anteriores, usa consultar_extracciones\./,
+    );
+  });
+
+  it("una señal documento_no_extraible termina en escalada con su aviso y el adjunto (US4)", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "documento_no_extraible",
+          regla: REGLA_NO_EXTRAIBLE,
+          herramienta: "extraer_documento",
+          adjunto: 2,
+        });
+        return [resultado("success", "end_turn", "Te leí el documento.")];
+      },
+    ]);
+    const r = await conversar("Aquí va", { ejecutarConsulta: fn, core, ...sinEspera });
+    assert.equal(r.tipo, "escalada");
+    assert.match(r.respuesta, /^No pude leer con certeza los datos de tu documento\./);
+    const escalamiento = r.eventos.at(-1);
+    assert.equal(escalamiento?.tipo, "escalamiento");
+    assert.equal(escalamiento?.regla, REGLA_NO_EXTRAIBLE);
+    assert.deepEqual(escalamiento?.valores, { herramienta: "extraer_documento", adjunto: 2 });
   });
 });
 

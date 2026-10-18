@@ -6,7 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
-import { ID_EN_ESTUDIO, ID_INEXISTENTE, ID_SOLICITANTE_UNICO } from "../mcp/datos-ejemplo.ts";
+import {
+  ID_EN_ESTUDIO,
+  ID_INEXISTENTE,
+  ID_SOLICITANTE_UNICO,
+  SOLICITANTES_EJEMPLO,
+} from "../mcp/datos-ejemplo.ts";
+import { construirResultado, validarSalida } from "../compartido/extraccion.ts";
+import { CONTENIDO_CERTIFICADO, salidaCertificado } from "../compartido/extraccion-ejemplos.ts";
 
 describe("cliente del core contra el servidor real", () => {
   let core: ClienteCore;
@@ -387,5 +394,89 @@ describe("cliente del core: consultarIdentidad (#9, US4)", () => {
     } finally {
       await core.cerrar();
     }
+  });
+});
+
+describe("cliente del core: extracciones (#10)", () => {
+  function resultadoCertificado() {
+    const v = validarSalida(salidaCertificado(), { contenido: CONTENIDO_CERTIFICADO }, new Date());
+    if (!v.ok) assert.fail(JSON.stringify(v.errores));
+    return construirResultado(
+      v.salida,
+      { adjunto: 1, nombre: "certificado.md", contenido: CONTENIDO_CERTIFICADO },
+      1,
+    );
+  }
+
+  const entrada = () => ({
+    adjunto: 1,
+    nombre: "certificado.md",
+    contenido: CONTENIDO_CERTIFICADO,
+    resultado: resultadoCertificado(),
+  });
+
+  it("contra el servidor real, registra tras verificar y luego consulta la extracción", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const correlationId = randomUUID();
+      const sinIdentidad = await core.registrarExtraccion(entrada(), correlationId);
+      assert.equal(sinIdentidad.ok, false);
+      if (!sinIdentidad.ok) assert.equal(sinIdentidad.error.codigo, "identidad_no_verificada");
+
+      const unico = SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!;
+      await core.verificarIdentidad(
+        unico.idSolicitante,
+        unico.fechaExpedicion,
+        randomUUID(),
+        correlationId,
+      );
+      const registro = await core.registrarExtraccion(entrada(), correlationId);
+      assert.equal(registro.ok, true);
+      if (registro.ok) assert.equal(registro.datos.extraccion.estado, "extraido");
+
+      const consulta = await core.consultarExtracciones(correlationId);
+      assert.equal(consulta.ok && consulta.datos.extracciones.length, 1);
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("envía el correlationId y los campos de la entrada a registrar_extraccion", async () => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return { structuredContent: { ok: true, datos: { extracciones: [] } } };
+        },
+        close: async () => {},
+      },
+    });
+    const correlationId = randomUUID();
+    await core.registrarExtraccion(entrada(), correlationId);
+    await core.consultarExtracciones(correlationId);
+    assert.equal(llamadas[0]?.name, "registrar_extraccion");
+    assert.deepEqual(Object.keys(llamadas[0]!.arguments).sort(), [
+      "adjunto",
+      "contenido",
+      "correlationId",
+      "nombre",
+      "resultado",
+    ]);
+    assert.deepEqual(llamadas[1], { name: "consultar_extracciones", arguments: { correlationId } });
+  });
+
+  it("un registro que no cumple el esquema es fuera de contrato", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({
+          structuredContent: { ok: true, datos: { extraccion: { estado: "inventado" } } },
+        }),
+        close: async () => {},
+      },
+    });
+    const r = await core.registrarExtraccion(entrada(), randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
   });
 });

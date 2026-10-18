@@ -88,8 +88,8 @@ function capturarStderr(t: { mock: { method: Function } }) {
 }
 
 describe("control de identidad (#9, US4)", () => {
-  it("hoy ninguna herramienta exige identidad: #10 y #13 agregarán las suyas", () => {
-    assert.deepEqual([...HERRAMIENTAS_CON_IDENTIDAD], []);
+  it("exige identidad para extraer documentos (#10); el #13 agregará el registro", () => {
+    assert.deepEqual([...HERRAMIENTAS_CON_IDENTIDAD], ["extraer_documento"]);
   });
 
   it("una herramienta fuera de la lista sigue sin consultar al core", async (t) => {
@@ -199,6 +199,67 @@ describe("control de identidad (#9, US4)", () => {
     const control = crearControlIdentidad({ core, estado: crearEstado(randomUUID()) });
     const salida = await control(entrada(), "uso-1", { signal: new AbortController().signal });
     assert.deepEqual(salida, {});
+    assert.equal(llamadas(), 0);
+  });
+});
+
+describe("control de identidad: extraer_documento (#10, US1 y US5)", () => {
+  const EXTRAER = "mcp__originacion__extraer_documento";
+
+  function conListaPorDefecto(respuestas: (cid: string) => RespuestaIdentidad[]) {
+    const estado = crearEstado(randomUUID());
+    const { core, llamadas } = coreCon(respuestas(estado.correlationId));
+    const control = crearControlIdentidad({
+      core,
+      estado,
+      dormir: async () => {},
+      azar: () => 0.5,
+    });
+    const invocar = (nombre = EXTRAER) =>
+      control(entrada(nombre), "uso-1", { signal: new AbortController().signal });
+    return { estado, llamadas, invocar };
+  }
+
+  it("sin identidad verificada niega la extracción y emite bloqueo_por_regla con la Regla 1", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado } = conListaPorDefecto((cid) => [identidad(cid, false)]);
+    assert.equal(decision(await invocar()), "deny");
+    const evento = estado.eventos[0];
+    assert.equal(evento?.tipo, "bloqueo_por_regla");
+    assert.equal(evento?.regla, "Regla 1 · identidad verificada antes de registrar");
+    assert.deepEqual(evento?.valores, {
+      identidad: "no verificada",
+      herramienta: "extraer_documento",
+    });
+  });
+
+  it("con identidad verificada deja extraer", async (t) => {
+    capturarStderr(t);
+    const { invocar } = conListaPorDefecto((cid) => [identidad(cid, true)]);
+    assert.deepEqual(await invocar(), {});
+  });
+
+  it("consultar_extracciones no exige identidad: sin verificación no hay nada registrado", async (t) => {
+    capturarStderr(t);
+    const { invocar, llamadas } = conListaPorDefecto(() => []);
+    assert.deepEqual(await invocar("mcp__originacion__consultar_extracciones"), {});
+    assert.equal(llamadas(), 0);
+  });
+
+  it("tras escalar por un caso no cubierto, niega cualquier extracción posterior", async (t) => {
+    capturarStderr(t);
+    const { invocar, estado, llamadas } = conListaPorDefecto((cid) => [identidad(cid, true)]);
+    estado.escalamiento = {
+      motivo: "caso_no_cubierto",
+      regla: "Regla 5 · caso no cubierto por la política",
+      resultado: "escalada",
+      correlationId: estado.correlationId,
+      ts: new Date().toISOString(),
+      herramienta: "extraer_documento",
+      causa: "moneda_extranjera",
+      adjunto: 1,
+    };
+    assert.equal(decision(await invocar()), "deny");
     assert.equal(llamadas(), 0);
   });
 });

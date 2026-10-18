@@ -1,0 +1,10 @@
+{
+  "nombre": "extraccion-sin-salario",
+  "descripcion": "Extracción (#10): certificado laboral sin salario; el agente pide un documento que lo traiga",
+  "pasos": [
+    { "mensaje": "Hola, quiero pedir un crédito" },
+    { "mensaje": "Mi número de documento es 0001234567" },
+    { "mensaje": "La fecha de expedición de mi documento es 2012-05-14" },
+    { "adjuntar": "certificado-sin-salario.md" }
+  ]
+}

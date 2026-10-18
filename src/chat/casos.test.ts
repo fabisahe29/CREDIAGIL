@@ -68,6 +68,24 @@ describe("casos: carga válida", () => {
     });
   }
 
+  for (const nombre of [
+    "extraccion-certificado",
+    "extraccion-sin-salario",
+    "extraccion-extractos",
+  ]) {
+    it(`el caso versionado casos/${nombre} carga sin errores y verifica primero la identidad (#10)`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.equal(r.ok, true, r.ok ? "" : r.problema);
+      const texto = readFileSync(resolve("casos", nombre, "caso.json"), "utf8");
+      assert.ok(
+        texto.includes(
+          SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!
+            .fechaExpedicion,
+        ),
+      );
+    });
+  }
+
   it("los casos de identidad usan las fechas de expedición de los datos del core (#9)", () => {
     const fecha = (id: string) =>
       SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === id)!.fechaExpedicion;

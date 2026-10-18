@@ -7,6 +7,7 @@ import { z } from "zod";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import {
   aResultadoMcp,
+  errorValidacion,
   exito,
   fallo,
   transitorioAgotado,
@@ -14,10 +15,20 @@ import {
   type Respuesta,
 } from "../compartido/errores.ts";
 import { validarEvento, type DatosEvento, type EventoNegocio } from "../compartido/eventos.ts";
+import {
+  construirResultado,
+  huella,
+  type ErrorExtraccion,
+  type RegistroExtraccion,
+  type ResultadoExtraccion,
+} from "../compartido/extraccion.ts";
 import { registrar } from "../compartido/logs.ts";
+import type { DocumentoConversacion } from "./agente.ts";
 import type { ClienteCore, CriterioBusqueda } from "./cliente-core.ts";
+import { crearSubagente, extraerConIntentos, type EjecutarSubagente } from "./extraccion.ts";
 import { conReintentos } from "./reintentos.ts";
 import { MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
+import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
 
 export const CLAVE_SERVIDOR = "originacion";
 
@@ -30,7 +41,8 @@ export interface SenalEscalamiento {
     | "identidad_ambigua"
     | "identidad_no_verificable"
     | "pide_persona"
-    | "caso_no_cubierto";
+    | "caso_no_cubierto"
+    | "documento_no_extraible";
   regla: string;
   resultado: "escalada";
   correlationId: string;
@@ -42,6 +54,8 @@ export interface SenalEscalamiento {
   coincidencias?: number;
   /** Causa de un caso no cubierto (motivo caso_no_cubierto). */
   causa?: CausaNoCubierto;
+  /** Documento que llevó al escalamiento (#10: no cubierto o no extraíble). */
+  adjunto?: number;
 }
 
 export const CAUSAS_NO_CUBIERTO = ["moneda_extranjera", "documento_no_soportado", "otro"] as const;
@@ -132,6 +146,12 @@ export interface OpcionesAdaptador {
   alUsarHerramienta?: (info: InfoHerramienta) => void;
   /** Genera la clave de idempotencia de cada intento de verificación; inyectable en las pruebas. */
   generarIdIntento?: () => string;
+  /** Documentos de la conversación, numerados por el chat (#10, R2). */
+  documentos?: readonly DocumentoConversacion[];
+  /** Subagente de extracción; por defecto el real (#10, R1). */
+  ejecutarSubagente?: EjecutarSubagente;
+  /** "Hoy" para validar fechas extraídas; inyectable en las pruebas. */
+  hoy?: () => Date;
 }
 
 const esquemaConsultar = {
@@ -191,7 +211,49 @@ const DESCRIPCION_SOLICITAR_ANALISTA =
   "Pasa el caso a un analista de crédito. Úsala antes que cualquier otra herramienta si el solicitante pide hablar con una persona, o si su caso no está cubierto por la política (ingresos en moneda extranjera, documento no soportado). No pide ni envía datos del solicitante.";
 
 export const REGLA_PIDE_PERSONA = "Regla 4 · el solicitante pide hablar con una persona";
-export const REGLA_NO_CUBIERTO = "Regla 5 · caso no cubierto por la política";
+export const REGLA_NO_CUBIERTO = REGLA_5;
+export const REGLA_NO_EXTRAIBLE = `${REGLA_PRINCIPIO_V} · documento no extraíble`;
+
+const esquemaExtraer = {
+  adjunto: z
+    .number()
+    .int()
+    .min(1)
+    .describe(
+      'Número de adjunto del documento: el atributo adjunto de <documento adjunto="N"> o el numero de <adjunto_registrado numero="N"/>.',
+    ),
+};
+
+const DESCRIPCION_EXTRAER =
+  "Extrae los datos de un certificado laboral o de un extracto bancario que entregó el solicitante, por su número de adjunto. Devuelve cada dato con el fragmento del documento del que salió. Si falta un dato, no lo pidas tú: la herramienta ya lo pidió. Exige la identidad verificada.";
+
+const DESCRIPCION_CONSULTAR_EXTRACCIONES =
+  "Devuelve los datos ya extraídos de los documentos de esta conversación, con su procedencia. Úsala para recordar datos de turnos anteriores; no vuelve a extraer.";
+
+/** Cómo se nombra cada campo al pedírselo al solicitante. */
+const NOMBRES_CAMPO: Readonly<Record<string, string>> = {
+  empleador: "el empleador",
+  cargo: "el cargo",
+  fechaIngreso: "la fecha de ingreso",
+  salario: "el salario",
+  moneda: "la moneda",
+  titular: "el titular",
+  periodo: "el periodo",
+};
+
+const enumerar = (elementos: readonly string[]) =>
+  elementos.length <= 1
+    ? elementos.join("")
+    : `${elementos.slice(0, -1).join(", ")} y ${elementos.at(-1)}`;
+
+const describirErrores = (errores: readonly ErrorExtraccion[]) =>
+  errores.map((e) => `${e.campo}: ${e.motivo}`).join("; ");
+
+/** El registro del core sin sus campos propios: el resultado para volver a registrarlo. */
+function resultadoDeRegistro(registro: RegistroExtraccion): ResultadoExtraccion {
+  const { adjuntos: _adjuntos, registradoEn: _registradoEn, ...resultado } = registro;
+  return resultado;
+}
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
@@ -220,6 +282,9 @@ export function crearAdaptador({
   azar = Math.random,
   alUsarHerramienta,
   generarIdIntento = randomUUID,
+  documentos = [],
+  ejecutarSubagente = crearSubagente(),
+  hoy = () => new Date(),
 }: OpcionesAdaptador) {
   const senal = (campos: Parameters<typeof dejarSenal>[1]) => dejarSenal(estado, campos);
   /**
@@ -382,11 +447,230 @@ export function crearAdaptador({
     return aResultadoMcp(exito({ escalada: true }));
   }
 
+  /** Log de una extracción (R10): metadatos, nunca el contenido ni los fragmentos (FR-017). */
+  function registrarExtraccionLog(campos: Record<string, unknown>): void {
+    registrar("extraccion", { correlationId: estado.correlationId, ...campos });
+  }
+
+  /**
+   * Faltantes: un solo evento por documento, que pide un documento nuevo, nunca que el solicitante
+   * escriba el dato (aclaración Q2 del #10; Regla 3). Lo emite el código, no el modelo.
+   */
+  function pedirFaltantes(adjunto: number, nombre: string, faltantes: readonly string[]): void {
+    const lista = enumerar(faltantes.map((campo) => NOMBRES_CAMPO[campo] ?? campo));
+    emitirEvento(estado, {
+      tipo: "solicitud_de_dato",
+      descripcion: `Al documento que enviaste (adjunto ${adjunto} · ${nombre}) le falta ${lista}. Envíame un documento que lo indique, por ejemplo un certificado laboral o un extracto bancario actualizado.`,
+      motivo: "dato_faltante_en_documento",
+      dato: faltantes.join(", "),
+      regla: REGLA_PRINCIPIO_V,
+      valores: { adjunto, documento: nombre, faltantes: faltantes.join(", ") },
+    });
+  }
+
+  /** Efectos de un resultado registrado, decididos por código (R7). */
+  function aplicarEfectos(registro: RegistroExtraccion, adjunto: number, nombre: string): void {
+    if (registro.estado === "extraido") {
+      if (registro.faltantes.length > 0) pedirFaltantes(adjunto, nombre, registro.faltantes);
+    } else if (registro.estado === "no_cubierto") {
+      senal({
+        motivo: "caso_no_cubierto",
+        regla: REGLA_NO_CUBIERTO,
+        herramienta: "extraer_documento",
+        causa: registro.causa,
+        adjunto,
+      });
+    } else {
+      senal({
+        motivo: "documento_no_extraible",
+        regla: REGLA_NO_EXTRAIBLE,
+        herramienta: "extraer_documento",
+        adjunto,
+        ultimoError:
+          registro.conflictos.length > 0
+            ? `conflictos: ${registro.conflictos.join(", ")}`
+            : describirErrores(registro.ultimoError),
+      });
+    }
+  }
+
+  /** Extrae con el subagente, o reutiliza una extracción previa del mismo contenido (FR-018). */
+  async function obtenerResultado(
+    documento: { adjunto: number; nombre: string; contenido: string },
+    previa: RegistroExtraccion | undefined,
+  ): Promise<{ resultado: ResultadoExtraccion } | { sinRespuesta: string; intentos: number }> {
+    if (previa !== undefined) return { resultado: resultadoDeRegistro(previa) };
+    const intentos = await extraerConIntentos({
+      documento,
+      ejecutarSubagente,
+      correlationId: estado.correlationId,
+      hoy: hoy(),
+      alIntentar: (info) => {
+        registrar("intento_extraccion", {
+          correlationId: estado.correlationId,
+          adjunto: documento.adjunto,
+          ...info,
+        });
+        avisarObservador({
+          herramienta: "extraer_documento",
+          intento: info.numero,
+          resultado: info.resultado,
+        });
+      },
+    });
+    if (intentos.tipo === "sin_respuesta") {
+      return { sinRespuesta: intentos.causa, intentos: intentos.intentos };
+    }
+    if (intentos.tipo === "valida") {
+      return { resultado: construirResultado(intentos.salida, documento, intentos.intentos) };
+    }
+    return {
+      resultado: {
+        estado: "no_extraible",
+        adjunto: documento.adjunto,
+        nombre: documento.nombre,
+        huella: huella(documento.contenido),
+        intentos: intentos.intentos,
+        conflictos: [],
+        ultimoError: intentos.errores,
+      },
+    };
+  }
+
+  /**
+   * Extracción de un documento por su número (R7). El modelo solo da el número: el texto sale de los
+   * documentos de la conversación. La Regla 1 la aplica antes el control de identidad, y el core
+   * otra vez al registrar.
+   */
+  async function extraer({ adjunto }: { adjunto: number }) {
+    const documento = documentos.find((d) => d.adjunto === adjunto);
+    if (documento === undefined) {
+      return aResultadoMcp(
+        fallo(
+          errorValidacion(
+            "adjunto_inexistente",
+            `No hay un documento con el número de adjunto ${adjunto} en la conversación.`,
+            "adjunto",
+          ),
+        ),
+      );
+    }
+    if (!documento.soportado) {
+      // Regla 5: un archivo que el chat no pudo leer no se extrae; escala el código (FR-016).
+      senal({
+        motivo: "caso_no_cubierto",
+        regla: REGLA_NO_CUBIERTO,
+        herramienta: "extraer_documento",
+        causa: "documento_no_soportado",
+        adjunto,
+      });
+      registrarExtraccionLog({
+        adjunto,
+        nombre: documento.nombre,
+        estado: "no_cubierto",
+        intentos: 0,
+      });
+      return aResultadoMcp(exito({ escalada: true, causa: "documento_no_soportado" }));
+    }
+
+    const conContenido = { adjunto, nombre: documento.nombre, contenido: documento.contenido };
+    const huellaDocumento = huella(documento.contenido);
+    const previas = await llamarConReintentos("consultar_extracciones", () =>
+      core.consultarExtracciones(estado.correlationId),
+    );
+    if (!previas.ok) return aResultadoMcp(previas);
+    const previa = previas.datos.extracciones.find((e) => e.huella === huellaDocumento);
+
+    const obtenido = await obtenerResultado(conContenido, previa);
+    if ("sinRespuesta" in obtenido) {
+      // Nunca se usa un resultado parcial: sin respuesta del subagente se escala (Principio VI).
+      senal({
+        motivo: "falla_transitoria_persistente",
+        regla: "constitución, Principio VI · reintentos agotados",
+        herramienta: "extraer_documento",
+        intentos: obtenido.intentos,
+        ultimoError: obtenido.sinRespuesta,
+        adjunto,
+      });
+      registrarExtraccionLog({
+        adjunto,
+        nombre: documento.nombre,
+        huella: huellaDocumento.slice(0, 12),
+        estado: "sin_respuesta",
+        intentos: obtenido.intentos,
+      });
+      return aResultadoMcp(fallo(transitorioAgotado()));
+    }
+
+    const registro = await llamarConReintentos("registrar_extraccion", () =>
+      core.registrarExtraccion(
+        { ...conContenido, resultado: obtenido.resultado },
+        estado.correlationId,
+      ),
+    );
+    if (!registro.ok) {
+      // El core no aceptó el resultado contra el documento: no se usa ningún dato (Principio V).
+      if (registro.error.codigo === "extraccion_invalida") {
+        senal({
+          motivo: "documento_no_extraible",
+          regla: REGLA_NO_EXTRAIBLE,
+          herramienta: "registrar_extraccion",
+          adjunto,
+          ultimoError: registro.error.campo ?? registro.error.codigo,
+        });
+      }
+      registrarExtraccionLog({
+        adjunto,
+        nombre: documento.nombre,
+        estado: "rechazada",
+        codigo: registro.error.codigo,
+      });
+      return aResultadoMcp(registro);
+    }
+
+    const guardado = registro.datos.extraccion;
+    aplicarEfectos(guardado, adjunto, documento.nombre);
+    registrarExtraccionLog({
+      adjunto,
+      nombre: documento.nombre,
+      huella: guardado.huella.slice(0, 12),
+      estado: guardado.estado,
+      ...(guardado.estado === "extraido" ? { tipo: guardado.documento.tipo } : {}),
+      ...(guardado.estado === "no_cubierto" ? { causa: guardado.causa } : {}),
+      intentos: guardado.intentos,
+      faltantes: guardado.estado === "extraido" ? guardado.faltantes : [],
+      errores:
+        guardado.estado === "no_extraible"
+          ? guardado.ultimoError.map((e) => `${e.campo}: ${e.motivo}`)
+          : [],
+      reutilizada: previa !== undefined,
+    });
+    // Solo un documento extraído devuelve datos al modelo; los demás ya escalaron.
+    return guardado.estado === "extraido"
+      ? aResultadoMcp(exito({ resultado: guardado }))
+      : aResultadoMcp(
+          exito({
+            escalada: true,
+            estado: guardado.estado,
+            ...(guardado.estado === "no_cubierto" ? { causa: guardado.causa } : {}),
+          }),
+        );
+  }
+
+  async function consultarExtracciones(_entrada: Record<string, never>) {
+    const respuesta = await llamarConReintentos("consultar_extracciones", () =>
+      core.consultarExtracciones(estado.correlationId),
+    );
+    return aResultadoMcp(respuesta);
+  }
+
   const herramientas = {
     consultar_solicitud: { esquema: esquemaConsultar, manejar: consultar },
     buscar_solicitante: { esquema: esquemaBuscar, manejar: buscar },
     verificar_identidad: { esquema: esquemaVerificar, manejar: verificar },
     solicitar_analista: { esquema: esquemaSolicitarAnalista, manejar: solicitarAnalista },
+    extraer_documento: { esquema: esquemaExtraer, manejar: extraer },
+    consultar_extracciones: { esquema: {}, manejar: consultarExtracciones },
   };
 
   const servidor = createSdkMcpServer({
@@ -417,6 +701,16 @@ export function crearAdaptador({
         DESCRIPCION_SOLICITAR_ANALISTA,
         esquemaSolicitarAnalista,
         (argumentos) => Promise.resolve(solicitarAnalista(argumentos)),
+      ),
+      tool("extraer_documento", DESCRIPCION_EXTRAER, esquemaExtraer, (argumentos) =>
+        extraer(argumentos),
+      ),
+      tool(
+        "consultar_extracciones",
+        DESCRIPCION_CONSULTAR_EXTRACCIONES,
+        {},
+        () => consultarExtracciones({}),
+        { annotations: { readOnlyHint: true } },
       ),
     ],
   });

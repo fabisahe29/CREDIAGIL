@@ -75,13 +75,36 @@ export async function leerDocumento(ruta: string, directorioBase: string): Promi
  * Mensaje que recibe el agente. El contenido va delimitado y no puede abrir ni cerrar ninguna
  * etiqueta del prompt, en ninguna variante (`</DOCUMENTO >`, `</historial>`…).
  */
-export function componerMensaje(documento: DocumentoEnviable): string {
-  const encabezado = `Adjunto el documento ${documento.nombre}.`;
+export function componerMensaje(documento: DocumentoEnviable, adjunto: number): string {
+  const encabezado = `Adjunto el documento ${documento.nombre} (adjunto ${adjunto}).`;
   if (documento.tipo === "no_soportado") {
-    return `${encabezado}\n<documento_no_soportado nombre="${documento.nombre}" tipo="${documento.tipoArchivo}" motivo="${documento.motivo}"/>`;
+    return `${encabezado}\n<documento_no_soportado adjunto="${adjunto}" nombre="${documento.nombre}" tipo="${documento.tipoArchivo}" motivo="${documento.motivo}"/>`;
   }
   const contenido = neutralizarEtiquetas(documento.contenido);
-  return `${encabezado}\n<documento nombre="${documento.nombre}">\n${contenido}\n</documento>`;
+  return `${encabezado}\n<documento adjunto="${adjunto}" nombre="${documento.nombre}">\n${contenido}\n</documento>`;
+}
+
+/** Nombre del adjunto que nace de un bloque `/pegar` (specs/008-extraccion-documentos, FR-009). */
+export const NOMBRE_TEXTO_PEGADO = "texto pegado";
+
+/** Un texto pegado de más de 256 KiB no se puede extraer: se registra como no soportado. */
+export const clasificarPegado = (texto: string): MotivoNoSoportado | null =>
+  Buffer.byteLength(texto, "utf8") > TAMANO_MAXIMO_BYTES ? "tamano" : null;
+
+/**
+ * Un texto pegado sigue siendo un mensaje del solicitante, no un bloque de datos: así «quiero hablar
+ * con una persona» sigue valiendo como instrucción (Regla 4). Al final lleva la marca, que compone el
+ * chat, con el número de adjunto para que el agente pueda pedir su extracción; el texto no puede
+ * forjarla ni abrir ningún bloque del prompt.
+ */
+export function componerPegado(
+  texto: string,
+  adjunto: number,
+  motivo: MotivoNoSoportado | null = null,
+): string {
+  const noSoportado = motivo === null ? "" : ` soportado="no" motivo="${motivo}"`;
+  const marca = `<adjunto_registrado numero="${adjunto}" nombre="${NOMBRE_TEXTO_PEGADO}"${noSoportado}/>`;
+  return `${neutralizarEtiquetas(texto)}\n${marca}`;
 }
 
 export const detalleAdjunto = (documento: DocumentoEnviable) =>

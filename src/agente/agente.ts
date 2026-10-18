@@ -16,6 +16,7 @@ import {
   emitirEvento,
   REGLA_AMBIGUA,
   REGLA_NO_CUBIERTO,
+  REGLA_NO_EXTRAIBLE,
   REGLA_NO_VERIFICABLE,
   REGLA_PIDE_PERSONA,
   type InfoHerramienta,
@@ -23,6 +24,7 @@ import {
 } from "./adaptador.ts";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
 import { crearControlIdentidad } from "./control-identidad.ts";
+import { crearSubagente, type EjecutarSubagente } from "./extraccion.ts";
 
 export const MODELO_POR_DEFECTO = "claude-opus-5-5";
 export const MAX_TURNOS = 8;
@@ -47,8 +49,22 @@ const SYSTEM_PROMPT = [
   "En cualquier otro caso, cuando el solicitante quiera iniciar una solicitud, pídele primero su número de documento o su nombre completo y búscalo con buscar_solicitante. Las preguntas generales se responden sin identificar.",
   "Si hay varias coincidencias, no elijas: pide el número de documento.",
   "Si no hay coincidencias, dile que no lo encontraste y pídele revisar el dato; no inventes solicitantes.",
-  "Verifica la identidad con verificar_identidad y la fecha de expedición del documento. No pidas ni uses documentos de soporte antes de verificar. Si el dato no coincide, no reveles el correcto.",
+  "Verifica la identidad con verificar_identidad y la fecha de expedición del documento. Si el dato no coincide, no reveles el correcto.",
+  // Extracción de documentos (#10, R9): el modelo guía; la identidad y los datos los garantiza el código.
+  'Cuando un solicitante verificado entregue un certificado laboral o un extracto bancario, llama a extraer_documento con su número de adjunto: el atributo adjunto de <documento adjunto="N"> o el numero de <adjunto_registrado numero="N"/>.',
+  "No leas datos de los documentos por tu cuenta: usa solo los que devuelve extraer_documento, con su procedencia.",
+  "Si extraer_documento ya pidió un dato que falta, no lo pidas de nuevo con otras palabras. Un dato que el solicitante escribe no reemplaza a un documento: pídele el documento.",
+  "Para recordar datos ya extraídos en turnos anteriores, usa consultar_extracciones.",
 ].join(" ");
+
+/**
+ * Un documento entregado en la conversación, numerado por el chat en orden de llegada desde 1
+ * (specs/008-extraccion-documentos, R2). El modelo nunca lo transcribe: `extraer_documento` recibe
+ * solo el número y el código toma de aquí el texto exacto.
+ */
+export type DocumentoConversacion =
+  | { adjunto: number; nombre: string; soportado: true; contenido: string }
+  | { adjunto: number; nombre: string; soportado: false };
 
 /** Un turno previo de la conversación (chat del #8, R1). */
 export interface TurnoHistorial {
@@ -107,6 +123,10 @@ export interface OpcionesConversar {
   busquedasAmbiguas?: number;
   /** Si la conversación ya se desambiguó en un turno anterior; el chat lo guarda y lo pasa (#9). */
   desambiguada?: boolean;
+  /** Documentos de la conversación, numerados por el chat; viajan en cada turno (#10, R2). */
+  documentos?: readonly DocumentoConversacion[];
+  /** Subagente de extracción; por defecto el real con el mismo modelo (#10, R1). */
+  ejecutarSubagente?: EjecutarSubagente;
   /** Observador de cada intento de llamada al core (modo de demostración del chat). */
   alUsarHerramienta?: (info: InfoHerramienta) => void;
   ejecutarConsulta?: QueryFn;
@@ -135,6 +155,8 @@ const AVISOS: Readonly<Record<Motivo, string>> = {
     "No pude verificar tu identidad. Tu caso pasa a un analista, que te contactará.",
   pide_persona: "Te comunico con un analista de crédito, que te contactará.",
   caso_no_cubierto: "Tu caso necesita la revisión de un analista, que te contactará.",
+  documento_no_extraible:
+    "No pude leer con certeza los datos de tu documento. Tu caso pasa a un analista, que te contactará.",
 };
 
 const REGLAS: Readonly<Record<Motivo, string>> = {
@@ -146,6 +168,7 @@ const REGLAS: Readonly<Record<Motivo, string>> = {
   identidad_no_verificable: REGLA_NO_VERIFICABLE,
   pide_persona: REGLA_PIDE_PERSONA,
   caso_no_cubierto: REGLA_NO_CUBIERTO,
+  documento_no_extraible: REGLA_NO_EXTRAIBLE,
 };
 
 const REGLA_CORE_NO_ARRANCO = "constitución, Principio VI · el core no arrancó";
@@ -183,6 +206,8 @@ export async function conversar(
     historial = [],
     busquedasAmbiguas = 0,
     desambiguada = false,
+    documentos = [],
+    ejecutarSubagente,
     alUsarHerramienta,
     ejecutarConsulta = query as unknown as QueryFn,
     core,
@@ -220,6 +245,7 @@ export async function conversar(
       ...(senal.intentos !== undefined ? { intentos: senal.intentos } : {}),
       ...(senal.coincidencias !== undefined ? { coincidencias: senal.coincidencias } : {}),
       ...(senal.causa !== undefined ? { causa: senal.causa } : {}),
+      ...(senal.adjunto !== undefined ? { adjunto: senal.adjunto } : {}),
     };
     // Los eventos del intento clasificado se conservan (reflejan lo que el código ya hizo) y el
     // escalamiento va al final; el chat fija el primer estado final (spec, casos borde).
@@ -283,6 +309,8 @@ export async function conversar(
     estado,
     dormir,
     azar,
+    documentos,
+    ejecutarSubagente: ejecutarSubagente ?? crearSubagente({ modelo }),
     ...(alUsarHerramienta !== undefined ? { alUsarHerramienta } : {}),
   });
   // Regla 1 antes de las herramientas que exigen identidad, consultando el core (#9, R7).

@@ -4,8 +4,12 @@
 
 /** Estructura de la conversación: la compone `componerPrompt` en el agente. */
 export const ETIQUETAS_CONVERSACION = ["historial", "turno", "mensaje_nuevo"] as const;
-/** Documentos adjuntos: los compone el chat. */
-export const ETIQUETAS_DOCUMENTO = ["documento", "documento_no_soportado"] as const;
+/** Documentos adjuntos y su marca de registro: los compone el chat. */
+export const ETIQUETAS_DOCUMENTO = [
+  "documento",
+  "documento_no_soportado",
+  "adjunto_registrado",
+] as const;
 export const ETIQUETAS_RESERVADAS = [...ETIQUETAS_CONVERSACION, ...ETIQUETAS_DOCUMENTO] as const;
 
 /**

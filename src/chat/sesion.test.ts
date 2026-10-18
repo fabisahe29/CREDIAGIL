@@ -4,6 +4,7 @@ import {
   aplicarEventos,
   estaCerrada,
   nuevaConversacion,
+  registrarDocumento,
   registrarTurno,
   type EventoMostrado,
 } from "./sesion.ts";
@@ -115,5 +116,95 @@ describe("sesión: estado de la solicitud (US2)", () => {
     const conv = nuevaConversacion();
     aplicarEventos(conv, [evento("escalamiento")]);
     assert.equal(conv.estado, "en_curso");
+  });
+});
+
+describe("sesion: documentos numerados de la conversación", () => {
+  it("una conversación nueva no tiene documentos", () => {
+    assert.deepEqual(nuevaConversacion().documentos, []);
+  });
+
+  it("asigna 1, 2 y 3 en orden de llegada", () => {
+    let conv = nuevaConversacion();
+    const numeros: number[] = [];
+    for (const nombre of ["a.md", "b.md", "c.md"]) {
+      const r = registrarDocumento(conv, { nombre, soportado: true, contenido: `texto ${nombre}` });
+      conv = r.conversacion;
+      numeros.push(r.documento.adjunto);
+    }
+    assert.deepEqual(numeros, [1, 2, 3]);
+    assert.deepEqual(
+      conv.documentos.map((d) => d.nombre),
+      ["a.md", "b.md", "c.md"],
+    );
+  });
+
+  it("guarda el nombre, si es soportado y su contenido", () => {
+    const r = registrarDocumento(nuevaConversacion(), {
+      nombre: "certificado.md",
+      soportado: true,
+      contenido: "Salario ficticio",
+    });
+    assert.deepEqual(r.documento, {
+      adjunto: 1,
+      nombre: "certificado.md",
+      soportado: true,
+      contenido: "Salario ficticio",
+    });
+    assert.deepEqual(r.conversacion.documentos, [r.documento]);
+  });
+
+  it("un documento no soportado también recibe número y no guarda contenido", () => {
+    const antes = registrarDocumento(nuevaConversacion(), {
+      nombre: "a.md",
+      soportado: true,
+      contenido: "x",
+    }).conversacion;
+    const r = registrarDocumento(antes, {
+      nombre: "foto.png",
+      soportado: false,
+      contenido: "no debería guardarse",
+    });
+    assert.equal(r.documento.adjunto, 2);
+    assert.equal(r.documento.soportado, false);
+    assert.equal("contenido" in r.documento, false);
+  });
+
+  it("el mismo nombre dos veces recibe dos números distintos", () => {
+    const uno = registrarDocumento(nuevaConversacion(), {
+      nombre: "c.md",
+      soportado: true,
+      contenido: "x",
+    });
+    const dos = registrarDocumento(uno.conversacion, {
+      nombre: "c.md",
+      soportado: true,
+      contenido: "x",
+    });
+    assert.deepEqual(
+      dos.conversacion.documentos.map((d) => d.adjunto),
+      [1, 2],
+    );
+  });
+
+  it("no muta la conversación recibida", () => {
+    const conv = nuevaConversacion();
+    registrarDocumento(conv, { nombre: "a.md", soportado: true, contenido: "x" });
+    assert.deepEqual(conv.documentos, []);
+  });
+
+  it("una conversación nueva vuelve a numerar desde 1", () => {
+    const usada = registrarDocumento(nuevaConversacion(), {
+      nombre: "a.md",
+      soportado: true,
+      contenido: "x",
+    }).conversacion;
+    assert.equal(usada.documentos.length, 1);
+    const r = registrarDocumento(nuevaConversacion(), {
+      nombre: "b.md",
+      soportado: true,
+      contenido: "y",
+    });
+    assert.equal(r.documento.adjunto, 1);
   });
 });

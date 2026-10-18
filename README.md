@@ -32,13 +32,15 @@ Al iniciar, el chat muestra la ruta del archivo de logs y el identificador de la
 | Comando | Qué hace |
 |---------|----------|
 | `/ayuda` | Lista los comandos |
-| `/adjuntar <ruta>` | Envía al agente un documento `.txt` o `.md`. Otros formatos se informan al agente sin leer su contenido |
-| `/pegar` | Abre un bloque de texto de varias líneas; se cierra con una línea que diga `/fin` |
+| `/adjuntar <ruta>` | Envía al agente un documento `.txt` o `.md`, numerado como adjunto. Otros formatos se informan al agente sin leer su contenido |
+| `/pegar` | Abre un bloque de texto de varias líneas; se cierra con una línea que diga `/fin`. El texto llega como mensaje y queda numerado como adjunto «texto pegado» |
 | `/caso <ruta>` | Reproduce un caso de prueba (carpeta con `caso.json`) |
 | `/nueva` | Empieza una conversación nueva, sin historial |
 | `/salir` | Termina (también Ctrl+C) |
 
 Para pegar un documento de varias líneas usa `/pegar` o `/adjuntar`: si pegas varias líneas como un mensaje normal, solo se envía la primera.
+
+Cada documento de la conversación recibe un número de adjunto (1, 2, 3…) en orden de llegada; `/nueva` reinicia la numeración. Con la identidad verificada, el agente extrae los datos de un certificado laboral o de un extracto bancario por ese número, y cada dato indica de qué adjunto y de qué fragmento salió (#10). Los casos `casos/extraccion-*` lo muestran.
 
 ### Cómo leer la conversación
 

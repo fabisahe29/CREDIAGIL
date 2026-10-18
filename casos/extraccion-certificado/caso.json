@@ -1,0 +1,10 @@
+{
+  "nombre": "extraccion-certificado",
+  "descripcion": "Extracción (#10): solicitante verificado que entrega un certificado laboral completo",
+  "pasos": [
+    { "mensaje": "Hola, quiero pedir un crédito" },
+    { "mensaje": "Mi número de documento es 0001234567" },
+    { "mensaje": "La fecha de expedición de mi documento es 2012-05-14" },
+    { "adjuntar": "certificado-completo.md" }
+  ]
+}

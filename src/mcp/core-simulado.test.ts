@@ -1,5 +1,23 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import {
+  construirResultado,
+  huella,
+  validarSalida,
+  type SalidaSubagente,
+} from "../compartido/extraccion.ts";
+import {
+  CONTENIDO_CERTIFICADO,
+  CONTENIDO_CERTIFICADO_USD,
+  CONTENIDO_EXTRACTO,
+  HOY_EJEMPLO,
+  salidaCertificado,
+  salidaCertificadoUsd,
+  salidaExtracto,
+} from "../compartido/extraccion-ejemplos.ts";
+import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
+import { VERSION_POLITICA } from "../politica/politica.ts";
 import {
   crearCore,
   enmascararDocumento,
@@ -580,5 +598,268 @@ describe("core simulado: idempotencia solo de los fallos (revisión de código d
     assert.equal(estado.ok && estado.datos.identidad.verificada, true);
     assert.equal(estado.ok && estado.datos.identidad.idSolicitante, ID_HOMONIMO_1);
     assert.equal(otraVez.auditoria?.resultado, "verificada", "se volvió a verificar de verdad");
+  });
+});
+
+// ── Extracciones (#10) ───────────────────────────────────────────────────────────
+
+describe("core simulado: registrarExtraccion y consultarExtracciones (#10, US1 y US3)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  /** Core con la identidad del solicitante único verificada en `correlationId`. */
+  function coreVerificado(correlationId = randomUUID()) {
+    const core = crearCore({ ahora });
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    const r = core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-1",
+      correlationId,
+    });
+    assert.equal(r.respuesta.ok, true);
+    return { core, correlationId };
+  }
+
+  const resultadoDe = (
+    salida: SalidaSubagente,
+    contenido: string,
+    adjunto = 1,
+    nombre = "certificado.md",
+  ) => {
+    const v = validarSalida(salida, { contenido }, HOY_EJEMPLO);
+    if (!v.ok) assert.fail(JSON.stringify(v.errores));
+    return construirResultado(v.salida, { adjunto, nombre, contenido }, 1);
+  };
+
+  const entrada = (
+    correlationId: string,
+    resultado: unknown,
+    contenido = CONTENIDO_CERTIFICADO,
+    adjunto = 1,
+    nombre = "certificado.md",
+  ) => ({ correlationId, adjunto, nombre, contenido, resultado });
+
+  const certificado = () => resultadoDe(salidaCertificado(), CONTENIDO_CERTIFICADO);
+
+  it("sin identidad verificada rechaza el registro con un error de negocio (Regla 1)", () => {
+    const core = crearCore({ ahora });
+    const { respuesta, auditoria } = core.registrarExtraccion(entrada(randomUUID(), certificado()));
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.categoria, "negocio");
+    assert.equal(respuesta.error.codigo, "identidad_no_verificada");
+    assert.equal(auditoria, null);
+  });
+
+  it("con identidad, guarda el resultado con su huella, su adjunto y la marca de tiempo", () => {
+    const { core, correlationId } = coreVerificado();
+    const { respuesta, auditoria } = core.registrarExtraccion(
+      entrada(correlationId, certificado()),
+    );
+    assert.equal(respuesta.ok, true);
+    if (!respuesta.ok) return;
+    const { extraccion } = respuesta.datos;
+    assert.equal(extraccion.estado, "extraido");
+    assert.equal(extraccion.huella, huella(CONTENIDO_CERTIFICADO));
+    assert.deepEqual(extraccion.adjuntos, [1]);
+    assert.equal(extraccion.registradoEn, HOY_EJEMPLO.toISOString());
+    assert.deepEqual(auditoria, {
+      adjunto: 1,
+      huella: huella(CONTENIDO_CERTIFICADO).slice(0, 12),
+      estado: "extraido",
+      tipo: "certificado_laboral",
+      faltantes: [],
+      regla: REGLA_5,
+      versionPolitica: VERSION_POLITICA,
+    });
+  });
+
+  it("el mismo contenido en otro adjunto devuelve el mismo registro, sin duplicar ni auditar", () => {
+    const { core, correlationId } = coreVerificado();
+    core.registrarExtraccion(entrada(correlationId, certificado()));
+    const segundo = core.registrarExtraccion(
+      entrada(correlationId, certificado(), CONTENIDO_CERTIFICADO, 2, "otra-vez.md"),
+    );
+    assert.equal(segundo.auditoria, null);
+    assert.equal(segundo.respuesta.ok, true);
+    if (!segundo.respuesta.ok) return;
+    assert.deepEqual(segundo.respuesta.datos.extraccion.adjuntos, [1, 2]);
+    const lista = core.consultarExtracciones(correlationId);
+    assert.ok(lista.ok);
+    if (!lista.ok) return;
+    assert.equal(lista.datos.extracciones.length, 1);
+  });
+
+  it("repetir el mismo adjunto no lo agrega dos veces", () => {
+    const { core, correlationId } = coreVerificado();
+    core.registrarExtraccion(entrada(correlationId, certificado()));
+    const repetido = core.registrarExtraccion(entrada(correlationId, certificado()));
+    assert.ok(repetido.respuesta.ok);
+    if (!repetido.respuesta.ok) return;
+    assert.deepEqual(repetido.respuesta.datos.extraccion.adjuntos, [1]);
+  });
+
+  it("consultarExtracciones devuelve las de la conversación ordenadas por adjunto", () => {
+    const { core, correlationId } = coreVerificado();
+    core.registrarExtraccion(
+      entrada(
+        correlationId,
+        resultadoDe(salidaExtracto(), CONTENIDO_EXTRACTO, 2, "extracto.md"),
+        CONTENIDO_EXTRACTO,
+        2,
+        "extracto.md",
+      ),
+    );
+    core.registrarExtraccion(entrada(correlationId, certificado()));
+    const lista = core.consultarExtracciones(correlationId);
+    assert.ok(lista.ok);
+    if (!lista.ok) return;
+    assert.deepEqual(
+      lista.datos.extracciones.map((e) => e.adjuntos[0]),
+      [1, 2],
+    );
+  });
+
+  it("otra conversación no ve las extracciones", () => {
+    const { core, correlationId } = coreVerificado();
+    core.registrarExtraccion(entrada(correlationId, certificado()));
+    assert.deepEqual(core.consultarExtracciones(randomUUID()), {
+      ok: true,
+      datos: { extracciones: [] },
+    });
+  });
+
+  it("el almacén no guarda el contenido del documento", () => {
+    const { core, correlationId } = coreVerificado();
+    core.registrarExtraccion(entrada(correlationId, certificado()));
+    const lista = core.consultarExtracciones(correlationId);
+    assert.equal(JSON.stringify(lista).includes("Certificado laboral ficticio"), false);
+  });
+
+  it("un fragmento que no está en el contenido es extraccion_invalida con su campo (US3)", () => {
+    const { core, correlationId } = coreVerificado();
+    const resultado = certificado();
+    if (resultado.estado !== "extraido" || resultado.documento.tipo !== "certificado_laboral") {
+      return assert.fail("debía ser un certificado extraído");
+    }
+    resultado.documento.cargo!.procedencia.fragmento = "trabaja como gerente general";
+    const { respuesta, auditoria } = core.registrarExtraccion(entrada(correlationId, resultado));
+    assert.equal(auditoria, null);
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.categoria, "validacion");
+    assert.equal(respuesta.error.codigo, "extraccion_invalida");
+    assert.equal(respuesta.error.campo, "resultado.documento.cargo");
+  });
+
+  it("un monto que no está en su fragmento es extraccion_invalida (US3)", () => {
+    const { core, correlationId } = coreVerificado();
+    const resultado = certificado();
+    if (resultado.estado !== "extraido" || resultado.documento.tipo !== "certificado_laboral") {
+      return assert.fail("debía ser un certificado extraído");
+    }
+    resultado.documento.salario!.valor = 9_800_000;
+    const { respuesta } = core.registrarExtraccion(entrada(correlationId, resultado));
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.campo, "resultado.documento.salario");
+  });
+
+  it("un no_cubierto cuya causa no confirma la política es extraccion_invalida (US3)", () => {
+    const { core, correlationId } = coreVerificado();
+    const resultado = {
+      estado: "no_cubierto",
+      adjunto: 1,
+      nombre: "certificado.md",
+      huella: huella(CONTENIDO_CERTIFICADO),
+      intentos: 1,
+      causa: "moneda_extranjera",
+      tipoDetectado: "certificado_laboral",
+      fragmentoMoneda: "$3.800.000 COP",
+    };
+    const { respuesta } = core.registrarExtraccion(entrada(correlationId, resultado));
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.codigo, "extraccion_invalida");
+    assert.equal(respuesta.error.campo, "resultado.causa");
+  });
+
+  it("guarda un no_cubierto por moneda extranjera con la Regla 5", () => {
+    const { core, correlationId } = coreVerificado();
+    const resultado = resultadoDe(salidaCertificadoUsd(), CONTENIDO_CERTIFICADO_USD);
+    assert.equal(resultado.estado, "no_cubierto");
+    const { respuesta, auditoria } = core.registrarExtraccion(
+      entrada(correlationId, resultado, CONTENIDO_CERTIFICADO_USD),
+    );
+    assert.ok(respuesta.ok);
+    assert.equal(auditoria?.estado, "no_cubierto");
+    assert.equal(auditoria?.causa, "moneda_extranjera");
+    assert.equal(auditoria?.regla, REGLA_5);
+  });
+
+  it("guarda un no_extraible con su último error y la regla del Principio V", () => {
+    const { core, correlationId } = coreVerificado();
+    const resultado = {
+      estado: "no_extraible",
+      adjunto: 1,
+      nombre: "certificado.md",
+      huella: huella(CONTENIDO_CERTIFICADO),
+      intentos: 3,
+      conflictos: [],
+      ultimoError: [{ campo: "salario", motivo: "centavos_no_soportados" }],
+    };
+    const { respuesta, auditoria } = core.registrarExtraccion(entrada(correlationId, resultado));
+    assert.ok(respuesta.ok);
+    assert.equal(auditoria?.estado, "no_extraible");
+    assert.equal(auditoria?.regla, REGLA_PRINCIPIO_V);
+  });
+
+  it("el adjunto y el nombre del resultado deben ser los de la entrada", () => {
+    const { core, correlationId } = coreVerificado();
+    const { respuesta } = core.registrarExtraccion(
+      entrada(correlationId, certificado(), CONTENIDO_CERTIFICADO, 5, "certificado.md"),
+    );
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.campo, "resultado.adjunto");
+  });
+
+  for (const [campo, valor] of [
+    ["adjunto", 0],
+    ["adjunto", 1.5],
+    ["nombre", ""],
+    ["nombre", "x".repeat(256)],
+    ["contenido", ""],
+    ["contenido", "x".repeat(262_145)],
+  ] as const) {
+    it(`una entrada con ${campo} mal formado es validación de ese campo`, () => {
+      const { core, correlationId } = coreVerificado();
+      const { respuesta } = core.registrarExtraccion({
+        ...entrada(correlationId, certificado()),
+        [campo]: valor,
+      });
+      assert.equal(respuesta.ok, false);
+      if (respuesta.ok) return;
+      assert.equal(respuesta.error.categoria, "validacion");
+      assert.equal(respuesta.error.codigo, "formato_invalido");
+      assert.equal(respuesta.error.campo, campo);
+    });
+  }
+
+  it("consultarExtracciones con un correlationId inválido es validación", () => {
+    const r = crearCore().consultarExtracciones("no-es-uuid");
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.equal(r.error.campo, "correlationId");
+  });
+
+  it("con la falla simulada ambas responden transitorio", () => {
+    const core = crearCore({ falla: "siempre" });
+    const registro = core.registrarExtraccion(entrada(randomUUID(), certificado()));
+    assert.equal(registro.respuesta.ok, false);
+    if (!registro.respuesta.ok) assert.equal(registro.respuesta.error.categoria, "transitorio");
+    const consulta = core.consultarExtracciones(randomUUID());
+    assert.equal(consulta.ok, false);
+    if (!consulta.ok) assert.equal(consulta.error.categoria, "transitorio");
   });
 });

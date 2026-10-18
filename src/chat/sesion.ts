@@ -4,9 +4,9 @@
 
 import { randomUUID } from "node:crypto";
 import type { EventoNegocio } from "../compartido/eventos.ts";
-import type { TurnoHistorial } from "../agente/agente.ts";
+import type { DocumentoConversacion, TurnoHistorial } from "../agente/agente.ts";
 
-export type { TurnoHistorial };
+export type { DocumentoConversacion, TurnoHistorial };
 
 export type EstadoSolicitud = "en_curso" | "preaprobada" | "escalada";
 
@@ -18,6 +18,8 @@ export interface Conversacion {
   readonly busquedasAmbiguas: number;
   /** Si ya se desambiguó al solicitante; viaja a `conversar` en cada turno (#9). */
   readonly desambiguada: boolean;
+  /** Documentos entregados, numerados desde 1; viajan a `conversar` en cada turno (#10). */
+  readonly documentos: readonly DocumentoConversacion[];
 }
 
 /** Un evento tal como llega a la interfaz, después de validarlo otra vez (R3). */
@@ -31,7 +33,29 @@ export const nuevaConversacion = (correlationId: string = randomUUID()): Convers
   estado: "en_curso",
   busquedasAmbiguas: 0,
   desambiguada: false,
+  documentos: [],
 });
+
+/** Lo que el chat sabe de un documento antes de numerarlo. */
+export interface DocumentoNuevo {
+  nombre: string;
+  soportado: boolean;
+  /** Solo se guarda si el documento es soportado. */
+  contenido?: string;
+}
+
+/** Numera el documento con el siguiente número de la conversación; un no soportado no guarda texto. */
+export function registrarDocumento(
+  conv: Conversacion,
+  nuevo: DocumentoNuevo,
+): { conversacion: Conversacion; documento: DocumentoConversacion } {
+  const adjunto = conv.documentos.length + 1;
+  const documento: DocumentoConversacion =
+    nuevo.soportado && nuevo.contenido !== undefined
+      ? { adjunto, nombre: nuevo.nombre, soportado: true, contenido: nuevo.contenido }
+      : { adjunto, nombre: nuevo.nombre, soportado: false };
+  return { conversacion: { ...conv, documentos: [...conv.documentos, documento] }, documento };
+}
 
 export const registrarTurno = (
   conv: Conversacion,
