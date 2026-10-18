@@ -1,6 +1,6 @@
 // Regla 5 aplicada a los documentos de soporte (constitución, Principios I y V; specs/008-extraccion-documentos:
 // research.md, R5; data-model.md, "DecisionDocumento"). Funciones puras: las usan el agente, para
-// decidir qué hacer con un documento ya extraído, y el core, para revalidar lo que recibe.
+// decidir qué hacer con un documento, y el core, para revalidar lo que recibe.
 
 import {
   EXPRESIONES_MONEDA,
@@ -17,7 +17,7 @@ export type CausaNoCubierto = "moneda_extranjera" | "documento_no_soportado";
 export type MonedaDeducida =
   { tipo: "soportada"; codigo: typeof MONEDA_SOPORTADA } | { tipo: "extranjera"; codigo: string };
 
-/** Minúsculas y sin tildes, para comparar el fragmento con la tabla de expresiones. */
+/** Minúsculas y sin tildes, para comparar el texto con la tabla de expresiones. */
 const normalizar = (texto: string) =>
   texto
     .normalize("NFD")
@@ -34,9 +34,9 @@ const menciona = (texto: string, expresiones: readonly string[]) =>
   expresiones.some((expresion) => comoPalabra(expresion).test(texto));
 
 /**
- * Deduce la moneda del fragmento donde el documento la menciona. Si el fragmento nombra una moneda
- * extranjera, esa prevalece aunque también diga «pesos»: ante la duda se escala (Principio V).
- * `null` si el fragmento no nombra ninguna moneda conocida; no se presume COP.
+ * Deduce la moneda de un texto. Si nombra una moneda extranjera, esa prevalece aunque también nombre
+ * COP: ante la duda se escala (Principio V). `null` si no nombra ninguna moneda de forma inequívoca
+ * («pesos» o `$` sueltos no bastan); nunca se presume COP.
  */
 export function deducirMoneda(fragmento: string): MonedaDeducida | null {
   const texto = normalizar(fragmento);
@@ -51,12 +51,45 @@ export function deducirMoneda(fragmento: string): MonedaDeducida | null {
   return null;
 }
 
+/** Longitud máxima de un fragmento citado (la misma del esquema de procedencia). */
+const LARGO_FRAGMENTO = 300;
+
+/**
+ * Busca en todo el documento, línea por línea, una mención de moneda extranjera. Devuelve el código
+ * y el fragmento literal donde aparece (como mucho 300 caracteres), o `null`. Así la Regla 5 no
+ * depende de qué fragmento cite el modelo (revisión de 0aa8c2a).
+ */
+export function buscarMonedaExtranjera(
+  contenido: string,
+): { codigo: string; fragmento: string } | null {
+  for (const linea of contenido.split(/\r?\n/)) {
+    const limpia = linea.trim();
+    if (limpia === "") continue;
+    // Una línea larga se recorre en ventanas solapadas para citar un fragmento que la contenga.
+    const ventanas =
+      limpia.length <= LARGO_FRAGMENTO
+        ? [limpia]
+        : Array.from({ length: Math.ceil(limpia.length / (LARGO_FRAGMENTO / 2)) }, (_, i) =>
+            limpia
+              .slice(i * (LARGO_FRAGMENTO / 2), i * (LARGO_FRAGMENTO / 2) + LARGO_FRAGMENTO)
+              .trim(),
+          );
+    for (const ventana of ventanas) {
+      const moneda = deducirMoneda(ventana);
+      if (moneda?.tipo === "extranjera") return { codigo: moneda.codigo, fragmento: ventana };
+    }
+  }
+  return null;
+}
+
 /** Lo que la política necesita saber de una extracción ya validada. */
 export interface EntradaDocumento {
   /** Lo que el subagente clasificó: un tipo soportado, `otro` o cualquier otro valor. */
   tipo: string;
   /** Fragmento donde el documento menciona la moneda; `null` si no la menciona. */
   fragmentoMoneda: string | null;
+  /** Fragmento del documento que nombra una moneda extranjera (`buscarMonedaExtranjera`), o `null`. */
+  monedaExtranjeraEnContenido: string | null;
   /** Campos para los que el documento da dos valores distintos. */
   conflictos: readonly string[];
   /** Campos que el documento no trae. */
@@ -81,38 +114,81 @@ export interface DecisionDocumento {
 const esTipoSoportado = (tipo: string) =>
   (TIPOS_DOCUMENTO_SOPORTADOS as readonly string[]).includes(tipo);
 
+const noCubierto = (
+  causa: CausaNoCubierto,
+  motivo: string,
+  valores: Record<string, string>,
+): DecisionDocumento => ({
+  versionPolitica: VERSION_POLITICA,
+  regla: REGLA_5,
+  resultado: "no_cubierto",
+  causa,
+  motivo,
+  valores: { ...valores, causa },
+  faltantes: [],
+});
+
 /**
- * Orden: tipo no soportado → moneda extranjera → valores en conflicto → extraído (Regla 5 y luego
- * Principio V). Si el documento trae montos y no nombra una moneda reconocible, la moneda es un
- * faltante; sin montos, no hace falta.
+ * Regla 5 sin modelo, antes que la Regla 1 (orden 4 → 5 → 1): un archivo que el chat no pudo leer, o
+ * un documento que nombra una moneda extranjera en cualquier parte, no está cubierto. `null` si con
+ * esto no se puede decir; el tipo de documento lo clasifica después el subagente.
+ */
+export function evaluarRegla5Previa(documento: {
+  soportado: boolean;
+  contenido?: string;
+}): DecisionDocumento | null {
+  if (!documento.soportado || documento.contenido === undefined) {
+    return noCubierto(
+      "documento_no_soportado",
+      "El archivo no se pudo leer como texto (formato, tamaño o codificación no soportados).",
+      { tipo: "archivo no soportado" },
+    );
+  }
+  const extranjera = buscarMonedaExtranjera(documento.contenido);
+  if (extranjera !== null) {
+    return noCubierto(
+      "moneda_extranjera",
+      "El documento nombra una moneda distinta de la soportada.",
+      { tipo: "sin clasificar", moneda: extranjera.codigo },
+    );
+  }
+  return null;
+}
+
+/**
+ * Orden: tipo no soportado → moneda extranjera (citada o en cualquier parte del documento) → valores
+ * en conflicto → extraído (Regla 5 y luego Principio V). Si el documento trae montos y no nombra una
+ * moneda reconocible, la moneda es un faltante; sin montos, no hace falta.
  */
 export function evaluarDocumento(entrada: EntradaDocumento): DecisionDocumento {
   const { tipo, fragmentoMoneda, conflictos } = entrada;
   const base = { versionPolitica: VERSION_POLITICA };
 
   if (!esTipoSoportado(tipo)) {
-    return {
-      ...base,
-      regla: REGLA_5,
-      resultado: "no_cubierto",
-      causa: "documento_no_soportado",
-      motivo: "El tipo de documento no está entre los soportados por la política.",
-      valores: { tipo, causa: "documento_no_soportado" },
-      faltantes: [],
-    };
+    return noCubierto(
+      "documento_no_soportado",
+      "El tipo de documento no está entre los soportados por la política.",
+      { tipo },
+    );
   }
 
   const moneda = fragmentoMoneda === null ? null : deducirMoneda(fragmentoMoneda);
-  if (moneda?.tipo === "extranjera") {
-    return {
-      ...base,
-      regla: REGLA_5,
-      resultado: "no_cubierto",
-      causa: "moneda_extranjera",
-      motivo: "El documento está en una moneda distinta de la soportada.",
-      valores: { tipo, causa: "moneda_extranjera", moneda: moneda.codigo },
-      faltantes: [],
-    };
+  const enContenido =
+    entrada.monedaExtranjeraEnContenido === null
+      ? null
+      : deducirMoneda(entrada.monedaExtranjeraEnContenido);
+  const codigoExtranjero = (m: MonedaDeducida | null) =>
+    m?.tipo === "extranjera" ? m.codigo : null;
+  const extranjera = codigoExtranjero(moneda) ?? codigoExtranjero(enContenido);
+  if (extranjera !== null) {
+    return noCubierto(
+      "moneda_extranjera",
+      "El documento está en una moneda distinta de la soportada.",
+      {
+        tipo,
+        moneda: extranjera,
+      },
+    );
   }
 
   if (conflictos.length > 0) {

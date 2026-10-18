@@ -131,7 +131,7 @@ Como equipo, quiero un juego de documentos ficticios en `.txt` o `.md` para prob
 ### Edge Cases
 
 - **Documento entregado antes de verificar la identidad**: el control de identidad bloquea la extracción (US1, escenario 5). Así se cumple por código el FR-011a del #9, que hasta ahora dependía del prompt.
-- **Documento claramente fuera de política antes de verificar** (por ejemplo, un certificado en dólares): las reglas 4 y 5 van antes que la Regla 1. Si el agente ya lo detecta por el texto, escala sin identificar, como hace hoy. La detección determinista de la moneda ocurre al extraer, que exige identidad.
+- **Documento fuera de política antes de verificar** (por ejemplo, un certificado en dólares): las reglas 4 y 5 van antes que la Regla 1. El código revisa, sin modelo y sin identidad, el formato y la moneda de cada documento al cerrar el turno, después de que el modelo atendió una posible petición de persona (Regla 4). Si se intenta extraer sin identidad, primero se clasifica el tipo, sin extraer datos personales, y solo si el caso está cubierto se bloquea por la Regla 1 (FR-015a).
 - **Documento vacío o solo con texto irrelevante**: no hay datos que extraer. Si no se reconoce el tipo, se marca como tipo no soportado.
 - **Documento con dos valores para el mismo campo** (por ejemplo, dos salarios distintos): es contradictorio. No se elige uno: el documento se marca como no extraíble y se escala (Principio V).
 - **Monto con centavos distintos de cero**: no pasa el esquema de pesos enteros. Si persiste tras los reintentos, el documento se marca como no extraíble y se escala; nadie redondea a criterio.
@@ -174,8 +174,9 @@ Como equipo, quiero un juego de documentos ficticios en `.txt` o `.md` para prob
 
 **Casos no cubiertos**
 
-- **FR-014**: Un documento en una moneda distinta de COP o de un tipo no soportado MUST producir un resultado "caso no cubierto" con su causa (`moneda_extranjera` o `documento_no_soportado`), en lugar de un certificado o un extracto.
+- **FR-014**: Un documento en una moneda distinta de COP o de un tipo no soportado MUST producir un resultado "caso no cubierto" con su causa (`moneda_extranjera` o `documento_no_soportado`), en lugar de un certificado o un extracto. La moneda extranjera se busca en **todo** el documento, no solo en el fragmento que cita el modelo, y COP solo se reconoce con expresiones inequívocas: «pesos» o `$` sueltos no bastan.
 - **FR-015**: Ante un "caso no cubierto", el agente MUST escalar por código con la Regla 5 mediante el mecanismo de escalamiento del #9 (FR-011b del #9). Desde ese momento no se ejecuta ninguna otra herramienta en la conversación.
+- **FR-015a** *(agregado tras la revisión de cumplimiento de 0aa8c2a)*: La Regla 5 MUST evaluarse antes que la Regla 1 (orden 4 → 5 → 1). Al cerrar cada turno, el código revisa sin modelo el formato y la moneda de los documentos de la conversación y escala si no están cubiertos. Si se intenta extraer sin identidad verificada, se clasifica primero el tipo del documento con una consulta que no extrae datos personales, y solo si el caso está cubierto se bloquea por la Regla 1.
 - **FR-016**: Un archivo que el chat ya marcó como no soportado (#8) MUST NOT enviarse a extracción.
 
 **Auditoría y observabilidad**

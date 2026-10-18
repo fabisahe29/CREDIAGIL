@@ -863,3 +863,36 @@ describe("core simulado: registrarExtraccion y consultarExtracciones (#10, US1 y
     if (!consulta.ok) assert.equal(consulta.error.categoria, "transitorio");
   });
 });
+
+describe("core simulado: moneda extranjera en el contenido (revisión de 0aa8c2a)", () => {
+  it("rechaza un extraido sobre un documento que nombra una moneda extranjera en cualquier parte", () => {
+    const correlationId = randomUUID();
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-1",
+      correlationId,
+    });
+    const v = validarSalida(salidaCertificado(), { contenido: CONTENIDO_CERTIFICADO }, HOY_EJEMPLO);
+    if (!v.ok) return assert.fail("la salida de ejemplo debía validar");
+    const resultado = construirResultado(
+      v.salida,
+      { adjunto: 1, nombre: "certificado.md", contenido: CONTENIDO_CERTIFICADO },
+      1,
+    );
+    const conDolares = `${CONTENIDO_CERTIFICADO}\nBono anual: USD 300`;
+    const { respuesta } = core.registrarExtraccion({
+      correlationId,
+      adjunto: 1,
+      nombre: "certificado.md",
+      contenido: conDolares,
+      resultado: { ...resultado, huella: huella(conDolares) },
+    });
+    assert.equal(respuesta.ok, false);
+    if (respuesta.ok) return;
+    assert.equal(respuesta.error.codigo, "extraccion_invalida");
+    assert.equal(respuesta.error.campo, "resultado.estado");
+  });
+});

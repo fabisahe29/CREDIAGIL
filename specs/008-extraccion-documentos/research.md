@@ -75,8 +75,12 @@ Ver [contracts/subagente.md](contracts/subagente.md).
 
 1. **Esquema** (Zod): tipos, enteros no negativos, fechas de calendario válidas y no futuras.
 2. **Procedencia** (FR-008): cada `fragmento` aparece en el documento, comparando con los espacios en blanco colapsados.
-3. **Montos**: los dígitos del `valor` aparecen en su fragmento, una vez quitados los separadores de miles y unos centavos `,00`. Unos centavos distintos de cero no pasan.
-4. **Moneda**: se deduce del fragmento con la tabla de la política (R5), no de lo que diga el subagente.
+3. **Valores en su cita** (ampliado tras la revisión de `0aa8c2a`):
+   - montos: los dígitos del `valor` aparecen en su fragmento, una vez quitados los separadores de miles y unos centavos `,00`; unos centavos distintos de cero no pasan;
+   - textos (empleador, cargo, titular, descripción): aparecen en su cita, sin distinguir mayúsculas, tildes ni espacios;
+   - fechas: aparecen en su cita, en AAAA-MM-DD, con números o con el mes en letras, y no son posteriores a hoy **en Bogotá**;
+   - sentido del movimiento: si la cita dice «abono» o «cargo», manda la última de las dos; si no, un `+` o una palabra propia del sentido.
+4. **Moneda**: se deduce del fragmento con la tabla de la política (R5), no de lo que diga el subagente. Además, al construir y al revalidar el resultado, se busca una moneda extranjera en **todo** el documento: así la Regla 5 no depende del fragmento que cite el modelo.
 
 Cada falla produce un error `{ campo, motivo }`. El agente lo usa para reintentar y el core lo usa para rechazar.
 
@@ -90,7 +94,7 @@ Cada falla produce un error `{ campo, motivo }`. El agente lo usa para reintenta
 
 **Decisión**: `src/politica/politica.ts` suma:
 - `TIPOS_DOCUMENTO_SOPORTADOS = ["certificado_laboral", "extracto_bancario"]` (aclaración Q1);
-- `MONEDA_SOPORTADA = "COP"` y la tabla de expresiones de moneda: `COP`, "pesos" y "pesos colombianos" para COP; `USD`, `US$`, "dólares", `EUR`, "euros" y otras para moneda extranjera;
+- `MONEDA_SOPORTADA = "COP"` y la tabla de expresiones de moneda. COP solo con expresiones inequívocas: `COP`, "pesos colombianos" o "pesos m/cte"; «pesos» o `$` sueltos no bastan, porque también los usan otros países (revisión de `0aa8c2a`). Para moneda extranjera: `USD`, `US$`, "dólares", "dollars", `EUR`, "euros" y los pesos de otros países (mexicanos, chilenos, argentinos, uruguayos y otros);
 - `MAX_INTENTOS_EXTRACCION = 3`.
 
 Un módulo nuevo, `src/politica/documentos.ts`, expone `evaluarDocumento(salidaValidada)`. Devuelve una decisión estructurada (regla, valores, motivo y versión):
@@ -149,6 +153,11 @@ Un módulo nuevo, `src/politica/documentos.ts`, expone `evaluarDocumento(salidaV
 **Motivo**: cumple FR-004 y el FR-011a del #9 por código y en dos capas (Principio IV). Es el primer uso real del control del #9, que hasta ahora solo se ejercía en pruebas.
 
 **Alternativa descartada**: comprobar la identidad dentro del manejador: duplicaría el control.
+
+**Regla 5 antes que la Regla 1** (agregado tras la revisión de cumplimiento de `0aa8c2a`, FR-015a). La revisión mostró que, sin identidad, el control bloqueaba por la Regla 1 antes de evaluar la moneda o el tipo, contra el orden 4 → 5 → 1. Ahora:
+- **Al cerrar cada turno**, `cerrarTurnoDocumentos` aplica `evaluarRegla5Previa`, sin modelo, a todos los documentos: un archivo no soportado o una moneda extranjera en cualquier parte escalan. Va después del turno del modelo, que resuelve la Regla 4, y antes del cierre por identidad. La primera señal prevalece.
+- **Al intentar extraer sin identidad**, el control llama a `evaluarRegla5AntesDeIdentidad` antes de bloquear: la revisión sin modelo y después un clasificador que solo devuelve el tipo, sin datos personales. Si el caso no está cubierto, escala por la Regla 5; si lo está, bloquea por la Regla 1.
+- **Alternativas descartadas**: clasificar con el modelo cada documento al llegar, antes de la Regla 4 (un texto pegado que pide una persona escalaría por la Regla 5); dejar la Regla 5 solo al prompt (no es determinista).
 
 ## R9. System prompt
 

@@ -26,6 +26,11 @@ export interface OpcionesControlIdentidad {
   /** Reloj y azar de los reintentos; inyectables en las pruebas. */
   dormir?: (ms: number) => Promise<void>;
   azar?: () => number;
+  /**
+   * Regla 5 antes que la Regla 1 (orden 4 → 5 → 1; revisión de 0aa8c2a): antes de bloquear por falta
+   * de identidad, se pregunta si el caso no está cubierto. Devuelve `true` si ya escaló.
+   */
+  antesDeRegla1?: (herramienta: string, entrada: unknown) => Promise<boolean>;
 }
 
 const PREFIJO = `mcp__${CLAVE_SERVIDOR}__`;
@@ -33,6 +38,7 @@ const MOTIVO_SIN_IDENTIDAD = "Regla 1: la identidad del solicitante no está ver
 const MOTIVO_SIN_RESPUESTA = "No se pudo comprobar la identidad; no se continúa.";
 const MOTIVO_OTRO_SOLICITANTE = "Regla 1: la identidad verificada es de otro solicitante.";
 const MOTIVO_ESCALADA = "La conversación ya pasó a un analista; no se ejecutan más herramientas.";
+const MOTIVO_REGLA_5 = "Regla 5: el caso no está cubierto por la política; pasa a un analista.";
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
@@ -50,7 +56,34 @@ export function crearControlIdentidad({
   herramientas = HERRAMIENTAS_CON_IDENTIDAD,
   dormir = dormirDeVerdad,
   azar = Math.random,
+  antesDeRegla1,
 }: OpcionesControlIdentidad): HookCallback {
+  /** Si la Regla 5 ya escaló este caso. Una falla al evaluarla no escala: decide la Regla 1. */
+  async function escaloPorRegla5(herramienta: string, entrada: unknown): Promise<boolean> {
+    if (antesDeRegla1 === undefined) return false;
+    try {
+      const escalo = await antesDeRegla1(herramienta, entrada);
+      if (escalo) {
+        registrar("control_identidad", {
+          correlationId: estado.correlationId,
+          herramienta,
+          decision: "regla_5",
+        });
+      }
+      return escalo;
+    } catch (error) {
+      registrar(
+        "error_regla_5_previa",
+        {
+          correlationId: estado.correlationId,
+          causa: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        },
+        { nivel: "error" },
+      );
+      return false;
+    }
+  }
+
   function bloquear(
     herramienta: string,
     motivo: string,
@@ -77,6 +110,7 @@ export function crearControlIdentidad({
   async function decidir(
     herramienta: string,
     idSolicitanteAccion: string | undefined,
+    entradaHerramienta: unknown,
   ): Promise<SyncHookJSONOutput> {
     let resultado;
     try {
@@ -110,6 +144,8 @@ export function crearControlIdentidad({
     if (!respuesta.ok) return bloquear(herramienta, MOTIVO_SIN_RESPUESTA);
     const decision = evaluarRegla1(respuesta.datos.identidad, idSolicitanteAccion);
     if (!decision.permitido) {
+      // La Regla 5 va antes: si el caso no está cubierto, escala en lugar de bloquear por identidad.
+      if (await escaloPorRegla5(herramienta, entradaHerramienta)) return denegar(MOTIVO_REGLA_5);
       const identidad = decision.valores["identidad"] ?? "no verificada";
       const deOtro = respuesta.datos.identidad.verificada;
       return bloquear(
@@ -144,6 +180,10 @@ export function crearControlIdentidad({
     // Si la herramienta actúa sobre un solicitante concreto (p. ej. el registro del #13), debe ser
     // el verificado: la verificación no se transfiere a otra persona.
     const idSolicitante = (entrada.tool_input as { idSolicitante?: unknown } | null)?.idSolicitante;
-    return decidir(herramienta, typeof idSolicitante === "string" ? idSolicitante : undefined);
+    return decidir(
+      herramienta,
+      typeof idSolicitante === "string" ? idSolicitante : undefined,
+      entrada.tool_input,
+    );
   };
 }

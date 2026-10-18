@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import {
   componerPromptExtraccion,
+  crearClasificador,
   crearSubagente,
   ESQUEMA_JSON_SALIDA,
   extraerConIntentos,
+  PROMPT_CLASIFICACION,
   PROMPT_EXTRACCION,
   type ConsultaSubagente,
   type EjecutarSubagente,
@@ -257,5 +259,45 @@ describe("extracción con intentos acotados (#10, US4)", () => {
       ],
     );
     assert.ok(intentos.every((i) => typeof i.duracionMs === "number" && i.duracionMs >= 0));
+  });
+});
+describe("clasificador previo: solo el tipo, antes de la identidad (revisión de 0aa8c2a)", () => {
+  it("usa una consulta sin herramientas, con su propio prompt y un esquema que solo pide el tipo", async () => {
+    const { fn, llamadas } = consultaFalsa([exitoSdk({ tipo: "certificado_laboral" })]);
+    const r = await crearClasificador({ ejecutarConsulta: fn })({
+      documento,
+      correlationId: CORRELATION_ID,
+    });
+    assert.deepEqual(r, { ok: true, tipo: "certificado_laboral" });
+    const { options, prompt } = llamadas[0]!;
+    assert.deepEqual(options.tools, []);
+    assert.equal(options.systemPrompt, PROMPT_CLASIFICACION);
+    const esquema = options.outputFormat?.schema as {
+      properties?: Record<string, unknown>;
+    };
+    assert.deepEqual(Object.keys(esquema.properties ?? {}), ["tipo"]);
+    assert.match(prompt, /<documento adjunto="3" nombre="certificado\.md">/);
+  });
+
+  it("una salida que no es un tipo válido es salida_invalida", async () => {
+    const { fn } = consultaFalsa([exitoSdk({ tipo: "desprendible", salario: 1 })]);
+    const r = await crearClasificador({ ejecutarConsulta: fn })({
+      documento,
+      correlationId: CORRELATION_ID,
+    });
+    assert.equal(r.ok === false && r.causa, "salida_invalida");
+  });
+
+  it("sin respuesta devuelve la causa, como el subagente", async () => {
+    const { fn } = consultaFalsa(new Error("caído"));
+    const r = await crearClasificador({ ejecutarConsulta: fn })({
+      documento,
+      correlationId: CORRELATION_ID,
+    });
+    assert.equal(r.ok === false && r.causa, "error_sdk");
+  });
+
+  it("el prompt de extracción pide moneda null con solo «pesos» o $", () => {
+    assert.match(PROMPT_EXTRACCION, /Con solo «pesos» o el símbolo \$, moneda va en null\./);
   });
 });

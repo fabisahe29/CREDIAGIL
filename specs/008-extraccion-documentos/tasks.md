@@ -248,6 +248,17 @@ description: "Lista de tareas: extracción estructurada de documentos con subage
 
 **Hallazgo corregido**: el primer intento con el modelo real falló en los 3 intentos con `error_sdk`: el CLI del Agent SDK rechaza el JSON Schema draft 2020-12 que Zod genera por defecto. La conversación escaló, sin usar ningún dato. El esquema ahora va en draft-07 y sin `$schema`, con una prueba que lo cubre, y el log `intento_extraccion` incluye el detalle del SDK.
 
+### Correcciones de la revisión de `0aa8c2a`
+
+Las revisiones de código y de cumplimiento bloquearon el PR por la Regla 5. Se corrigió:
+- COP solo con expresiones inequívocas; «pesos» suelto ya no es COP, y los pesos de otros países y las formas en inglés del dólar son moneda extranjera.
+- La moneda extranjera se busca en todo el documento, en el agente y en el core.
+- La Regla 5 va antes que la Regla 1: revisión sin modelo al cerrar cada turno, y clasificación del tipo antes de bloquear una extracción sin identidad (FR-015a).
+- Cada valor se contrasta con su cita: textos, fechas y sentido de los movimientos.
+- «Hoy» es el día en Bogotá.
+
+Cada corrección tiene sus pruebas: política, validación compartida, core, clasificador, adaptador, control de identidad y agente.
+
 ---
 
 ## Dependencies & Execution Order

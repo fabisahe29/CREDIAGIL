@@ -10,6 +10,7 @@ import { ETIQUETAS_CONVERSACION, neutralizarEtiquetas } from "../compartido/etiq
 import type { EventoNegocio } from "../compartido/eventos.ts";
 import {
   CLAVE_SERVIDOR,
+  cerrarTurnoDocumentos,
   cerrarTurnoIdentidad,
   crearAdaptador,
   crearEstado,
@@ -24,7 +25,12 @@ import {
 } from "./adaptador.ts";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
 import { crearControlIdentidad } from "./control-identidad.ts";
-import { crearSubagente, type EjecutarSubagente } from "./extraccion.ts";
+import {
+  crearClasificador,
+  crearSubagente,
+  type ClasificarDocumento,
+  type EjecutarSubagente,
+} from "./extraccion.ts";
 
 export const MODELO_POR_DEFECTO = "claude-opus-5-5";
 export const MAX_TURNOS = 8;
@@ -127,6 +133,8 @@ export interface OpcionesConversar {
   documentos?: readonly DocumentoConversacion[];
   /** Subagente de extracción; por defecto el real con el mismo modelo (#10, R1). */
   ejecutarSubagente?: EjecutarSubagente;
+  /** Clasificador previo del tipo de documento (Regla 5 antes de la 1); inyectable en las pruebas. */
+  clasificarDocumento?: ClasificarDocumento;
   /** Observador de cada intento de llamada al core (modo de demostración del chat). */
   alUsarHerramienta?: (info: InfoHerramienta) => void;
   ejecutarConsulta?: QueryFn;
@@ -208,6 +216,7 @@ export async function conversar(
     desambiguada = false,
     documentos = [],
     ejecutarSubagente,
+    clasificarDocumento,
     alUsarHerramienta,
     ejecutarConsulta = query as unknown as QueryFn,
     core,
@@ -311,10 +320,23 @@ export async function conversar(
     azar,
     documentos,
     ejecutarSubagente: ejecutarSubagente ?? crearSubagente({ modelo }),
+    clasificarDocumento: clasificarDocumento ?? crearClasificador({ modelo }),
     ...(alUsarHerramienta !== undefined ? { alUsarHerramienta } : {}),
   });
   // Regla 1 antes de las herramientas que exigen identidad, consultando el core (#9, R7).
-  const controlIdentidad = crearControlIdentidad({ core: coreEnUso, estado, dormir, azar });
+  const controlIdentidad = crearControlIdentidad({
+    core: coreEnUso,
+    estado,
+    dormir,
+    azar,
+    // Regla 5 antes que la Regla 1 al intentar extraer sin identidad (revisión de 0aa8c2a).
+    antesDeRegla1: (herramienta, entrada) =>
+      herramienta === "extraer_documento"
+        ? adaptador.evaluarRegla5AntesDeIdentidad(
+            (entrada as { adjunto?: unknown } | null)?.adjunto,
+          )
+        : Promise.resolve(false),
+  });
   const prompt = componerPrompt(mensaje, historial);
 
   async function intentar(): Promise<Intento> {
@@ -377,7 +399,9 @@ export async function conversar(
       intento = await intentar();
       clase = clasificar(intento);
     }
-    // Al cerrar el turno clasificado se decide el escalamiento por identidad ambigua (#9, FR-006).
+    // Al cerrar el turno, la Regla 5 sobre los documentos, sin modelo, va antes que el escalamiento
+    // por identidad ambigua (#9, FR-006): orden 4 → 5 → 1 (revisión de 0aa8c2a).
+    cerrarTurnoDocumentos(estado, documentos);
     cerrarTurnoIdentidad(estado);
     // La señal del adaptador prevalece sobre cualquier result (contracts/agente.md).
     if (estado.escalamiento !== null) {

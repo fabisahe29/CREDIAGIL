@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
+  cerrarTurnoDocumentos,
   cerrarTurnoIdentidad,
   crearAdaptador,
   crearEstado,
   emitirEvento,
   REGLA_NO_CUBIERTO,
   REGLA_NO_EXTRAIBLE,
+  REGLA_5_DOCUMENTOS,
   type InfoHerramienta,
   type SenalEscalamiento,
 } from "./adaptador.ts";
@@ -35,7 +37,12 @@ import {
 } from "../mcp/datos-ejemplo.ts";
 import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
 import type { DocumentoConversacion } from "./agente.ts";
-import type { EjecutarSubagente, EntradaSubagente, RespuestaSubagente } from "./extraccion.ts";
+import type {
+  ClasificarDocumento,
+  EjecutarSubagente,
+  EntradaSubagente,
+  RespuestaSubagente,
+} from "./extraccion.ts";
 import { crearCore } from "../mcp/core-simulado.ts";
 import { fijarDestino } from "../compartido/logs.ts";
 import type { RegistroExtraccion, SalidaSubagente } from "../compartido/extraccion.ts";
@@ -860,7 +867,7 @@ const doc = (
 function prepararExtraccion(
   documentos: DocumentoConversacion[],
   respuestas: RespuestaSubagente[],
-  opciones: { verificar?: boolean; core?: ClienteCore } = {},
+  opciones: { verificar?: boolean; core?: ClienteCore; clasificar?: ClasificarDocumento } = {},
 ) {
   const correlationId = randomUUID();
   const estado = crearEstado(correlationId);
@@ -873,6 +880,10 @@ function prepararExtraccion(
     estado,
     documentos,
     ejecutarSubagente: subagente.fn,
+    // Nunca el clasificador real: las pruebas no llaman al modelo.
+    clasificarDocumento:
+      opciones.clasificar ??
+      (async () => ({ ok: false, causa: "error_sdk", detalle: "no simulado" })),
     hoy: () => HOY_EJEMPLO,
     dormir: async () => {},
     azar: () => 0.5,
@@ -1204,7 +1215,7 @@ describe("adaptador: casos no cubiertos (#10, US5)", () => {
   beforeEach(() => fijarDestino({ write: () => true }));
   afterEach(() => fijarDestino(null));
 
-  it("un certificado en dólares escala con la Regla 5 por moneda extranjera y se registra", async () => {
+  it("un certificado en dólares escala con la Regla 5 por código, sin llamar al subagente ni registrar", async () => {
     const p = prepararExtraccion(
       [doc(1, CONTENIDO_CERTIFICADO_USD)],
       [valida(salidaCertificadoUsd())],
@@ -1226,8 +1237,17 @@ describe("adaptador: casos no cubiertos (#10, US5)", () => {
         adjunto: 1,
       },
     );
-    assert.equal(p.enMemoria.registros[0]?.resultado.estado, "no_cubierto");
+    assert.equal(p.subagente.entradas.length, 0);
+    assert.equal(p.enMemoria.registros.length, 0);
     assert.equal(contenidoDe(r).datos?.["resultado"], undefined);
+  });
+
+  it("un documento en pesos de otro país escala por moneda extranjera (revisión de 0aa8c2a)", async () => {
+    const contenido = "Certificado ficticio\nSalario mensual: 950.000 pesos argentinos";
+    const p = prepararExtraccion([doc(1, contenido)], [valida(salidaCertificado())]);
+    await p.extraer(1);
+    assert.equal(p.estado.escalamiento?.causa, "moneda_extranjera");
+    assert.equal(p.subagente.entradas.length, 0);
   });
 
   it("un documento de otro tipo escala por documento no soportado", async () => {
@@ -1251,5 +1271,99 @@ describe("adaptador: casos no cubiertos (#10, US5)", () => {
     assert.equal(p.subagente.entradas.length, 0);
     assert.equal(p.enMemoria.registros.length, 0);
     assert.equal(p.enMemoria.consultas(), 0);
+  });
+});
+
+describe("adaptador: Regla 5 antes que la Regla 1 (revisión de 0aa8c2a)", () => {
+  beforeEach(() => fijarDestino({ write: () => true }));
+  afterEach(() => fijarDestino(null));
+
+  const clasificadorQueDice = (tipo: "certificado_laboral" | "extracto_bancario" | "otro") => {
+    const llamadas: number[] = [];
+    const fn: ClasificarDocumento = async ({ documento }) => {
+      llamadas.push(documento.adjunto);
+      return { ok: true, tipo };
+    };
+    return { fn, llamadas };
+  };
+
+  it("sin identidad, un documento de otro tipo escala por la Regla 5 tras clasificarlo, sin extraer", async () => {
+    const clasificador = clasificadorQueDice("otro");
+    const p = prepararExtraccion([doc(1, CONTENIDO_OTRO, "desprendible.md")], [], {
+      verificar: false,
+      clasificar: clasificador.fn,
+    });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), true);
+    assert.equal(p.estado.escalamiento?.causa, "documento_no_soportado");
+    assert.equal(p.estado.escalamiento?.regla, REGLA_NO_CUBIERTO);
+    assert.deepEqual(clasificador.llamadas, [1]);
+    assert.equal(p.subagente.entradas.length, 0);
+    assert.equal(p.enMemoria.registros.length, 0);
+  });
+
+  it("sin identidad, un documento en dólares escala sin llamar al modelo", async () => {
+    const clasificador = clasificadorQueDice("certificado_laboral");
+    const p = prepararExtraccion([doc(1, CONTENIDO_CERTIFICADO_USD)], [], {
+      verificar: false,
+      clasificar: clasificador.fn,
+    });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), true);
+    assert.equal(p.estado.escalamiento?.causa, "moneda_extranjera");
+    assert.deepEqual(clasificador.llamadas, []);
+  });
+
+  it("sin identidad, un tipo soportado no escala: queda para la Regla 1", async () => {
+    const clasificador = clasificadorQueDice("certificado_laboral");
+    const p = prepararExtraccion([doc(1, CONTENIDO_CERTIFICADO)], [], {
+      verificar: false,
+      clasificar: clasificador.fn,
+    });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), false);
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("si el clasificador no responde, no escala: decide la Regla 1 y luego la extracción", async () => {
+    const p = prepararExtraccion([doc(1, CONTENIDO_OTRO)], [], { verificar: false });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(1), false);
+    assert.equal(p.estado.escalamiento, null);
+  });
+
+  it("un adjunto inexistente no escala", async () => {
+    const p = prepararExtraccion([], [], { verificar: false });
+    assert.equal(await p.adaptador.evaluarRegla5AntesDeIdentidad(9), false);
+  });
+
+  it("al cerrar el turno, un archivo no soportado escala aunque el modelo no hiciera nada", () => {
+    const estado = crearEstado(randomUUID());
+    cerrarTurnoDocumentos(estado, [
+      doc(1, CONTENIDO_CERTIFICADO),
+      { adjunto: 2, nombre: "foto.png", soportado: false },
+    ]);
+    assert.equal(estado.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(estado.escalamiento?.causa, "documento_no_soportado");
+    assert.equal(estado.escalamiento?.adjunto, 2);
+    assert.equal(estado.escalamiento?.herramienta, REGLA_5_DOCUMENTOS);
+  });
+
+  it("al cerrar el turno, una moneda extranjera en un documento escala", () => {
+    const estado = crearEstado(randomUUID());
+    cerrarTurnoDocumentos(estado, [doc(3, CONTENIDO_CERTIFICADO_USD)]);
+    assert.equal(estado.escalamiento?.causa, "moneda_extranjera");
+    assert.equal(estado.escalamiento?.adjunto, 3);
+  });
+
+  it("al cerrar el turno, documentos cubiertos no escalan, y una señal previa (Regla 4) prevalece", () => {
+    const estado = crearEstado(randomUUID());
+    cerrarTurnoDocumentos(estado, [doc(1, CONTENIDO_CERTIFICADO), doc(2, CONTENIDO_EXTRACTO)]);
+    assert.equal(estado.escalamiento, null);
+    estado.escalamiento = {
+      motivo: "pide_persona",
+      regla: "Regla 4 · el solicitante pide hablar con una persona",
+      resultado: "escalada",
+      correlationId: estado.correlationId,
+      ts: new Date().toISOString(),
+    };
+    cerrarTurnoDocumentos(estado, [doc(3, CONTENIDO_CERTIFICADO_USD)]);
+    assert.equal(estado.escalamiento.motivo, "pide_persona");
   });
 });

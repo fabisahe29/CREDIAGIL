@@ -5,7 +5,7 @@
 
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { deducirMoneda, evaluarDocumento } from "../politica/documentos.ts";
+import { buscarMonedaExtranjera, deducirMoneda, evaluarDocumento } from "../politica/documentos.ts";
 import {
   MAX_INTENTOS_EXTRACCION,
   MONEDA_SOPORTADA,
@@ -254,9 +254,23 @@ export function camposFaltantes(salida: SalidaSubagente): string[] {
 // Comprobaciones contra el documento
 // ---------------------------------------------------------------------------------------------
 
+/** Zona horaria de Crediágil: «hoy» es el día en Colombia, no en UTC (revisión de 0aa8c2a). */
+export const ZONA_HORARIA = "America/Bogota";
+
+/** La fecha AAAA-MM-DD de un instante en la zona horaria de Crediágil. */
+export const fechaLocal = (instante: Date): string =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: ZONA_HORARIA,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(instante);
+
 type Verificacion =
   | { tipo: "monto"; campo: string; valor: number }
   | { tipo: "fecha"; campo: string; valor: string }
+  | { tipo: "texto"; campo: string; valor: string }
+  | { tipo: "sentido"; campo: string; valor: "abono" | "cargo" }
   | { tipo: "moneda"; campo: string };
 
 /** Un dato con su fragmento y lo que hay que comprobar de él. */
@@ -269,6 +283,15 @@ interface Citado {
 }
 
 const colapsar = (cadena: string) => cadena.replace(/\s+/g, " ").trim();
+
+/** Minúsculas, sin tildes y con los espacios colapsados: para comparar un valor con su cita. */
+const comparable = (cadena: string) =>
+  colapsar(
+    cadena
+      .normalize("NFD")
+      .replace(/\p{Diacritic}/gu, "")
+      .toLowerCase(),
+  );
 
 type ResultadoMonto = "ok" | "centavos" | "no_coincide";
 
@@ -296,6 +319,101 @@ function analizarMonto(valor: number, textoFragmento: string): ResultadoMonto {
   return hayCentavos ? "centavos" : "no_coincide";
 }
 
+const MESES = [
+  "enero",
+  "febrero",
+  "marzo",
+  "abril",
+  "mayo",
+  "junio",
+  "julio",
+  "agosto",
+  "septiembre",
+  "octubre",
+  "noviembre",
+  "diciembre",
+] as const;
+
+/** El número aparece como número completo: «1» no coincide dentro de «2021». */
+const comoNumero = (texto: string, numero: string) =>
+  numero !== "" && new RegExp(`(?<!\\d)${numero}(?!\\d)`).test(texto);
+
+/**
+ * La fecha AAAA-MM-DD aparece en su cita: tal cual, con números (1/02/2022) o con el mes en
+ * letras («1 de febrero de 2022»). Se exigen el año, el mes y el día.
+ */
+function fechaEnFragmento(valor: string, fragmento: string): boolean {
+  const texto = comparable(fragmento);
+  if (texto.includes(valor)) return true;
+  const [anio = "", mes = "", dia = ""] = valor.split("-");
+  const numeroMes = Number(mes);
+  const nombreMes: string | undefined = MESES[numeroMes - 1];
+  const hayMes =
+    (nombreMes !== undefined && texto.includes(nombreMes)) ||
+    (numeroMes === 9 && texto.includes("setiembre")) ||
+    comoNumero(texto, mes) ||
+    comoNumero(texto, String(numeroMes));
+  const hayDia = comoNumero(texto, dia) || comoNumero(texto, String(Number(dia)));
+  return comoNumero(texto, anio) && hayMes && hayDia;
+}
+
+/** Palabras que indican el sentido de un movimiento cuando la cita no dice «abono» ni «cargo». */
+const PALABRAS_SENTIDO = {
+  abono: ["credito", "ingreso", "deposito", "consignacion", "recibid", "nomina"],
+  cargo: ["debito", "retiro", "pago", "compra", "egreso", "transferencia a", "envio"],
+} as const;
+
+/**
+ * El sentido del movimiento coincide con su cita. Si la cita dice «abono» o «cargo», manda la última
+ * de las dos (la columna del tipo suele ir al final de la fila); si no, un `+` antes del monto indica
+ * abono, y si tampoco, alguna palabra propia de su sentido.
+ */
+function sentidoEnFragmento(sentido: "abono" | "cargo", fragmento: string): boolean {
+  const texto = comparable(fragmento);
+  let ultimo: string | undefined;
+  for (const coincidencia of texto.matchAll(/(?<![a-z])(abono|cargo)s?(?![a-z])/g)) {
+    ultimo = coincidencia[1];
+  }
+  if (ultimo !== undefined) return ultimo === sentido;
+  if (/\+\s*\$?\s*\d/.test(texto)) return sentido === "abono";
+  return PALABRAS_SENTIDO[sentido].some((palabra) => texto.includes(palabra));
+}
+
+function errorDeVerificacion(
+  verificacion: Verificacion,
+  fragmento: string,
+  hoyLocal: string,
+): ErrorExtraccion | null {
+  const noCoincide = {
+    campo: verificacion.campo,
+    motivo: "valor_no_coincide_con_fragmento",
+  } as const;
+  switch (verificacion.tipo) {
+    case "monto": {
+      const monto = analizarMonto(verificacion.valor, fragmento);
+      if (monto === "centavos")
+        return { campo: verificacion.campo, motivo: "centavos_no_soportados" };
+      return monto === "no_coincide" ? noCoincide : null;
+    }
+    case "fecha":
+      if (verificacion.valor > hoyLocal)
+        return { campo: verificacion.campo, motivo: "fecha_futura" };
+      return fechaEnFragmento(verificacion.valor, fragmento) ? null : noCoincide;
+    case "texto":
+      return comparable(fragmento).includes(comparable(verificacion.valor)) ? null : noCoincide;
+    case "sentido":
+      return sentidoEnFragmento(verificacion.valor, fragmento) ? null : noCoincide;
+    case "moneda":
+      return deducirMoneda(fragmento) === null
+        ? { campo: verificacion.campo, motivo: "moneda_no_reconocida" }
+        : null;
+  }
+}
+
+/**
+ * Cada cita debe estar en el documento, y cada valor en su cita: textos, fechas, montos y el sentido
+ * de los movimientos (revisión de 0aa8c2a). Las fechas no pueden ser posteriores a hoy en Colombia.
+ */
 function revisarCitados(
   citados: readonly Citado[],
   contenido: string,
@@ -304,7 +422,7 @@ function revisarCitados(
 ): ErrorExtraccion[] {
   const errores: ErrorExtraccion[] = [];
   const documento = colapsar(contenido);
-  const hoyISO = hoy.toISOString().slice(0, 10);
+  const hoyLocal = fechaLocal(hoy);
   for (const dato of citados) {
     if (
       esperado !== undefined &&
@@ -322,23 +440,15 @@ function revisarCitados(
       continue;
     }
     for (const verificacion of dato.verificaciones) {
-      if (verificacion.tipo === "monto") {
-        const monto = analizarMonto(verificacion.valor, dato.fragmento);
-        if (monto === "centavos") {
-          errores.push({ campo: verificacion.campo, motivo: "centavos_no_soportados" });
-        } else if (monto === "no_coincide") {
-          errores.push({ campo: verificacion.campo, motivo: "valor_no_coincide_con_fragmento" });
-        }
-      } else if (verificacion.tipo === "fecha") {
-        if (verificacion.valor > hoyISO) {
-          errores.push({ campo: verificacion.campo, motivo: "fecha_futura" });
-        }
-      } else if (deducirMoneda(dato.fragmento) === null) {
-        errores.push({ campo: verificacion.campo, motivo: "moneda_no_reconocida" });
-      }
+      const error = errorDeVerificacion(verificacion, dato.fragmento, hoyLocal);
+      if (error !== null) errores.push(error);
     }
   }
-  return errores;
+  // Un mismo problema en el mismo campo se informa una vez (por ejemplo, las dos fechas del periodo).
+  return errores.filter(
+    (error, i) =>
+      errores.findIndex((e) => e.campo === error.campo && e.motivo === error.motivo) === i,
+  );
 }
 
 /** Los movimientos de un extracto deben caer dentro de su periodo. */
@@ -369,67 +479,188 @@ const erroresDeEsquema = (issues: readonly z.core.$ZodIssue[]): ErrorExtraccion[
   }));
 
 // ---------------------------------------------------------------------------------------------
-// Validación de la salida del subagente
+// Vista común de una salida o de un resultado, para construir las citas una sola vez
 // ---------------------------------------------------------------------------------------------
 
-function citadosDeSalida(salida: SalidaSubagente): Citado[] {
+interface DatoVista<T> {
+  valor: T;
+  fragmento: string;
+  procedencia?: { adjunto: number; nombre: string };
+}
+
+interface VistaDocumento {
+  certificado: {
+    empleador: DatoVista<string> | null;
+    cargo: DatoVista<string> | null;
+    fechaIngreso: DatoVista<string> | null;
+    salario: DatoVista<number> | null;
+    moneda: Omit<DatoVista<unknown>, "valor"> | null;
+  } | null;
+  extracto: {
+    titular: DatoVista<string> | null;
+    periodo: DatoVista<{ desde: string; hasta: string }> | null;
+    moneda: Omit<DatoVista<unknown>, "valor"> | null;
+    movimientos: readonly (Omit<DatoVista<number>, "valor"> & {
+      fecha: string;
+      descripcion: string;
+      valor: number;
+      sentido: "abono" | "cargo";
+    })[];
+  } | null;
+}
+
+/** Las citas de un documento y lo que hay que comprobar de cada una; `prefijo` va en cada campo. */
+function citadosDe(vista: VistaDocumento, prefijo: string): Citado[] {
   const citados: Citado[] = [];
-  const simple = (
+  const agregar = (
     nombre: string,
-    dato: { fragmento: string } | null,
-    extra: Verificacion[] = [],
+    dato: Omit<DatoVista<unknown>, "valor"> | null,
+    verificaciones: Verificacion[],
   ) => {
-    if (dato !== null) {
-      citados.push({ campo: nombre, fragmento: dato.fragmento, verificaciones: extra });
-    }
+    if (dato === null) return;
+    citados.push({
+      campo: `${prefijo}${nombre}`,
+      fragmento: dato.fragmento,
+      verificaciones: verificaciones.map((v) => ({
+        ...v,
+        campo: `${prefijo}${v.campo}`,
+      })),
+      ...(dato.procedencia !== undefined ? { procedencia: dato.procedencia } : {}),
+    });
   };
-  const { certificado, extracto } = salida;
+  const texto = (nombre: string, dato: DatoVista<string> | null) =>
+    agregar(
+      nombre,
+      dato,
+      dato === null ? [] : [{ tipo: "texto", campo: nombre, valor: dato.valor }],
+    );
+
+  const { certificado, extracto } = vista;
   if (certificado !== null) {
-    simple("empleador", certificado.empleador);
-    simple("cargo", certificado.cargo);
-    simple(
+    texto("empleador", certificado.empleador);
+    texto("cargo", certificado.cargo);
+    const { fechaIngreso, salario } = certificado;
+    agregar(
       "fechaIngreso",
-      certificado.fechaIngreso,
-      certificado.fechaIngreso === null
+      fechaIngreso,
+      fechaIngreso === null
         ? []
-        : [{ tipo: "fecha", campo: "fechaIngreso", valor: certificado.fechaIngreso.valor }],
+        : [{ tipo: "fecha", campo: "fechaIngreso", valor: fechaIngreso.valor }],
     );
-    simple(
+    agregar(
       "salario",
-      certificado.salario,
-      certificado.salario === null
-        ? []
-        : [{ tipo: "monto", campo: "salario", valor: certificado.salario.valor }],
+      salario,
+      salario === null ? [] : [{ tipo: "monto", campo: "salario", valor: salario.valor }],
     );
-    simple("moneda", certificado.moneda, [{ tipo: "moneda", campo: "moneda" }]);
+    agregar("moneda", certificado.moneda, [{ tipo: "moneda", campo: "moneda" }]);
   }
   if (extracto !== null) {
-    simple("titular", extracto.titular);
-    simple(
+    texto("titular", extracto.titular);
+    const { periodo: periodoCitado } = extracto;
+    agregar(
       "periodo",
-      extracto.periodo,
-      extracto.periodo === null
+      periodoCitado,
+      periodoCitado === null
         ? []
-        : [{ tipo: "fecha", campo: "periodo", valor: extracto.periodo.valor.hasta }],
+        : [
+            {
+              tipo: "fecha",
+              campo: "periodo",
+              valor: periodoCitado.valor.desde,
+            },
+            {
+              tipo: "fecha",
+              campo: "periodo",
+              valor: periodoCitado.valor.hasta,
+            },
+          ],
     );
-    simple("moneda", extracto.moneda, [{ tipo: "moneda", campo: "moneda" }]);
+    agregar("moneda", extracto.moneda, [{ tipo: "moneda", campo: "moneda" }]);
     extracto.movimientos.forEach((movimiento, i) => {
-      simple(`movimientos.${i}`, movimiento, [
-        { tipo: "monto", campo: `movimientos.${i}.valor`, valor: movimiento.valor },
-        { tipo: "fecha", campo: `movimientos.${i}.fecha`, valor: movimiento.fecha },
+      agregar(`movimientos.${i}`, movimiento, [
+        {
+          tipo: "monto",
+          campo: `movimientos.${i}.valor`,
+          valor: movimiento.valor,
+        },
+        {
+          tipo: "fecha",
+          campo: `movimientos.${i}.fecha`,
+          valor: movimiento.fecha,
+        },
+        {
+          tipo: "texto",
+          campo: `movimientos.${i}.descripcion`,
+          valor: movimiento.descripcion,
+        },
+        {
+          tipo: "sentido",
+          campo: `movimientos.${i}.sentido`,
+          valor: movimiento.sentido,
+        },
       ]);
     });
   }
   return citados;
 }
 
+/** La vista de un resultado ya construido: la cita sale de la procedencia. */
+function vistaDeDocumento(documento: DocumentoExtraido): VistaDocumento {
+  const dato = <T>(campoExtraido: { valor: T; procedencia: Procedencia } | null) =>
+    campoExtraido === null
+      ? null
+      : {
+          valor: campoExtraido.valor,
+          fragmento: campoExtraido.procedencia.fragmento,
+          procedencia: {
+            adjunto: campoExtraido.procedencia.adjunto,
+            nombre: campoExtraido.procedencia.nombre,
+          },
+        };
+  if (documento.tipo === "certificado_laboral") {
+    return {
+      certificado: {
+        empleador: dato(documento.empleador),
+        cargo: dato(documento.cargo),
+        fechaIngreso: dato(documento.fechaIngreso),
+        salario: dato(documento.salario),
+        moneda: dato(documento.moneda),
+      },
+      extracto: null,
+    };
+  }
+  return {
+    certificado: null,
+    extracto: {
+      titular: dato(documento.titular),
+      periodo: dato(documento.periodo),
+      moneda: dato(documento.moneda),
+      movimientos: documento.movimientos.map((m) => ({
+        fecha: m.fecha,
+        descripcion: m.descripcion,
+        valor: m.valor,
+        sentido: m.sentido,
+        fragmento: m.procedencia.fragmento,
+        procedencia: {
+          adjunto: m.procedencia.adjunto,
+          nombre: m.procedencia.nombre,
+        },
+      })),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Validación de la salida del subagente
+// ---------------------------------------------------------------------------------------------
+
 export type ValidacionSalida =
   { ok: true; salida: SalidaSubagente } | { ok: false; errores: ErrorExtraccion[] };
 
 /**
- * Valida lo que devolvió el subagente, en este orden: esquema, fragmentos presentes en el documento,
- * montos presentes en su fragmento, fechas no futuras y moneda reconocible. Acumula todos los
- * errores, no solo el primero, para que el reintento los corrija de una vez.
+ * Valida lo que devolvió el subagente, en este orden: esquema, citas presentes en el documento,
+ * valores presentes en su cita (montos, textos, fechas y sentido), fechas no futuras y moneda
+ * reconocible. Acumula todos los errores, no solo el primero, para que el reintento los corrija.
  */
 export function validarSalida(
   salida: unknown,
@@ -440,7 +671,7 @@ export function validarSalida(
   if (!analisis.success) return { ok: false, errores: erroresDeEsquema(analisis.error.issues) };
   const valida = analisis.data;
   const errores = [
-    ...revisarCitados(citadosDeSalida(valida), documento.contenido, hoy),
+    ...revisarCitados(citadosDe(valida, ""), documento.contenido, hoy),
     ...erroresDePeriodo(
       "",
       valida.extracto?.periodo?.valor ?? null,
@@ -462,7 +693,8 @@ export interface DocumentoConContenido {
 
 /**
  * Convierte una salida ya validada en el resultado de la extracción: agrega la procedencia a cada
- * campo y aplica la política (Regla 5). Toda decisión sale de `evaluarDocumento`, no del modelo.
+ * campo y aplica la política (Regla 5). Toda decisión sale de `evaluarDocumento`, no del modelo; la
+ * moneda extranjera se busca en todo el documento, no solo en la cita que eligió el modelo.
  */
 export function construirResultado(
   salida: SalidaSubagente,
@@ -475,27 +707,39 @@ export function construirResultado(
     huella: huella(documento.contenido),
     intentos,
   };
-  const fragmentoMoneda =
+  const fragmentoCitado =
     (salida.certificado?.moneda ?? salida.extracto?.moneda)?.fragmento ?? null;
+  const extranjera = buscarMonedaExtranjera(documento.contenido);
   const decision = evaluarDocumento({
     tipo: salida.tipo,
-    fragmentoMoneda,
+    fragmentoMoneda: fragmentoCitado,
+    monedaExtranjeraEnContenido: extranjera?.fragmento ?? null,
     conflictos: salida.conflictos,
     faltantes: camposFaltantes(salida),
     tieneMontos: tieneMontos(salida),
   });
 
   if (decision.resultado === "no_cubierto") {
+    // La evidencia de la moneda extranjera es la cita del modelo si la nombra, o la del documento.
+    const citaExtranjera =
+      fragmentoCitado !== null && deducirMoneda(fragmentoCitado)?.tipo === "extranjera"
+        ? fragmentoCitado
+        : (extranjera?.fragmento ?? fragmentoCitado);
     return {
       estado: "no_cubierto",
       ...base,
       causa: decision.causa ?? "documento_no_soportado",
       tipoDetectado: salida.tipo,
-      fragmentoMoneda,
+      fragmentoMoneda: decision.causa === "moneda_extranjera" ? citaExtranjera : fragmentoCitado,
     };
   }
   if (decision.resultado === "no_extraible") {
-    return { estado: "no_extraible", ...base, conflictos: [...salida.conflictos], ultimoError: [] };
+    return {
+      estado: "no_extraible",
+      ...base,
+      conflictos: [...salida.conflictos],
+      ultimoError: [],
+    };
   }
 
   const procedencia = (texto: string): Procedencia => ({
@@ -513,31 +757,31 @@ export function construirResultado(
       : null;
 
   const { certificado, extracto } = salida;
-  const extraido: DocumentoExtraido | null =
-    certificado !== null
-      ? {
-          tipo: "certificado_laboral",
-          empleador: conProcedencia(certificado.empleador),
-          cargo: conProcedencia(certificado.cargo),
-          fechaIngreso: conProcedencia(certificado.fechaIngreso),
-          salario: conProcedencia(certificado.salario),
-          moneda: moneda(certificado.moneda),
-        }
-      : extracto !== null
-        ? {
-            tipo: "extracto_bancario",
-            titular: conProcedencia(extracto.titular),
-            periodo: conProcedencia(extracto.periodo),
-            moneda: moneda(extracto.moneda),
-            movimientos: extracto.movimientos.map((m) => ({
-              fecha: m.fecha,
-              descripcion: m.descripcion,
-              valor: m.valor,
-              sentido: m.sentido,
-              procedencia: procedencia(m.fragmento),
-            })),
-          }
-        : null;
+  let extraido: DocumentoExtraido | null = null;
+  if (certificado !== null) {
+    extraido = {
+      tipo: "certificado_laboral",
+      empleador: conProcedencia(certificado.empleador),
+      cargo: conProcedencia(certificado.cargo),
+      fechaIngreso: conProcedencia(certificado.fechaIngreso),
+      salario: conProcedencia(certificado.salario),
+      moneda: moneda(certificado.moneda),
+    };
+  } else if (extracto !== null) {
+    extraido = {
+      tipo: "extracto_bancario",
+      titular: conProcedencia(extracto.titular),
+      periodo: conProcedencia(extracto.periodo),
+      moneda: moneda(extracto.moneda),
+      movimientos: extracto.movimientos.map((m) => ({
+        fecha: m.fecha,
+        descripcion: m.descripcion,
+        valor: m.valor,
+        sentido: m.sentido,
+        procedencia: procedencia(m.fragmento),
+      })),
+    };
+  }
   if (extraido === null) {
     // Un tipo soportado siempre trae su bloque (lo exige el esquema): esto no debería ocurrir.
     return {
@@ -545,71 +789,25 @@ export function construirResultado(
       ...base,
       conflictos: [],
       ultimoError: [
-        { campo: "tipo", motivo: "esquema", detalle: "el documento no trae su bloque" },
+        {
+          campo: "tipo",
+          motivo: "esquema",
+          detalle: "el documento no trae su bloque",
+        },
       ],
     };
   }
-  return { estado: "extraido", ...base, documento: extraido, faltantes: decision.faltantes };
+  return {
+    estado: "extraido",
+    ...base,
+    documento: extraido,
+    faltantes: decision.faltantes,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
 // Revalidación de un resultado (core)
 // ---------------------------------------------------------------------------------------------
-
-function citadosDeResultado(documento: DocumentoExtraido): Citado[] {
-  const citados: Citado[] = [];
-  const dato = (
-    nombre: string,
-    valor: { procedencia: Procedencia } | null,
-    verificaciones: Verificacion[] = [],
-  ) => {
-    if (valor !== null) {
-      citados.push({
-        campo: `documento.${nombre}`,
-        fragmento: valor.procedencia.fragmento,
-        verificaciones: verificaciones.map((v) => ({ ...v, campo: `documento.${v.campo}` })),
-        procedencia: { adjunto: valor.procedencia.adjunto, nombre: valor.procedencia.nombre },
-      });
-    }
-  };
-  if (documento.tipo === "certificado_laboral") {
-    dato("empleador", documento.empleador);
-    dato("cargo", documento.cargo);
-    dato(
-      "fechaIngreso",
-      documento.fechaIngreso,
-      documento.fechaIngreso === null
-        ? []
-        : [{ tipo: "fecha", campo: "fechaIngreso", valor: documento.fechaIngreso.valor }],
-    );
-    dato(
-      "salario",
-      documento.salario,
-      documento.salario === null
-        ? []
-        : [{ tipo: "monto", campo: "salario", valor: documento.salario.valor }],
-    );
-    dato("moneda", documento.moneda, [{ tipo: "moneda", campo: "moneda" }]);
-  } else {
-    dato("titular", documento.titular);
-    dato(
-      "periodo",
-      documento.periodo,
-      documento.periodo === null
-        ? []
-        : [{ tipo: "fecha", campo: "periodo", valor: documento.periodo.valor.hasta }],
-    );
-    dato("moneda", documento.moneda, [{ tipo: "moneda", campo: "moneda" }]);
-    documento.movimientos.forEach((movimiento, i) => {
-      dato(`movimientos.${i}`, movimiento, [
-        { tipo: "monto", campo: `movimientos.${i}.valor`, valor: movimiento.valor },
-        { tipo: "fecha", campo: `movimientos.${i}.fecha`, valor: movimiento.fecha },
-      ]);
-    });
-  }
-  return citados;
-}
-
 const montosDeDocumento = (documento: DocumentoExtraido): boolean =>
   documento.tipo === "certificado_laboral"
     ? documento.salario !== null
@@ -641,17 +839,25 @@ type Resultado<E extends ResultadoExtraccion["estado"]> = Extract<
   { estado: E }
 >;
 
-/** Un resultado `extraido`: fragmentos, montos y periodo contra el documento, y los faltantes de la política. */
+/**
+ * Un resultado `extraido`: citas y valores contra el documento, el periodo, y la decisión de la
+ * política, que también mira si el documento nombra una moneda extranjera en cualquier parte.
+ */
 function erroresDeExtraido(
   valido: Resultado<"extraido">,
   contenido: string,
   hoy: Date,
 ): ErrorExtraccion[] {
   const { documento } = valido;
-  const errores = revisarCitados(citadosDeResultado(documento), contenido, hoy, {
-    adjunto: valido.adjunto,
-    nombre: valido.nombre,
-  });
+  const errores = revisarCitados(
+    citadosDe(vistaDeDocumento(documento), "documento."),
+    contenido,
+    hoy,
+    {
+      adjunto: valido.adjunto,
+      nombre: valido.nombre,
+    },
+  );
   if (documento.tipo === "extracto_bancario") {
     errores.push(
       ...erroresDePeriodo("documento.", documento.periodo?.valor ?? null, documento.movimientos),
@@ -660,12 +866,21 @@ function erroresDeExtraido(
   const decision = evaluarDocumento({
     tipo: documento.tipo,
     fragmentoMoneda: documento.moneda?.procedencia.fragmento ?? null,
+    monedaExtranjeraEnContenido: buscarMonedaExtranjera(contenido)?.fragmento ?? null,
     conflictos: [],
     faltantes: faltantesDeDocumento(documento),
     tieneMontos: montosDeDocumento(documento),
   });
+  if (decision.resultado !== "extraido") {
+    errores.push({
+      campo: "estado",
+      motivo: "decision_no_coincide",
+      detalle: `la política da: ${decision.causa ?? decision.resultado}`,
+    });
+    return errores;
+  }
   const esperados = decision.faltantes.join(",");
-  if (decision.resultado !== "extraido" || esperados !== valido.faltantes.join(",")) {
+  if (esperados !== valido.faltantes.join(",")) {
     errores.push({
       campo: "faltantes",
       motivo: "decision_no_coincide",
@@ -692,6 +907,7 @@ function erroresDeNoCubierto(
   const decision = evaluarDocumento({
     tipo: valido.tipoDetectado,
     fragmentoMoneda: valido.fragmentoMoneda,
+    monedaExtranjeraEnContenido: buscarMonedaExtranjera(contenido)?.fragmento ?? null,
     conflictos: [],
     faltantes: [],
     tieneMontos: valido.fragmentoMoneda !== null,

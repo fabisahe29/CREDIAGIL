@@ -6,7 +6,14 @@ import {
   TIPOS_DOCUMENTO_SOPORTADOS,
   VERSION_POLITICA,
 } from "./politica.ts";
-import { deducirMoneda, evaluarDocumento, REGLA_5, REGLA_PRINCIPIO_V } from "./documentos.ts";
+import {
+  buscarMonedaExtranjera,
+  deducirMoneda,
+  evaluarDocumento,
+  evaluarRegla5Previa,
+  REGLA_5,
+  REGLA_PRINCIPIO_V,
+} from "./documentos.ts";
 
 describe("política: constantes de documentos", () => {
   it("permite 3 intentos de extracción por documento", () => {
@@ -25,10 +32,11 @@ describe("política: constantes de documentos", () => {
 describe("política: deducirMoneda", () => {
   for (const fragmento of [
     "Salario básico $3.800.000 COP",
-    "valor en pesos",
     "tres millones ochocientos mil pesos colombianos",
     "cop",
     "PESOS COLOMBIANOS",
+    "$3.800.000 pesos m/cte",
+    "tres millones de pesos moneda corriente",
   ]) {
     it(`reconoce pesos colombianos en «${fragmento}»`, () => {
       assert.deepEqual(deducirMoneda(fragmento), { tipo: "soportada", codigo: "COP" });
@@ -40,13 +48,25 @@ describe("política: deducirMoneda", () => {
     ["US$ 1.200 mensuales", "USD"],
     ["1.200 dólares", "USD"],
     ["1.200 DOLARES AMERICANOS", "USD"],
+    ["1,200 US dollars per month", "USD"],
+    ["1,200 dollars", "USD"],
     ["EUR 900", "EUR"],
     ["900 euros al mes", "EUR"],
+    ["€ 900", "EUR"],
     ["15.000 pesos mexicanos", "MXN"],
+    ["3.800.000 pesos chilenos", "CLP"],
+    ["950.000 pesos argentinos", "ARS"],
+    ["80.000 pesos uruguayos", "UYU"],
     ["GBP 800", "GBP"],
   ] as const) {
     it(`reconoce moneda extranjera ${codigo} en «${fragmento}»`, () => {
       assert.deepEqual(deducirMoneda(fragmento), { tipo: "extranjera", codigo });
+    });
+  }
+
+  for (const fragmento of ["valor en pesos", "3.800.000 pesos", "un peso"]) {
+    it(`«pesos» sin país no es COP: «${fragmento}» no es una moneda reconocida`, () => {
+      assert.equal(deducirMoneda(fragmento), null);
     });
   }
 
@@ -62,11 +82,58 @@ describe("política: deducirMoneda", () => {
     assert.equal(deducirMoneda("copia del documento"), null);
   });
 
-  it("si menciona pesos y una moneda extranjera, prevalece la extranjera (escala)", () => {
-    assert.deepEqual(deducirMoneda("3.800.000 pesos, equivalentes a USD 900"), {
+  it("si menciona COP y una moneda extranjera, prevalece la extranjera (escala)", () => {
+    assert.deepEqual(deducirMoneda("3.800.000 pesos colombianos, equivalentes a USD 900"), {
       tipo: "extranjera",
       codigo: "USD",
     });
+  });
+});
+
+describe("política: buscarMonedaExtranjera en todo el documento", () => {
+  it("encuentra la línea que nombra una moneda extranjera, aunque otra diga COP", () => {
+    const contenido = "Moneda: pesos colombianos (COP)\nSalario: USD 1.200\nCargo: consultora";
+    assert.deepEqual(buscarMonedaExtranjera(contenido), {
+      codigo: "USD",
+      fragmento: "Salario: USD 1.200",
+    });
+  });
+
+  it("un documento solo en COP no tiene moneda extranjera", () => {
+    assert.equal(buscarMonedaExtranjera("Moneda: COP\nSalario: $3.800.000"), null);
+  });
+
+  it("en una línea muy larga cita un fragmento de 300 caracteres como máximo que contiene la moneda", () => {
+    const linea = `${"x ".repeat(400)}salario de USD 1.200 ${"y ".repeat(400)}`;
+    const r = buscarMonedaExtranjera(linea);
+    assert.equal(r?.codigo, "USD");
+    assert.ok((r?.fragmento.length ?? 0) <= 300);
+    assert.ok(linea.includes(r?.fragmento ?? "falta"));
+  });
+});
+
+describe("política: evaluarRegla5Previa, sin modelo y antes de la Regla 1", () => {
+  it("un archivo que el chat no pudo leer no está cubierto", () => {
+    const decision = evaluarRegla5Previa({ soportado: false });
+    assert.equal(decision?.resultado, "no_cubierto");
+    assert.equal(decision?.causa, "documento_no_soportado");
+    assert.equal(decision?.regla, REGLA_5);
+  });
+
+  it("un documento que nombra una moneda extranjera en cualquier parte no está cubierto", () => {
+    const decision = evaluarRegla5Previa({
+      soportado: true,
+      contenido: "Certificado\nSalario mensual: 950.000 pesos argentinos",
+    });
+    assert.equal(decision?.causa, "moneda_extranjera");
+    assert.equal(decision?.valores["moneda"], "ARS");
+  });
+
+  it("sin moneda extranjera no decide: el tipo lo clasifica después el subagente", () => {
+    assert.equal(
+      evaluarRegla5Previa({ soportado: true, contenido: "Salario: $3.800.000 COP" }),
+      null,
+    );
   });
 });
 
@@ -74,10 +141,21 @@ describe("política: evaluarDocumento", () => {
   const completo = {
     tipo: "certificado_laboral",
     fragmentoMoneda: "$3.800.000 COP",
+    monedaExtranjeraEnContenido: null,
     conflictos: [],
     faltantes: [],
     tieneMontos: true,
   } as const;
+
+  it("una moneda extranjera en el contenido saca al documento de la política aunque la cita diga COP", () => {
+    const decision = evaluarDocumento({
+      ...completo,
+      monedaExtranjeraEnContenido: "Bonificación: USD 300",
+    });
+    assert.equal(decision.resultado, "no_cubierto");
+    assert.equal(decision.causa, "moneda_extranjera");
+    assert.equal(decision.valores["moneda"], "USD");
+  });
 
   it("un certificado completo en COP se extrae sin faltantes", () => {
     const decision = evaluarDocumento(completo);
@@ -103,6 +181,7 @@ describe("política: evaluarDocumento", () => {
     const decision = evaluarDocumento({
       tipo: "extracto_bancario",
       fragmentoMoneda: "Moneda: pesos colombianos",
+      monedaExtranjeraEnContenido: null,
       conflictos: [],
       faltantes: [],
       tieneMontos: false,
@@ -136,6 +215,7 @@ describe("política: evaluarDocumento", () => {
     const decision = evaluarDocumento({
       tipo: "otro",
       fragmentoMoneda: "USD 900",
+      monedaExtranjeraEnContenido: null,
       conflictos: [],
       faltantes: [],
       tieneMontos: true,

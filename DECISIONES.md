@@ -58,6 +58,19 @@ El código emite un `solicitud_de_dato` por documento con los campos que faltan 
 
 **Alternativa descartada**: dejar que el modelo pida los faltantes (no sería determinista y podría aceptar un salario escrito).
 
+### Decisión 7: la Regla 5 va antes que la Regla 1 y no depende de lo que cite el modelo
+
+Las revisiones de `0aa8c2a` bloquearon el PR por tres razones: «pesos» suelto se tomaba como COP, la moneda solo se miraba en el fragmento que citaba el modelo, y sin identidad se bloqueaba por la Regla 1 antes de evaluar la Regla 5. Ahora:
+- COP solo se reconoce con expresiones inequívocas, y los pesos de otros países son moneda extranjera.
+- La moneda extranjera se busca en todo el documento, en el agente y en el core.
+- Al cerrar cada turno, el código revisa formato y moneda de los documentos sin modelo.
+- Al intentar extraer sin identidad, un clasificador que solo devuelve el tipo decide la Regla 5 antes de bloquear por la Regla 1.
+- Cada valor se contrasta con su cita: textos, fechas y el sentido de los movimientos, y «hoy» es el día en Bogotá.
+
+**Motivo**: la Regla 5 es determinista y su orden es obligatorio (Principios I y III).
+
+**Alternativas descartadas**: clasificar cada documento con el modelo al llegar, antes de la Regla 4 (un mensaje pegado que pide una persona escalaría por la Regla 5); dejar la detección al prompt.
+
 ---
 
 ## 2026-10-17 · Identificación y verificación del solicitante

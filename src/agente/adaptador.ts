@@ -25,10 +25,21 @@ import {
 import { registrar } from "../compartido/logs.ts";
 import type { DocumentoConversacion } from "./agente.ts";
 import type { ClienteCore, CriterioBusqueda } from "./cliente-core.ts";
-import { crearSubagente, extraerConIntentos, type EjecutarSubagente } from "./extraccion.ts";
+import {
+  crearClasificador,
+  crearSubagente,
+  extraerConIntentos,
+  type ClasificarDocumento,
+  type EjecutarSubagente,
+} from "./extraccion.ts";
 import { conReintentos } from "./reintentos.ts";
 import { MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
-import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
+import {
+  evaluarDocumento,
+  evaluarRegla5Previa,
+  REGLA_5,
+  REGLA_PRINCIPIO_V,
+} from "../politica/documentos.ts";
 
 export const CLAVE_SERVIDOR = "originacion";
 
@@ -104,6 +115,32 @@ export const REGLA_AMBIGUA = "Regla 1 · coincidencias sin desambiguar";
  * en la llamada, hace que el resultado no dependa del orden en que el modelo llama a las
  * herramientas: una búsqueda por documento en el mismo turno desambigua (revisión de dea0951).
  */
+export const REGLA_5_DOCUMENTOS = "revision_documentos";
+
+/**
+ * Al cerrar el turno, la Regla 5 sobre los documentos de la conversación, sin modelo: un archivo no
+ * soportado o una moneda extranjera en cualquier parte escalan, aunque el modelo no haya hecho nada
+ * (revisión de 0aa8c2a). Va después de la Regla 4, que el modelo resuelve durante el turno, y antes
+ * que el cierre por identidad (orden 4 → 5 → 1). La primera señal prevalece.
+ */
+export function cerrarTurnoDocumentos(
+  estado: EstadoConversacion,
+  documentos: readonly DocumentoConversacion[],
+): void {
+  for (const documento of documentos) {
+    const decision = evaluarRegla5Previa(documento);
+    if (decision === null) continue;
+    dejarSenal(estado, {
+      motivo: "caso_no_cubierto",
+      regla: REGLA_NO_CUBIERTO,
+      herramienta: REGLA_5_DOCUMENTOS,
+      causa: decision.causa ?? "documento_no_soportado",
+      adjunto: documento.adjunto,
+    });
+    return;
+  }
+}
+
 export function cerrarTurnoIdentidad(estado: EstadoConversacion): void {
   if (estado.busquedasAmbiguas < 2) return;
   dejarSenal(estado, {
@@ -150,6 +187,8 @@ export interface OpcionesAdaptador {
   documentos?: readonly DocumentoConversacion[];
   /** Subagente de extracción; por defecto el real (#10, R1). */
   ejecutarSubagente?: EjecutarSubagente;
+  /** Clasificador previo del tipo de documento, para la Regla 5 antes de la identidad. */
+  clasificarDocumento?: ClasificarDocumento;
   /** "Hoy" para validar fechas extraídas; inyectable en las pruebas. */
   hoy?: () => Date;
 }
@@ -284,6 +323,7 @@ export function crearAdaptador({
   generarIdIntento = randomUUID,
   documentos = [],
   ejecutarSubagente = crearSubagente(),
+  clasificarDocumento = crearClasificador(),
   hoy = () => new Date(),
 }: OpcionesAdaptador) {
   const senal = (campos: Parameters<typeof dejarSenal>[1]) => dejarSenal(estado, campos);
@@ -447,6 +487,52 @@ export function crearAdaptador({
     return aResultadoMcp(exito({ escalada: true }));
   }
 
+  /** Regla 5: el caso no está cubierto; escala el código, nunca el modelo. */
+  function escalarRegla5(adjunto: number, causa: CausaNoCubierto, herramienta: string): void {
+    senal({ motivo: "caso_no_cubierto", regla: REGLA_NO_CUBIERTO, herramienta, causa, adjunto });
+  }
+
+  /**
+   * Regla 5 antes que la Regla 1 (orden 4 → 5 → 1; revisión de 0aa8c2a). Si se intenta extraer sin
+   * identidad, el control de identidad llama aquí antes de bloquear: primero la revisión sin modelo
+   * (formato y moneda) y luego la clasificación del tipo, que no extrae datos personales. Devuelve
+   * `true` si escaló. No registra ni devuelve ningún dato del documento.
+   */
+  async function evaluarRegla5AntesDeIdentidad(adjunto: unknown): Promise<boolean> {
+    const documento = documentos.find((d) => d.adjunto === adjunto);
+    if (documento === undefined) return false;
+    const previa = evaluarRegla5Previa(documento);
+    if (previa !== null || !documento.soportado) {
+      escalarRegla5(documento.adjunto, previa?.causa ?? "documento_no_soportado", "regla_5_previa");
+      return true;
+    }
+    const clasificacion = await clasificarDocumento({
+      documento: {
+        adjunto: documento.adjunto,
+        nombre: documento.nombre,
+        contenido: documento.contenido,
+      },
+      correlationId: estado.correlationId,
+    });
+    registrar("clasificacion_previa", {
+      correlationId: estado.correlationId,
+      adjunto: documento.adjunto,
+      resultado: clasificacion.ok ? clasificacion.tipo : clasificacion.causa,
+    });
+    if (!clasificacion.ok) return false;
+    const decision = evaluarDocumento({
+      tipo: clasificacion.tipo,
+      fragmentoMoneda: null,
+      monedaExtranjeraEnContenido: null,
+      conflictos: [],
+      faltantes: [],
+      tieneMontos: false,
+    });
+    if (decision.resultado !== "no_cubierto") return false;
+    escalarRegla5(documento.adjunto, decision.causa ?? "documento_no_soportado", "regla_5_previa");
+    return true;
+  }
+
   /** Log de una extracción (R10): metadatos, nunca el contenido ni los fragmentos (FR-017). */
   function registrarExtraccionLog(campos: Record<string, unknown>): void {
     registrar("extraccion", { correlationId: estado.correlationId, ...campos });
@@ -555,22 +641,20 @@ export function crearAdaptador({
         ),
       );
     }
-    if (!documento.soportado) {
-      // Regla 5: un archivo que el chat no pudo leer no se extrae; escala el código (FR-016).
-      senal({
-        motivo: "caso_no_cubierto",
-        regla: REGLA_NO_CUBIERTO,
-        herramienta: "extraer_documento",
-        causa: "documento_no_soportado",
-        adjunto,
-      });
+    // Regla 5 sin modelo: un archivo no soportado o una moneda extranjera en cualquier parte del
+    // documento escalan antes de extraer nada (FR-016; revisión de 0aa8c2a).
+    const regla5 = evaluarRegla5Previa(documento);
+    if (regla5 !== null || !documento.soportado) {
+      const causa = regla5?.causa ?? "documento_no_soportado";
+      escalarRegla5(adjunto, causa, "extraer_documento");
       registrarExtraccionLog({
         adjunto,
         nombre: documento.nombre,
         estado: "no_cubierto",
+        causa,
         intentos: 0,
       });
-      return aResultadoMcp(exito({ escalada: true, causa: "documento_no_soportado" }));
+      return aResultadoMcp(exito({ escalada: true, causa }));
     }
 
     const conContenido = { adjunto, nombre: documento.nombre, contenido: documento.contenido };
@@ -715,5 +799,5 @@ export function crearAdaptador({
     ],
   });
 
-  return { servidor, herramientas, estado };
+  return { servidor, herramientas, estado, evaluarRegla5AntesDeIdentidad };
 }

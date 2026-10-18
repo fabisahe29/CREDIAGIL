@@ -20,15 +20,40 @@ export const MONEDA_SOPORTADA = "COP";
 
 /**
  * Expresiones con las que un documento nombra cada moneda, en minúsculas y sin tildes. Con ellas el
- * código deduce la moneda a partir del fragmento citado; el modelo no elige el código. Un `$` solo
- * no basta: en Colombia también se usa para dólares.
+ * código deduce la moneda; el modelo no elige el código. COP solo se reconoce con expresiones
+ * inequívocas: «pesos» o `$` sueltos no bastan, porque también los usan otros países (revisión de
+ * 0aa8c2a). Cualquier mención de una moneda extranjera en el documento lo saca de la política.
  */
 export const EXPRESIONES_MONEDA: Readonly<Record<string, readonly string[]>> = {
-  [MONEDA_SOPORTADA]: ["cop", "peso colombiano", "pesos colombianos", "peso", "pesos"],
-  USD: ["usd", "us$", "dolar", "dolares", "dolar americano", "dolares americanos"],
-  EUR: ["eur", "euro", "euros"],
+  [MONEDA_SOPORTADA]: [
+    "cop",
+    "peso colombiano",
+    "pesos colombianos",
+    "pesos m/cte",
+    "pesos mcte",
+    "pesos moneda corriente",
+  ],
+  USD: [
+    "usd",
+    "us$",
+    "u$s",
+    "dolar",
+    "dolares",
+    "dolar americano",
+    "dolares americanos",
+    "dollar",
+    "dollars",
+    "us dollars",
+  ],
+  EUR: ["eur", "euro", "euros", "€"],
+  GBP: ["gbp", "libra esterlina", "libras esterlinas", "£"],
   MXN: ["mxn", "peso mexicano", "pesos mexicanos"],
-  GBP: ["gbp", "libra esterlina", "libras esterlinas"],
+  CLP: ["clp", "peso chileno", "pesos chilenos"],
+  ARS: ["ars", "peso argentino", "pesos argentinos"],
+  UYU: ["uyu", "peso uruguayo", "pesos uruguayos"],
+  DOP: ["dop", "peso dominicano", "pesos dominicanos"],
+  CUP: ["peso cubano", "pesos cubanos"],
+  PHP: ["peso filipino", "pesos filipinos"],
 };
 
 /** Intentos de extracción por documento, el primero incluido (spec del #10, FR-012). */

@@ -319,3 +319,84 @@ describe("control de identidad: conversación escalada (reglas 4 y 5 antes que l
     );
   });
 });
+
+describe("control de identidad: Regla 5 antes que la Regla 1 (revisión de 0aa8c2a)", () => {
+  function conRegla5(
+    respuesta: RespuestaIdentidad | ((cid: string) => RespuestaIdentidad),
+    antesDeRegla1: (herramienta: string, entrada: unknown) => Promise<boolean>,
+  ) {
+    const estado = crearEstado(randomUUID());
+    const r = typeof respuesta === "function" ? respuesta(estado.correlationId) : respuesta;
+    const { core } = coreCon([r]);
+    const control = crearControlIdentidad({
+      core,
+      estado,
+      herramientas: [HERRAMIENTA],
+      dormir: async () => {},
+      azar: () => 0.5,
+      antesDeRegla1,
+    });
+    const invocar = () =>
+      control({ ...entrada(), tool_input: { adjunto: 2 } } as HookInput, "uso-1", {
+        signal: new AbortController().signal,
+      });
+    return { estado, invocar };
+  }
+
+  it("sin identidad, si la Regla 5 escala, niega por la Regla 5 sin bloqueo de la Regla 1", async (t) => {
+    capturarStderr(t);
+    const llamadas: unknown[] = [];
+    const { estado, invocar } = conRegla5(
+      (cid) => identidad(cid, false),
+      async (herramienta, e) => {
+        llamadas.push([herramienta, e]);
+        return true;
+      },
+    );
+    const salida = await invocar();
+    assert.equal(decision(salida), "deny");
+    assert.equal(
+      (salida as { hookSpecificOutput: { permissionDecisionReason: string } }).hookSpecificOutput
+        .permissionDecisionReason,
+      "Regla 5: el caso no está cubierto por la política; pasa a un analista.",
+    );
+    assert.deepEqual(llamadas, [[HERRAMIENTA, { adjunto: 2 }]]);
+    assert.deepEqual(estado.eventos, []);
+  });
+
+  it("sin identidad, si la Regla 5 no escala, bloquea por la Regla 1 como siempre", async (t) => {
+    capturarStderr(t);
+    const { estado, invocar } = conRegla5(
+      (cid) => identidad(cid, false),
+      async () => false,
+    );
+    assert.equal(decision(await invocar()), "deny");
+    assert.equal(estado.eventos[0]?.tipo, "bloqueo_por_regla");
+  });
+
+  it("si evaluar la Regla 5 falla, bloquea por la Regla 1 (ante la duda, bloquear)", async (t) => {
+    capturarStderr(t);
+    const { estado, invocar } = conRegla5(
+      (cid) => identidad(cid, false),
+      async () => {
+        throw new Error("clasificador caído");
+      },
+    );
+    assert.equal(decision(await invocar()), "deny");
+    assert.equal(estado.eventos[0]?.tipo, "bloqueo_por_regla");
+  });
+
+  it("con identidad verificada no hace falta la evaluación previa: la hace la extracción", async (t) => {
+    capturarStderr(t);
+    let llamadas = 0;
+    const { invocar } = conRegla5(
+      (cid) => identidad(cid, true),
+      async () => {
+        llamadas++;
+        return true;
+      },
+    );
+    assert.deepEqual(await invocar(), {});
+    assert.equal(llamadas, 0);
+  });
+});

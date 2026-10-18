@@ -7,6 +7,7 @@ import {
   esquemaRegistroExtraccion,
   esquemaResultadoExtraccion,
   esquemaSalidaSubagente,
+  fechaLocal,
   huella,
   validarResultado,
   validarSalida,
@@ -251,8 +252,11 @@ describe("extraccion: validarSalida", () => {
   it("una fecha igual a hoy no es futura", () => {
     const salida = certificadoCompleto();
     assert.ok(salida.certificado !== null && salida.certificado.fechaIngreso !== null);
-    salida.certificado.fechaIngreso.valor = "2026-10-17";
-    validada(salida, CONTENIDO_CERTIFICADO);
+    salida.certificado.fechaIngreso = {
+      valor: "2026-10-17",
+      fragmento: "desde el 17 de octubre de 2026",
+    };
+    validada(salida, `${CONTENIDO_CERTIFICADO}\nIngreso: desde el 17 de octubre de 2026`);
   });
 
   it("una moneda con solo el símbolo $ es moneda_no_reconocida", () => {
@@ -296,8 +300,10 @@ describe("extraccion: validarSalida", () => {
   it("un movimiento fuera del periodo es un error de esquema en su fecha", () => {
     const salida = extractoCompleto();
     salida.extracto!.movimientos[1]!.fecha = "2026-10-02";
+    salida.extracto!.movimientos[1]!.fragmento = "2026-10-02 Mercado del barrio cargo 250.000";
+    const contenido = `${CONTENIDO_EXTRACTO}\n2026-10-02 Mercado del barrio cargo 250.000`;
     assert.deepEqual(
-      errores(salida, CONTENIDO_EXTRACTO).map((e) => [e.campo, e.motivo]),
+      errores(salida, contenido).map((e) => [e.campo, e.motivo]),
       [["movimientos.1.fecha", "esquema"]],
     );
   });
@@ -312,6 +318,149 @@ describe("extraccion: validarSalida", () => {
     const salida = certificadoCompleto();
     salida.certificado!.salario = null;
     validada(salida, CONTENIDO_CERTIFICADO);
+  });
+});
+
+describe("extraccion: cada valor contra su cita (revisión de 0aa8c2a)", () => {
+  const motivos = (salida: unknown, contenido: string, hoy = HOY) => {
+    const r = validarSalida(salida, { contenido }, hoy);
+    return r.ok ? [] : r.errores.map((e) => [e.campo, e.motivo]);
+  };
+
+  it("un empleador que no está en su cita se rechaza aunque la cita sea real", () => {
+    const salida = certificadoCompleto();
+    salida.certificado!.empleador!.valor = "Empresa Que No Existe S.A.S.";
+    assert.deepEqual(motivos(salida, CONTENIDO_CERTIFICADO), [
+      ["empleador", "valor_no_coincide_con_fragmento"],
+    ]);
+  });
+
+  it("el texto se compara sin distinguir mayúsculas, tildes ni espacios", () => {
+    const salida = certificadoCompleto();
+    salida.certificado!.cargo!.valor = "ANALISTA   de Operaciones";
+    assert.deepEqual(motivos(salida, CONTENIDO_CERTIFICADO), []);
+  });
+
+  it("una fecha que no está en su cita se rechaza", () => {
+    const salida = certificadoCompleto();
+    salida.certificado!.fechaIngreso!.valor = "2021-03-15";
+    assert.deepEqual(motivos(salida, CONTENIDO_CERTIFICADO), [
+      ["fechaIngreso", "valor_no_coincide_con_fragmento"],
+    ]);
+  });
+
+  it("acepta la fecha con números en la cita (01/02/2022)", () => {
+    const salida = certificadoCompleto();
+    salida.certificado!.fechaIngreso = { valor: "2022-02-01", fragmento: "Ingreso: 01/02/2022" };
+    assert.deepEqual(motivos(salida, `${CONTENIDO_CERTIFICADO}\nIngreso: 01/02/2022`), []);
+  });
+
+  it("un movimiento con el sentido contrario al de su cita se rechaza", () => {
+    const salida = extractoCompleto();
+    salida.extracto!.movimientos[0]!.sentido = "cargo";
+    assert.deepEqual(motivos(salida, CONTENIDO_EXTRACTO), [
+      ["movimientos.0.sentido", "valor_no_coincide_con_fragmento"],
+    ]);
+  });
+
+  it("si la cita dice abono y cargo, manda la última palabra (la columna del tipo)", () => {
+    const fila = "2026-09-20 Abono a tarjeta de crédito Cargo 100.000";
+    const salida = extractoCompleto();
+    salida.extracto!.movimientos[1] = {
+      fecha: "2026-09-20",
+      descripcion: "Abono a tarjeta de crédito",
+      valor: 100_000,
+      sentido: "cargo",
+      fragmento: fila,
+    };
+    assert.deepEqual(motivos(salida, `${CONTENIDO_EXTRACTO}\n${fila}`), []);
+    salida.extracto!.movimientos[1]!.sentido = "abono";
+    assert.deepEqual(motivos(salida, `${CONTENIDO_EXTRACTO}\n${fila}`), [
+      ["movimientos.1.sentido", "valor_no_coincide_con_fragmento"],
+    ]);
+  });
+
+  it("una descripción de movimiento que no está en su cita se rechaza", () => {
+    const salida = extractoCompleto();
+    salida.extracto!.movimientos[1]!.descripcion = "Arriendo";
+    assert.deepEqual(motivos(salida, CONTENIDO_EXTRACTO), [
+      ["movimientos.1.descripcion", "valor_no_coincide_con_fragmento"],
+    ]);
+  });
+
+  it("«hoy» es el día en Colombia: a las 21:00 de Bogotá, la fecha del día siguiente es futura", () => {
+    const nocheEnBogota = new Date("2026-10-18T02:00:00.000Z");
+    assert.equal(fechaLocal(nocheEnBogota), "2026-10-17");
+    const salida = certificadoCompleto();
+    salida.certificado!.fechaIngreso = {
+      valor: "2026-10-18",
+      fragmento: "desde el 18 de octubre de 2026",
+    };
+    const contenido = `${CONTENIDO_CERTIFICADO}\nIngreso: desde el 18 de octubre de 2026`;
+    assert.deepEqual(motivos(salida, contenido, nocheEnBogota), [["fechaIngreso", "fecha_futura"]]);
+  });
+
+  it("«pesos» sin país en la cita de la moneda no es una moneda reconocida", () => {
+    const salida = certificadoCompleto();
+    salida.certificado!.moneda = { fragmento: "Salario en pesos" };
+    assert.deepEqual(motivos(salida, `${CONTENIDO_CERTIFICADO}\nSalario en pesos`), [
+      ["moneda", "moneda_no_reconocida"],
+    ]);
+  });
+});
+
+describe("extraccion: moneda extranjera en cualquier parte del documento (revisión de 0aa8c2a)", () => {
+  const CONTENIDO_MIXTO = [
+    "Certificado laboral ficticio",
+    "Industrias Imaginarias del Valle S.A.S. certifica que Ana Pérez Ficticia",
+    "trabaja como analista de operaciones desde el 1 de febrero de 2022.",
+    "Moneda de referencia: COP",
+    "Salario básico mensual: USD 1.200",
+  ].join("\n");
+
+  it("aunque el modelo cite el encabezado en COP, un salario en USD saca al documento de la política", () => {
+    const salida = certificadoCompleto();
+    salida.certificado!.salario = { valor: 1_200, fragmento: "Salario básico mensual: USD 1.200" };
+    salida.certificado!.moneda = { fragmento: "Moneda de referencia: COP" };
+    const resultado = construirResultado(
+      validada(salida, CONTENIDO_MIXTO),
+      documento(CONTENIDO_MIXTO),
+      1,
+    );
+    assert.equal(resultado.estado, "no_cubierto");
+    if (resultado.estado !== "no_cubierto") return;
+    assert.equal(resultado.causa, "moneda_extranjera");
+    assert.equal(resultado.fragmentoMoneda, "Salario básico mensual: USD 1.200");
+    assert.equal(validarResultado(resultado, CONTENIDO_MIXTO, HOY).ok, true);
+  });
+
+  it("aunque el modelo deje la moneda en null, un monto en dólares escala", () => {
+    const salida = certificadoCompleto();
+    salida.certificado!.salario = { valor: 1_200, fragmento: "Salario básico mensual: USD 1.200" };
+    salida.certificado!.moneda = null;
+    const resultado = construirResultado(
+      validada(salida, CONTENIDO_MIXTO),
+      documento(CONTENIDO_MIXTO),
+      1,
+    );
+    assert.equal(resultado.estado === "no_cubierto" && resultado.causa, "moneda_extranjera");
+  });
+
+  it("el core rechaza un extraido sobre un documento que nombra una moneda extranjera", () => {
+    const resultado = construirResultado(
+      validada(certificadoCompleto(), CONTENIDO_CERTIFICADO),
+      documento(CONTENIDO_CERTIFICADO),
+      1,
+    );
+    const conDolares = `${CONTENIDO_CERTIFICADO}\nBono anual: USD 300`;
+    const r = validarResultado({ ...resultado, huella: huella(conDolares) }, conDolares, HOY);
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.deepEqual(
+        r.errores.map((e) => [e.campo, e.motivo]),
+        [["estado", "decision_no_coincide"]],
+      );
+    }
   });
 });
 
