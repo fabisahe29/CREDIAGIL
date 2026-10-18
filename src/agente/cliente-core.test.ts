@@ -952,3 +952,155 @@ describe("cliente del core: registrarSolicitud y consultarSolicitudRegistrada (#
     if (!t.ok) assert.equal(t.error.codigo, "tiempo_agotado");
   });
 });
+describe("cliente del core: preaprobarSolicitud (#14, US1)", () => {
+  const cita = (fragmento: string) => ({ tipo: "afirmacion", fragmento }) as const;
+
+  it("preaprueba contra el servidor real una solicitud registrada con ingreso verificado", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const correlationId = randomUUID();
+      const unico = SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!;
+      assert.equal(
+        (
+          await core.verificarIdentidad(
+            unico.idSolicitante,
+            unico.fechaExpedicion,
+            randomUUID(),
+            correlationId,
+          )
+        ).ok,
+        true,
+      );
+      for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+        const v = validarSalida(e.salida, e, new Date());
+        if (!v.ok) assert.fail(JSON.stringify(v.errores));
+        const r = await core.registrarExtraccion(
+          {
+            adjunto: e.adjunto,
+            nombre: e.nombre,
+            contenido: e.contenido,
+            resultado: construirResultado(v.salida, e, 1),
+          },
+          correlationId,
+        );
+        assert.equal(r.ok, true, JSON.stringify(r));
+      }
+      assert.equal(
+        (await core.verificarIngreso({ ingresoDeclarado: 3_800_000 }, correlationId)).ok,
+        true,
+      );
+      const registro = await core.registrarSolicitud(
+        {
+          idSolicitante: ID_SOLICITANTE_UNICO,
+          monto: 4_000_000,
+          plazoMeses: 24,
+          claveIdempotencia: "clave-cliente-preaprobacion",
+          procedencia: {
+            monto: cita("quiero el monto"),
+            plazoMeses: cita("a ese plazo"),
+            ingresoDeclarado: cita("gano ese ingreso"),
+          },
+        },
+        correlationId,
+      );
+      assert.equal(registro.ok, true, JSON.stringify(registro));
+
+      const preaprobacion = await core.preaprobarSolicitud(correlationId);
+      assert.equal(preaprobacion.ok, true, JSON.stringify(preaprobacion));
+      if (!preaprobacion.ok) return;
+      assert.equal(preaprobacion.datos.repetida, false);
+      assert.equal(preaprobacion.datos.solicitud.estado, "preaprobada");
+      assert.equal(preaprobacion.datos.solicitud.preaprobacion?.decision.permitido, true);
+
+      const repetida = await core.preaprobarSolicitud(correlationId);
+      assert.equal(repetida.ok && repetida.datos.repetida, true);
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("sin identidad devuelve el rechazo del servidor, validado por el contrato", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const r = await core.preaprobarSolicitud(randomUUID());
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.error.codigo, "identidad_no_verificada");
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("envía solo el correlationId al llamador, sin montos, cuotas ni ingresos", async () => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return {
+            structuredContent: {
+              ok: false,
+              error: {
+                categoria: "negocio",
+                reintentable: false,
+                codigo: "solicitud_no_registrada",
+                mensaje: "No hay una solicitud registrada.",
+              },
+            },
+          };
+        },
+        close: async () => {},
+      },
+    });
+    const correlationId = randomUUID();
+    await core.preaprobarSolicitud(correlationId);
+    assert.deepEqual(llamadas, [{ name: "preaprobar_credito", arguments: { correlationId } }]);
+  });
+
+  it("una respuesta fuera de contrato es respuesta_fuera_de_contrato, no se adivina", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({
+          structuredContent: {
+            ok: true,
+            datos: {
+              solicitud: { idSolicitud: "SOL-1", estado: "preaprobada" },
+              repetida: false,
+            },
+          },
+        }),
+        close: async () => {},
+      },
+    });
+    const r = await core.preaprobarSolicitud(randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
+  });
+
+  it("una falla del llamador es core_no_disponible y un tiempo agotado es tiempo_agotado", async () => {
+    const caido = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new Error("conexión rota");
+        },
+        close: async () => {},
+      },
+    });
+    const r = await caido.preaprobarSolicitud(randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.error.codigo, "core_no_disponible");
+      assert.equal(r.error.reintentable, true);
+    }
+    const lento = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "tiempo");
+        },
+        close: async () => {},
+      },
+    });
+    const t = await lento.preaprobarSolicitud(randomUUID());
+    assert.equal(t.ok, false);
+    if (!t.ok) assert.equal(t.error.codigo, "tiempo_agotado");
+  });
+});

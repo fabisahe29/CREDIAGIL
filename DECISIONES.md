@@ -4,6 +4,76 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-18 · Preaprobación automática dentro de la política
+
+**Issue**: [#14 — Preaprobación automática dentro de la política](https://github.com/fabisahe29/CREDIAGIL/issues/14)
+
+**Detalle**: [specs/012-preaprobacion-automatica-politica/research.md](specs/012-preaprobacion-automatica-politica/research.md), decisiones R1 a R11
+
+### Decisión 1: el tope y el porcentaje van en `politica.ts` y se comparan con enteros
+
+`TOPE_MONTO_PREAPROBACION = 5_000_000` y `PORCENTAJE_MAXIMO_CUOTA_INGRESO = 30`. La Regla 2 se evalúa con `cuota · 100 ≤ 30 · ingreso` en `BigInt`, no con la relación redondeada del #12.
+
+**Motivo**: esa relación se redondea a dos decimales, así que 30,004% daría 30,00% y se preaprobaría un caso fuera de política. La comparación entera es exacta en el borde (Principio III).
+
+**Alternativas descartadas**: comparar la relación redondeada con 30, por el error en el borde; las constantes en el módulo de la herramienta, porque parten la fuente única.
+
+### Decisión 2: la regla es una función pura que usan el hook, el core y las pruebas
+
+`evaluarRegla2` recibe lo que guarda la solicitud registrada y devuelve la decisión explicable. Evalúa en el orden de la constitución: verificación de ingreso (Regla 3), monto y cuota.
+
+**Motivo**: con una sola función las tres capas no pueden discrepar, y cada decisión sale con regla, valores y motivo.
+
+**Alternativas descartadas**: una función por criterio, que deja el orden al llamador; un booleano, porque la decisión debe ser explicable.
+
+### Decisión 3: el modelo no aporta ningún dato
+
+`preaprobar_credito` no tiene campos de entrada: el hook y el core toman todo de la solicitud registrada.
+
+**Motivo**: el criterio prohíbe confiar en montos, cuotas o ingresos que pase el modelo; sin campos no hay nada que alterar.
+
+**Alternativas descartadas**: recibir el identificador de la solicitud, que permitiría preaprobar otra; recibir el monto o la cuota «para comprobar», que invita a confiar en ellos.
+
+### Decisión 4: un hook propio para la Regla 2, y el servidor la repite
+
+`control-preaprobacion.ts` se ejecuta junto al hook de identidad, que sigue aplicando la Regla 1. El core vuelve a aplicar todo con la misma función.
+
+**Motivo**: el criterio pide un hook que recalcule con la solicitud, y la defensa en profundidad pide la revalidación del servidor. Dos reglas distintas no deben mezclarse en un mismo archivo.
+
+**Alternativas descartadas**: ampliar el hook de identidad; solo el hook, que incumple la defensa en profundidad.
+
+### Decisión 5: un bloqueo por la Regla 2 escala con un motivo propio, sin alternativas
+
+La señal `preaprobacion_fuera_de_politica`, de la Regla 2, la deja el código. El agente no ofrece un monto ni un plazo alternativo (aclaración Q2). Faltar la solicitud registrada no escala: pide registrar primero. Con la identidad sin verificar se mantiene el comportamiento del #9.
+
+**Motivo**: el escalamiento lo decide el código y cada motivo lleva su regla y su aviso. Un paso olvidado no es un caso fuera de política.
+
+**Alternativas descartadas**: que el modelo decida si escala; reusar `caso_no_cubierto`, que es de la Regla 5; escalar también la falta de solicitud.
+
+### Decisión 6: la preaprobación es solo la constancia, y la solicitud preaprobada sigue abierta
+
+La solicitud pasa de `en_estudio` a `preaprobada` con la decisión explicable, sin vigencia ni condiciones (aclaración Q1). Una solicitud preaprobada cuenta como abierta.
+
+**Motivo**: la constancia debe quedar con la solicitud que leerá el #15, y un solicitante preaprobado no puede registrar otra.
+
+**Alternativas descartadas**: guardar la preaprobación aparte, con dos registros por solicitud; inventar una vigencia o condiciones que el enunciado no define.
+
+### Decisión 7: la descripción y el prompt no dan el tope ni el porcentaje
+
+La descripción dice que compromete a la fintech y cuándo se usa frente a la simulación, sin los umbrales.
+
+**Motivo**: con los umbrales a la vista el modelo concluiría «sí califica» sin pedirla, o intentaría ajustar los datos para entrar en la política.
+
+**Alternativas descartadas**: citar el tope para explicar un bloqueo, que invita a negociar.
+
+### Riesgos residuales aceptados
+
+- El bloqueo por discrepancia registrada solo se ejerce con pruebas del core y del hook, no con el chat, por el fallo conocido del #13.
+- Tras una preaprobación el chat cierra la conversación (comportamiento del #8), así que la repetición solo se prueba en el core y en el adaptador.
+- Si el modelo no llama a `preaprobar_credito` tras registrar, el caso queda registrado y sin preaprobar: es seguro, pero lento.
+
+---
+
 ## 2026-10-18 · Registro de la solicitud con procedencia
 
 **Issue**: [#13 — Registro de la solicitud con procedencia](https://github.com/fabisahe29/CREDIAGIL/issues/13)

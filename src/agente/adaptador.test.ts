@@ -58,6 +58,7 @@ import {
   type SalidaSubagente,
 } from "../compartido/extraccion.ts";
 import { REGLA_3 } from "../politica/ingreso.ts";
+import { REGLA_2 } from "../politica/preaprobacion.ts";
 import { claveIdempotenciaSolicitud, esquemaSolicitudRegistrada } from "../compartido/solicitud.ts";
 import {
   ejemploCertificado,
@@ -753,6 +754,7 @@ describe("adaptador: consultar_identidad no se expone al modelo (#9, US4)", () =
       "consultar_extracciones",
       "calcular_capacidad_pago",
       "registrar_solicitud",
+      "preaprobar_credito",
     ]);
   });
 });
@@ -2457,7 +2459,8 @@ describe("adaptador: registrar_solicitud (#13, US1)", () => {
     ingresoDeclarado: null,
     verificacionIngreso: null,
     datosExtraidos: [],
-    versionPolitica: "2026-10-18.2",
+    preaprobacion: null,
+    versionPolitica: "2026-10-18.3",
   });
 
   type EntradaCore = Parameters<ClienteCore["registrarSolicitud"]>[0];
@@ -2917,5 +2920,263 @@ describe("adaptador: tras la Regla 3 el modelo debe registrar antes de responder
     await registrarEjemplos(p, documentosDeIngreso());
     const verificado = await verificarIngreso(p, 3_800_000);
     assert.equal("siguientePaso" in (contenidoDe(verificado).datos ?? {}), false);
+  });
+});
+describe("adaptador: preaprobar_credito (#14, US1 y US2)", () => {
+  const valoresDecision = {
+    monto: 4_000_000,
+    plazoMeses: 24,
+    cuotaMensual: 206_723,
+    ingresoVerificado: 3_800_000,
+    topeMonto: 5_000_000,
+    porcentajeMaximo: 30,
+  };
+
+  const solicitudPreaprobada = esquemaSolicitudRegistrada.parse({
+    idSolicitud: "SOL-0002000001",
+    correlationId: "0b0b6b6e-5f0e-4a39-9d57-6a0c1c1f0a11",
+    claveIdempotencia: "x",
+    estado: "preaprobada",
+    registradaEn: "2026-10-18T12:00:00.000Z",
+    solicitante: {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      nombre: "Ana Pérez Ficticia",
+      documentoEnmascarado: "******4567",
+    },
+    monto: {
+      valor: 4_000_000,
+      procedencia: { tipo: "afirmacion", fragmento: "quiero el monto" },
+    },
+    plazoMeses: {
+      valor: 24,
+      procedencia: { tipo: "afirmacion", fragmento: "a ese plazo" },
+    },
+    ingresoDeclarado: null,
+    verificacionIngreso: null,
+    datosExtraidos: [],
+    preaprobacion: {
+      preaprobadaEn: "2026-10-18T12:30:00.000Z",
+      decision: {
+        regla: REGLA_2,
+        permitido: true,
+        motivo: "La solicitud cumple la política.",
+        valores: valoresDecision,
+        versionPolitica: "2026-10-18.3",
+      },
+    },
+    versionPolitica: "2026-10-18.3",
+  });
+
+  type RespuestaCore = Awaited<ReturnType<ClienteCore["preaprobarSolicitud"]>>;
+
+  function corePreaprobacion(respuesta?: RespuestaCore) {
+    const llamadas: string[] = [];
+    const core: ClienteCore = {
+      ...CORE_NO_SIMULADO,
+      async consultarSolicitud() {
+        return exito({ solicitud: null });
+      },
+      async preaprobarSolicitud(correlationId) {
+        llamadas.push(correlationId);
+        return respuesta ?? exito({ solicitud: solicitudPreaprobada, repetida: false });
+      },
+      async cerrar() {},
+    };
+    return { core, llamadas };
+  }
+
+  function adaptadorCon(core: ClienteCore, alUsarHerramienta?: (info: InfoHerramienta) => void) {
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({
+      core,
+      estado,
+      dormir: async () => {},
+      azar: () => 0.5,
+      ...(alUsarHerramienta !== undefined ? { alUsarHerramienta } : {}),
+    });
+    return { adaptador, estado };
+  }
+
+  it("expone preaprobar_credito con un esquema de entrada vacío: el modelo no envía ningún dato", () => {
+    const { core } = corePreaprobacion();
+    const { adaptador } = adaptadorCon(core);
+    assert.deepEqual(Object.keys(adaptador.herramientas.preaprobar_credito.esquema), []);
+  });
+
+  it("llama al core con el correlationId de la conversación", async () => {
+    const { core, llamadas } = corePreaprobacion();
+    const { adaptador, estado } = adaptadorCon(core);
+    await adaptador.herramientas.preaprobar_credito.manejar({});
+    assert.deepEqual(llamadas, [estado.correlationId]);
+  });
+
+  it("una preaprobación nueva emite el evento preaprobacion desde el código, con la Regla 2 y los valores", async () => {
+    const { core } = corePreaprobacion();
+    const { adaptador, estado } = adaptadorCon(core);
+    await adaptador.herramientas.preaprobar_credito.manejar({});
+    assert.equal(estado.eventos.length, 1);
+    const evento = estado.eventos[0]!;
+    assert.equal(evento.tipo, "preaprobacion");
+    assert.equal(evento.regla, REGLA_2);
+    assert.deepEqual(evento.valores, valoresDecision);
+    assert.equal(evento.correlationId, estado.correlationId);
+    assert.equal(estado.escalamiento, null);
+  });
+
+  it("una repetición no emite otro evento", async () => {
+    const { core } = corePreaprobacion(exito({ solicitud: solicitudPreaprobada, repetida: true }));
+    const { adaptador, estado } = adaptadorCon(core);
+    const resultado = await adaptador.herramientas.preaprobar_credito.manejar({});
+    assert.deepEqual(estado.eventos, []);
+    const contenido = resultado.structuredContent as {
+      datos: { repetida: boolean };
+    };
+    assert.equal(contenido.datos.repetida, true);
+  });
+
+  it("al modelo le devuelve solo el identificador, el estado y si fue una repetición", async () => {
+    const { core } = corePreaprobacion();
+    const { adaptador } = adaptadorCon(core);
+    const resultado = await adaptador.herramientas.preaprobar_credito.manejar({});
+    assert.equal(resultado.isError, false);
+    assert.deepEqual(resultado.structuredContent, {
+      ok: true,
+      datos: {
+        idSolicitud: "SOL-0002000001",
+        estado: "preaprobada",
+        repetida: false,
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(resultado), /decision|procedencia|Ficticia|cuotaMensual/);
+  });
+
+  it("un error del core pasa tal cual al modelo, sin reintentar si no es transitorio", async () => {
+    const error = errorNegocio("solicitud_no_registrada", "No hay una solicitud registrada.");
+    const { core, llamadas } = corePreaprobacion(fallo(error));
+    const { adaptador, estado } = adaptadorCon(core);
+    const resultado = await adaptador.herramientas.preaprobar_credito.manejar({});
+    assert.equal(resultado.isError, true);
+    assert.deepEqual(resultado.structuredContent, { ok: false, error });
+    assert.equal(llamadas.length, 1);
+    assert.equal(estado.escalamiento, null);
+    assert.deepEqual(estado.eventos, []);
+  });
+
+  it("si los reintentos se agotan deja la señal de falla transitoria persistente", async () => {
+    const { core, llamadas } = corePreaprobacion(
+      fallo(errorTransitorio("core_no_disponible", "El core no está disponible.")),
+    );
+    const { adaptador, estado } = adaptadorCon(core);
+    await adaptador.herramientas.preaprobar_credito.manejar({});
+    assert.equal(estado.escalamiento?.motivo, "falla_transitoria_persistente");
+    assert.equal(estado.escalamiento?.herramienta, "preaprobar_credito");
+    assert.ok(llamadas.length > 1);
+  });
+
+  it("el modo de demostración la muestra con alUsarHerramienta", async () => {
+    const { core } = corePreaprobacion();
+    const vistas: InfoHerramienta[] = [];
+    const { adaptador } = adaptadorCon(core, (info) => vistas.push(info));
+    await adaptador.herramientas.preaprobar_credito.manejar({});
+    assert.deepEqual(vistas, [{ herramienta: "preaprobar_credito", intento: 1, resultado: "ok" }]);
+  });
+
+  describe("un bloqueo del core deja la señal de escalamiento por la Regla 2", () => {
+    const codigos = [
+      "monto_sobre_tope",
+      "cuota_sobre_porcentaje",
+      "discrepancia_registrada",
+      "ingreso_no_verificado",
+      "cuota_no_calculable",
+    ] as const;
+
+    for (const codigo of codigos) {
+      it(`${codigo}: señal preaprobacion_fuera_de_politica con la Regla 2 y el código`, async () => {
+        const error = errorNegocio(codigo, "No cumple las condiciones.");
+        const { core, llamadas } = corePreaprobacion(fallo(error));
+        const { adaptador, estado } = adaptadorCon(core);
+        const resultado = await adaptador.herramientas.preaprobar_credito.manejar({});
+        assert.equal(resultado.isError, true);
+        assert.deepEqual(resultado.structuredContent, { ok: false, error });
+        assert.equal(estado.escalamiento?.motivo, "preaprobacion_fuera_de_politica");
+        assert.equal(estado.escalamiento?.regla, REGLA_2);
+        assert.equal(estado.escalamiento?.herramienta, "preaprobar_credito");
+        assert.equal(estado.escalamiento?.codigo, codigo);
+        assert.equal(llamadas.length, 1, "no reintenta un bloqueo");
+        assert.equal(
+          estado.eventos.some((e) => e.tipo === "preaprobacion"),
+          false,
+        );
+      });
+    }
+
+    it("solicitud_no_registrada e identidad_no_verificada no dejan esa señal", async () => {
+      for (const codigo of ["solicitud_no_registrada", "identidad_no_verificada"]) {
+        const { core } = corePreaprobacion(fallo(errorNegocio(codigo, "No se puede.")));
+        const { adaptador, estado } = adaptadorCon(core);
+        await adaptador.herramientas.preaprobar_credito.manejar({});
+        assert.equal(estado.escalamiento, null, codigo);
+      }
+    });
+  });
+
+  describe("orden de prevalencia de la Regla 2 (4 → 5 → 1 → 3 → 2)", () => {
+    it("el motivo preaprobacion_fuera_de_politica es de la Regla 2", () => {
+      assert.equal(ORDEN_REGLA["preaprobacion_fuera_de_politica"], 2);
+    });
+
+    const anteriores: SenalEscalamiento["motivo"][] = [
+      "pide_persona",
+      "caso_no_cubierto",
+      "identidad_no_verificable",
+      "discrepancia_de_ingreso",
+    ];
+
+    for (const motivo of anteriores) {
+      it(`una señal de ${motivo} reemplaza a la de la Regla 2`, () => {
+        const estado = crearEstado(randomUUID());
+        dejarSenal(estado, {
+          motivo: "preaprobacion_fuera_de_politica",
+          regla: REGLA_2,
+          herramienta: "preaprobar_credito",
+        });
+        dejarSenal(estado, {
+          motivo,
+          regla: "regla anterior",
+          herramienta: "prueba",
+        });
+        assert.equal(estado.escalamiento?.motivo, motivo);
+      });
+
+      it(`la señal de la Regla 2 no reemplaza a una de ${motivo}`, () => {
+        const estado = crearEstado(randomUUID());
+        dejarSenal(estado, {
+          motivo,
+          regla: "regla anterior",
+          herramienta: "prueba",
+        });
+        dejarSenal(estado, {
+          motivo: "preaprobacion_fuera_de_politica",
+          regla: REGLA_2,
+          herramienta: "preaprobar_credito",
+        });
+        assert.equal(estado.escalamiento?.motivo, motivo);
+      });
+    }
+
+    it("una señal técnica ni reemplaza a la de la Regla 2 ni es reemplazada por ella", () => {
+      const estado = crearEstado(randomUUID());
+      dejarSenal(estado, {
+        motivo: "preaprobacion_fuera_de_politica",
+        regla: REGLA_2,
+        herramienta: "preaprobar_credito",
+      });
+      dejarSenal(estado, {
+        motivo: "falla_transitoria_persistente",
+        regla: "técnica",
+        herramienta: "prueba",
+      });
+      assert.equal(estado.escalamiento?.motivo, "preaprobacion_fuera_de_politica");
+    });
   });
 });

@@ -271,3 +271,69 @@ describe("casos: registro de la solicitud (#13)", () => {
     });
   }
 });
+describe("casos: preaprobación (#14)", () => {
+  /** Documentos que son copia exacta de los del caso de registro del #13. */
+  const ORIGEN = "registro-solicitud";
+  const CASOS: Record<string, RegExp> = {
+    "preaprobacion-simple": /4 millones a 24 meses/,
+    "preaprobacion-monto-alto": /6 millones a 24 meses/,
+    "preaprobacion-cuota-alta": /4\.500\.000 a 3 meses/,
+  };
+  const DOCUMENTOS = [
+    "certificado-completo.md",
+    "extracto-2026-07.md",
+    "extracto-2026-08.md",
+    "extracto-2026-09.md",
+  ];
+
+  const fechaExpedicion = SOLICITANTES_EJEMPLO.find(
+    (s) => s.idSolicitante === ID_SOLICITANTE_UNICO,
+  )!.fechaExpedicion;
+
+  for (const [nombre, solicitud] of Object.entries(CASOS)) {
+    it(`el caso versionado casos/${nombre} carga sin errores y verifica primero la identidad`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.equal(r.ok, true, r.ok ? "" : r.problema);
+      const texto = readFileSync(resolve("casos", nombre, "caso.json"), "utf8");
+      assert.ok(texto.includes(fechaExpedicion));
+    });
+
+    it(`casos/${nombre} pide registrar la solicitud y preaprobarla, con el monto y el plazo que dice el solicitante`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.ok(r.ok);
+      if (!r.ok) return;
+      const mensajes = r.caso.pasos.flatMap((p) => ("mensaje" in p ? [p.mensaje] : []));
+      const ultimo = mensajes.at(-1) ?? "";
+      assert.match(ultimo, /registrar/i);
+      assert.match(ultimo, /preapru/i);
+      assert.match(ultimo, solicitud);
+    });
+
+    it(`los documentos de casos/${nombre} son idénticos a los de casos/${ORIGEN}`, () => {
+      for (const archivo of DOCUMENTOS) {
+        assert.equal(
+          readFileSync(resolve("casos", nombre, archivo), "utf8"),
+          readFileSync(resolve("casos", ORIGEN, archivo), "utf8"),
+          archivo,
+        );
+      }
+    });
+
+    it(`los documentos de casos/${nombre} cumplen la convención de datos ficticios`, () => {
+      const carpeta = resolve("casos", nombre);
+      for (const archivo of readdirSync(carpeta)) {
+        const texto = readFileSync(join(carpeta, archivo), "utf8");
+        const bloqueos = datosReales({
+          herramienta: "Write",
+          rutas: [`casos/${nombre}/${archivo}`],
+          textos: [{ origen: `casos/${nombre}/${archivo}`, texto }],
+        });
+        assert.deepEqual(
+          bloqueos.map((b) => b.detectado),
+          [],
+          archivo,
+        );
+      }
+    });
+  }
+});

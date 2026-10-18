@@ -2,7 +2,7 @@
 // docs/datos-ficticios.md): identificadores y documentos con prefijo 000, correos .example
 // y nombres inventados. Montos en pesos enteros.
 
-export type EstadoSolicitud = "en_estudio" | "anulada" | "reservada";
+export type EstadoSolicitud = "en_estudio" | "preaprobada" | "anulada" | "reservada";
 
 export interface Solicitud {
   idSolicitud: string;

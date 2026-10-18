@@ -19,6 +19,7 @@ import {
 } from "../compartido/capacidad-pago.ts";
 import { esquemaRegistroExtraccion } from "../compartido/extraccion.ts";
 import { esquemaVerificacionIngreso } from "../compartido/ingreso.ts";
+import { DESCRIPCION_PREAPROBAR_CREDITO } from "../compartido/preaprobacion.ts";
 import {
   DESCRIPCION_REGISTRAR_SOLICITUD,
   esquemaSolicitudRegistrada,
@@ -88,6 +89,8 @@ const ENTRADAS = {
     })
     .strict(),
   consultar_solicitud_registrada: z.object({ correlationId }).strict(),
+  // #14: sin campos del modelo: monto, cuota e ingreso salen de la solicitud registrada (R3).
+  preaprobar_credito: z.object({ correlationId }).strict(),
 } as const;
 
 type NombreHerramienta = keyof typeof ENTRADAS;
@@ -498,6 +501,41 @@ export function crearServidor(core: Core): McpServer {
       registrarHerramienta("consultar_solicitud_registrada", argumentos, respuesta, {
         solicitud: respuesta.ok ? respuesta.datos.solicitud !== null : null,
       });
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "preaprobar_credito",
+    {
+      title: "Preaprobar crédito",
+      description: DESCRIPCION_PREAPROBAR_CREDITO,
+      inputSchema: z.looseObject({ correlationId: CORRELATION_ID_ANUNCIADO }),
+      outputSchema: salida({
+        solicitud: esquemaSolicitudRegistrada,
+        repetida: z.boolean(),
+      }),
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("preaprobar_credito", argumentos);
+      if (!validacion.ok) {
+        registrarHerramienta("preaprobar_credito", argumentos, validacion.respuesta);
+        return aResultadoMcp(validacion.respuesta);
+      }
+      const { respuesta, auditoria } = core.preaprobarSolicitud(validacion.entrada);
+      // Solo el resultado y el identificador: nunca montos, cuotas ni ingresos (R10).
+      registrarHerramienta(
+        "preaprobar_credito",
+        argumentos,
+        respuesta,
+        respuesta.ok ? { idSolicitud: respuesta.datos.solicitud.idSolicitud } : {},
+      );
+      if (auditoria !== null) {
+        registrar("auditoria_preaprobacion", {
+          correlationId: validacion.entrada.correlationId,
+          ...auditoria,
+        });
+      }
       return aResultadoMcp(respuesta);
     },
   );

@@ -26,7 +26,14 @@ import {
   extractosTrimestre,
   type Ejemplo,
 } from "../compartido/ingreso-ejemplos.ts";
-import { TASA_MENSUAL_PUNTOS_BASE, VERSION_POLITICA } from "../politica/politica.ts";
+import {
+  PORCENTAJE_MAXIMO_CUOTA_INGRESO,
+  TASA_MENSUAL_PUNTOS_BASE,
+  TOPE_MONTO_PREAPROBACION,
+  VERSION_POLITICA,
+} from "../politica/politica.ts";
+import { REGLA_2 } from "../politica/preaprobacion.ts";
+import { calcularCuota } from "../politica/cuota.ts";
 import {
   AVISOS_CAPACIDAD_PAGO,
   esquemaSimulacionCapacidadPago,
@@ -2384,5 +2391,516 @@ describe("core simulado: registrarSolicitud rechaza un dato sin procedencia (#13
     );
     assert.equal(auditoria?.codigo, "procedencia_invalida");
     assert.doesNotMatch(JSON.stringify(auditoria), /xxxx/);
+  });
+});
+/** Preparación común de las pruebas de `preaprobarSolicitud` (#14): una solicitud ya registrada. */
+function prepararPreaprobacion({
+  ingresoDocumentos = 3_800_000,
+  ingresoDeclarado = ingresoDocumentos,
+  monto = 4_000_000,
+  plazoMeses = 24,
+  conDocumentos = true,
+}: {
+  ingresoDocumentos?: number;
+  ingresoDeclarado?: number | null;
+  monto?: number;
+  plazoMeses?: number;
+  conDocumentos?: boolean;
+} = {}) {
+  const ahora = () => HOY_EJEMPLO;
+  const core = crearCore({ ahora });
+  const correlationId = randomUUID();
+  const ana = solicitante(ID_SOLICITANTE_UNICO);
+  const identidad = core.verificarIdentidad({
+    idSolicitante: ana.idSolicitante,
+    fechaExpedicion: ana.fechaExpedicion,
+    idIntento: "intento-ana",
+    correlationId,
+  });
+  assert.equal(identidad.respuesta.ok, true);
+  if (conDocumentos) {
+    const documentos = [
+      ejemploCertificado({ salario: ingresoDocumentos }),
+      ...extractosTrimestre({ nomina: ingresoDocumentos }),
+    ];
+    for (const e of documentos) {
+      const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = core.registrarExtraccion({
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      }).respuesta;
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    const verificacion = core.verificarIngreso({
+      correlationId,
+      ...(ingresoDeclarado === null ? {} : { ingresoDeclarado }),
+    });
+    assert.ok(verificacion.respuesta.ok);
+  }
+  const cita = (fragmento: string) => ({ tipo: "afirmacion", fragmento });
+  const registro = core.registrarSolicitud({
+    correlationId,
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    monto,
+    plazoMeses,
+    claveIdempotencia: "clave-preaprobacion-1",
+    procedencia: {
+      monto: cita("quiero el monto"),
+      plazoMeses: cita("a ese plazo"),
+      ...(conDocumentos && ingresoDeclarado !== null
+        ? { ingresoDeclarado: cita("gano ese ingreso") }
+        : {}),
+    },
+  });
+  assert.ok(registro.respuesta.ok, JSON.stringify(registro.respuesta));
+  return { core, correlationId, ahora };
+}
+
+type ResultadoPreaprobacion = ReturnType<ReturnType<typeof crearCore>["preaprobarSolicitud"]>;
+
+function preaprobacionExitosa(resultado: ResultadoPreaprobacion) {
+  assert.ok(resultado.respuesta.ok, JSON.stringify(resultado.respuesta));
+  if (!resultado.respuesta.ok) throw new Error("se esperaba una preaprobación");
+  return resultado.respuesta.datos;
+}
+
+describe("core simulado: preaprobarSolicitud, caso simple (#14, US1)", () => {
+  it("preaprueba 4.000.000 a 24 meses con ingreso verificado de 3.800.000 y deja la constancia", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const { solicitud, repetida } = preaprobacionExitosa(
+      core.preaprobarSolicitud({ correlationId }),
+    );
+    assert.equal(repetida, false);
+    assert.equal(solicitud.estado, "preaprobada");
+    assert.equal(solicitud.preaprobacion?.preaprobadaEn, HOY_EJEMPLO.toISOString());
+    const decision = solicitud.preaprobacion?.decision;
+    assert.equal(decision?.permitido, true);
+    assert.equal(decision?.regla, REGLA_2);
+    assert.equal(decision?.versionPolitica, VERSION_POLITICA);
+    assert.equal(decision?.valores["monto"], 4_000_000);
+    assert.equal(decision?.valores["plazoMeses"], 24);
+    assert.equal(decision?.valores["cuotaMensual"], 206_723);
+    assert.equal(decision?.valores["ingresoVerificado"], 3_800_000);
+    assert.ok((decision?.motivo.length ?? 0) > 0);
+  });
+
+  it("no lleva vigencia ni condiciones: solo la constancia", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const { solicitud } = preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    assert.deepEqual(Object.keys(solicitud.preaprobacion ?? {}).sort(), [
+      "decision",
+      "preaprobadaEn",
+    ]);
+  });
+
+  it("el monto límite de 5.000.000 se preaprueba", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: 100_000_000,
+      monto: TOPE_MONTO_PREAPROBACION,
+    });
+    const { solicitud } = preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(solicitud.estado, "preaprobada");
+    assert.equal(solicitud.preaprobacion?.decision.valores["monto"], TOPE_MONTO_PREAPROBACION);
+  });
+
+  it("la relación límite, con la cuota exactamente al 30% del ingreso verificado, se preaprueba", () => {
+    const monto = 4_000_000;
+    let plazoMeses = 1;
+    while (calcularCuota(monto, plazoMeses) % 3 !== 0) plazoMeses++;
+    const cuota = calcularCuota(monto, plazoMeses);
+    const ingreso = (cuota * 100) / PORCENTAJE_MAXIMO_CUOTA_INGRESO;
+    assert.equal(cuota * 100, PORCENTAJE_MAXIMO_CUOTA_INGRESO * ingreso);
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: ingreso,
+      monto,
+      plazoMeses,
+    });
+    const { solicitud } = preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(solicitud.estado, "preaprobada");
+    assert.equal(solicitud.preaprobacion?.decision.valores["cuotaMensual"], cuota);
+  });
+
+  it("deja una auditoría con la Regla 2, los enteros y la versión, sin fragmentos ni documentos", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const { auditoria } = core.preaprobarSolicitud({ correlationId });
+    assert.deepEqual(auditoria, {
+      resultado: "preaprobada",
+      regla: REGLA_2,
+      idSolicitud: "SOL-0002000001",
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto: 4_000_000,
+      plazoMeses: 24,
+      cuotaMensual: 206_723,
+      ingresoVerificado: 3_800_000,
+      versionPolitica: VERSION_POLITICA,
+    });
+    assert.doesNotMatch(JSON.stringify(auditoria), /quiero el monto|certificado|extracto|Ficticia/);
+  });
+
+  it("repetir devuelve la misma preaprobación, sin otro efecto ni otra auditoría", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const primera = preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    const segundo = core.preaprobarSolicitud({ correlationId });
+    const repetida = preaprobacionExitosa(segundo);
+    assert.equal(repetida.repetida, true);
+    assert.deepEqual(repetida.solicitud, primera.solicitud);
+    assert.equal(segundo.auditoria, null);
+  });
+
+  it("una solicitud preaprobada sigue abierta: otra clave se rechaza con solicitud_abierta", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const { solicitud } = preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    const otra = core.registrarSolicitud({
+      correlationId,
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto: 3_000_000,
+      plazoMeses: 12,
+      claveIdempotencia: "clave-preaprobacion-2",
+      procedencia: {
+        monto: { tipo: "afirmacion", fragmento: "quiero otro monto" },
+        plazoMeses: { tipo: "afirmacion", fragmento: "a otro plazo" },
+        ingresoDeclarado: { tipo: "afirmacion", fragmento: "gano ese ingreso" },
+      },
+    });
+    assert.equal(otra.respuesta.ok, false);
+    if (!otra.respuesta.ok) {
+      assert.equal(otra.respuesta.error.codigo, "solicitud_abierta");
+      assert.ok(otra.respuesta.error.mensaje.includes(solicitud.idSolicitud));
+    }
+  });
+
+  it("la consulta de la solicitud registrada y el resumen del #7 muestran el estado preaprobada", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const { solicitud } = preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    const leida = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(leida.ok);
+    if (leida.ok) assert.deepEqual(leida.datos.solicitud, solicitud);
+    const resumen = core.consultarSolicitud(solicitud.idSolicitud);
+    assert.ok(resumen.ok);
+    if (resumen.ok) assert.equal(resumen.datos.solicitud?.estado, "preaprobada");
+  });
+
+  it("preaprobar no cambia la solicitud de otra conversación", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const otra = randomUUID();
+    const elena = solicitante(ID_HOMONIMO_1);
+    assert.ok(
+      core.verificarIdentidad({
+        idSolicitante: elena.idSolicitante,
+        fechaExpedicion: elena.fechaExpedicion,
+        idIntento: "intento-elena",
+        correlationId: otra,
+      }).respuesta.ok,
+    );
+    const registrada = core.registrarSolicitud({
+      correlationId: otra,
+      idSolicitante: ID_HOMONIMO_1,
+      monto: 2_000_000,
+      plazoMeses: 12,
+      claveIdempotencia: "clave-elena",
+      procedencia: {
+        monto: { tipo: "afirmacion", fragmento: "quiero dos millones" },
+        plazoMeses: { tipo: "afirmacion", fragmento: "a doce meses" },
+      },
+    });
+    assert.ok(registrada.respuesta.ok);
+    preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    const leida = core.consultarSolicitudRegistrada(otra);
+    assert.ok(leida.ok);
+    if (leida.ok) {
+      assert.equal(leida.datos.solicitud?.estado, "en_estudio");
+      assert.equal(leida.datos.solicitud?.preaprobacion, null);
+    }
+  });
+
+  it("con la falla simulada devuelve el error transitorio y no guarda nada", () => {
+    const core = crearCore({ falla: "siempre" });
+    const resultado = core.preaprobarSolicitud({ correlationId: randomUUID() });
+    assert.equal(resultado.respuesta.ok, false);
+    if (!resultado.respuesta.ok) {
+      assert.equal(resultado.respuesta.error.categoria, "transitorio");
+      assert.equal(resultado.respuesta.error.codigo, "core_no_disponible");
+    }
+    assert.equal(resultado.auditoria, null);
+  });
+});
+describe("core simulado: preaprobarSolicitud se bloquea fuera de la política (#14, US2)", () => {
+  function bloqueo(resultado: ResultadoPreaprobacion) {
+    assert.equal(resultado.respuesta.ok, false, JSON.stringify(resultado.respuesta));
+    if (resultado.respuesta.ok) throw new Error("se esperaba un bloqueo");
+    assert.equal(resultado.respuesta.error.categoria, "negocio");
+    assert.equal(resultado.respuesta.error.reintentable, false);
+    return { error: resultado.respuesta.error, auditoria: resultado.auditoria };
+  }
+
+  function sigueEnEstudio(core: ReturnType<typeof crearCore>, correlationId: string) {
+    const leida = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(leida.ok);
+    if (!leida.ok) return;
+    assert.equal(leida.datos.solicitud?.estado, "en_estudio");
+    assert.equal(leida.datos.solicitud?.preaprobacion, null);
+  }
+
+  /** Un plazo cuya cuota es múltiplo de 3: así existe un ingreso con relación exacta del 30%. */
+  function plazoConCuotaMultiploDeTres(monto: number): number {
+    let plazo = 1;
+    while (calcularCuota(monto, plazo) % 3 !== 0) plazo++;
+    return plazo;
+  }
+
+  it("un monto de 5.000.001 se bloquea con monto_sobre_tope y la solicitud sigue en estudio", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: 100_000_000,
+      monto: TOPE_MONTO_PREAPROBACION + 1,
+    });
+    const { error, auditoria } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(error.codigo, "monto_sobre_tope");
+    assert.equal(auditoria?.resultado, "bloqueada");
+    assert.equal(auditoria?.codigo, "monto_sobre_tope");
+    assert.equal(auditoria?.monto, TOPE_MONTO_PREAPROBACION + 1);
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("una cuota un peso de ingreso por encima del 30% se bloquea con cuota_sobre_porcentaje", () => {
+    const monto = 4_000_000;
+    const plazoMeses = plazoConCuotaMultiploDeTres(monto);
+    const cuota = calcularCuota(monto, plazoMeses);
+    const ingreso = (cuota * 100) / PORCENTAJE_MAXIMO_CUOTA_INGRESO;
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: ingreso - 1,
+      monto,
+      plazoMeses,
+    });
+    const { error, auditoria } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(error.codigo, "cuota_sobre_porcentaje");
+    assert.equal(auditoria?.cuotaMensual, cuota);
+    assert.equal(auditoria?.ingresoVerificado, ingreso - 1);
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("una solicitud con discrepancia de ingresos registrada se bloquea con discrepancia_registrada", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: 3_800_000,
+      ingresoDeclarado: 4_300_000,
+    });
+    const { error } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(error.codigo, "discrepancia_registrada");
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("una solicitud sin verificación de ingreso se bloquea con ingreso_no_verificado", () => {
+    const { core, correlationId } = prepararPreaprobacion_sinDocumentos();
+    const { error } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(error.codigo, "ingreso_no_verificado");
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("una cuota que no se puede calcular se bloquea con cuota_no_calculable", () => {
+    const { core, correlationId } = prepararPreaprobacion({ monto: 1 });
+    const { error } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(error.codigo, "cuota_no_calculable");
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("el orden se respeta: discrepancia antes que el monto, y el monto antes que la cuota", () => {
+    const discrepanciaYMonto = prepararPreaprobacion({
+      ingresoDocumentos: 100_000_000,
+      ingresoDeclarado: 150_000_000,
+      monto: 6_000_000,
+    });
+    assert.equal(
+      bloqueo(
+        discrepanciaYMonto.core.preaprobarSolicitud({
+          correlationId: discrepanciaYMonto.correlationId,
+        }),
+      ).error.codigo,
+      "discrepancia_registrada",
+    );
+    const montoYCuota = prepararPreaprobacion({
+      monto: 6_000_000,
+      plazoMeses: 3,
+    });
+    assert.equal(
+      bloqueo(
+        montoYCuota.core.preaprobarSolicitud({
+          correlationId: montoYCuota.correlationId,
+        }),
+      ).error.codigo,
+      "monto_sobre_tope",
+    );
+  });
+
+  it("sin identidad verificada se bloquea con identidad_no_verificada y la auditoría lo registra", () => {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const { error, auditoria } = bloqueo(core.preaprobarSolicitud({ correlationId: randomUUID() }));
+    assert.equal(error.codigo, "identidad_no_verificada");
+    assert.equal(auditoria?.resultado, "bloqueada");
+    assert.equal(auditoria?.codigo, "identidad_no_verificada");
+  });
+
+  it("con la identidad verificada de otra persona se bloquea: la verificación no se transfiere", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const elena = solicitante(ID_HOMONIMO_1);
+    assert.ok(
+      core.verificarIdentidad({
+        idSolicitante: elena.idSolicitante,
+        fechaExpedicion: elena.fechaExpedicion,
+        idIntento: "intento-elena",
+        correlationId,
+      }).respuesta.ok,
+    );
+    const { error } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(error.codigo, "identidad_no_verificada");
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("la Regla 1 va antes que la Regla 2: con otra persona y un monto alto, decide la identidad", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: 100_000_000,
+      monto: 6_000_000,
+    });
+    const elena = solicitante(ID_HOMONIMO_1);
+    core.verificarIdentidad({
+      idSolicitante: elena.idSolicitante,
+      fechaExpedicion: elena.fechaExpedicion,
+      idIntento: "intento-elena",
+      correlationId,
+    });
+    const { error } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(error.codigo, "identidad_no_verificada");
+  });
+
+  it("repetir un bloqueo da el mismo error y no cambia nada", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: 100_000_000,
+      monto: TOPE_MONTO_PREAPROBACION + 1,
+    });
+    const primero = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    const segundo = bloqueo(core.preaprobarSolicitud({ correlationId }));
+    assert.equal(segundo.error.codigo, primero.error.codigo);
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("los montos, cuotas e ingresos que envíe el modelo no existen: un campo de más se rechaza sin cambiar nada", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDocumentos: 100_000_000,
+      monto: TOPE_MONTO_PREAPROBACION + 1,
+    });
+    for (const campo of ["monto", "cuota", "cuotaMensual", "ingresoMensual", "idSolicitud"]) {
+      const resultado = core.preaprobarSolicitud({ correlationId, [campo]: 1 });
+      assert.equal(resultado.respuesta.ok, false, campo);
+      if (!resultado.respuesta.ok) {
+        assert.equal(resultado.respuesta.error.codigo, "formato_invalido", campo);
+        assert.equal(resultado.respuesta.error.campo, campo, campo);
+      }
+      assert.equal(resultado.auditoria, null, campo);
+    }
+    sigueEnEstudio(core, correlationId);
+  });
+
+  it("un correlationId que no es un UUID es formato_invalido sobre correlationId", () => {
+    const resultado = crearCore().preaprobarSolicitud({
+      correlationId: "no-es-uuid",
+    });
+    assert.equal(resultado.respuesta.ok, false);
+    if (!resultado.respuesta.ok) assert.equal(resultado.respuesta.error.campo, "correlationId");
+    assert.equal(resultado.auditoria, null);
+  });
+
+  it("los mensajes de error no dan el tope ni el porcentaje", () => {
+    const casos = [
+      prepararPreaprobacion({
+        ingresoDocumentos: 100_000_000,
+        monto: TOPE_MONTO_PREAPROBACION + 1,
+      }),
+      prepararPreaprobacion({ monto: 4_500_000, plazoMeses: 3 }),
+      prepararPreaprobacion({ ingresoDeclarado: 4_300_000 }),
+    ];
+    for (const { core, correlationId } of casos) {
+      const { error } = bloqueo(core.preaprobarSolicitud({ correlationId }));
+      assert.doesNotMatch(error.mensaje, /5\.000\.000|5_000_000|30\s?%/);
+    }
+  });
+});
+
+/** Una solicitud registrada sin documentos ni verificación de ingreso. */
+function prepararPreaprobacion_sinDocumentos() {
+  return prepararPreaprobacion({ conDocumentos: false });
+}
+describe("core simulado: preaprobarSolicitud exige una solicitud registrada (#14, US3)", () => {
+  function conIdentidad(id: string) {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const correlationId = randomUUID();
+    const s = solicitante(id);
+    assert.ok(
+      core.verificarIdentidad({
+        idSolicitante: s.idSolicitante,
+        fechaExpedicion: s.fechaExpedicion,
+        idIntento: `intento-${id}`,
+        correlationId,
+      }).respuesta.ok,
+    );
+    return { core, correlationId };
+  }
+
+  it("con la identidad verificada y sin solicitud registrada da solicitud_no_registrada, sin auditoría", () => {
+    const { core, correlationId } = conIdentidad(ID_SOLICITANTE_UNICO);
+    const resultado = core.preaprobarSolicitud({ correlationId });
+    assert.equal(resultado.respuesta.ok, false);
+    if (resultado.respuesta.ok) return;
+    assert.equal(resultado.respuesta.error.categoria, "negocio");
+    assert.equal(resultado.respuesta.error.reintentable, false);
+    assert.equal(resultado.respuesta.error.codigo, "solicitud_no_registrada");
+    assert.match(resultado.respuesta.error.mensaje, /regístrala antes de preaprobar/);
+    assert.equal(resultado.auditoria, null);
+    const leida = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(leida.ok);
+    if (leida.ok) assert.equal(leida.datos.solicitud, null);
+  });
+
+  it("la preaprobación de una solicitud no alcanza a otra conversación que no registró la suya", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    preaprobacionExitosa(core.preaprobarSolicitud({ correlationId }));
+    const otra = randomUUID();
+    const elena = solicitante(ID_HOMONIMO_1);
+    assert.ok(
+      core.verificarIdentidad({
+        idSolicitante: elena.idSolicitante,
+        fechaExpedicion: elena.fechaExpedicion,
+        idIntento: "intento-elena-2",
+        correlationId: otra,
+      }).respuesta.ok,
+    );
+    const resultado = core.preaprobarSolicitud({ correlationId: otra });
+    assert.equal(resultado.respuesta.ok, false);
+    if (!resultado.respuesta.ok) {
+      assert.equal(resultado.respuesta.error.codigo, "solicitud_no_registrada");
+    }
+  });
+
+  it("registrar la solicitud y luego preaprobar sí funciona: el orden del flujo es registrar y después decidir", () => {
+    const { core, correlationId } = conIdentidad(ID_SOLICITANTE_UNICO);
+    assert.equal(core.preaprobarSolicitud({ correlationId }).respuesta.ok, false);
+    const registro = core.registrarSolicitud({
+      correlationId,
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto: 4_000_000,
+      plazoMeses: 24,
+      claveIdempotencia: "clave-us3",
+      procedencia: {
+        monto: { tipo: "afirmacion", fragmento: "quiero el monto" },
+        plazoMeses: { tipo: "afirmacion", fragmento: "a ese plazo" },
+      },
+    });
+    assert.ok(registro.respuesta.ok);
+    // Sin verificación de ingreso la solicitud existe, pero la política no la preaprueba.
+    const decision = core.preaprobarSolicitud({ correlationId });
+    assert.equal(decision.respuesta.ok, false);
+    if (!decision.respuesta.ok)
+      assert.equal(decision.respuesta.error.codigo, "ingreso_no_verificado");
   });
 });

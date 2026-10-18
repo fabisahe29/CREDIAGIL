@@ -67,7 +67,24 @@ const solicitudValida = {
     calculadaEn: "2026-10-18T11:59:00.000Z",
   },
   datosExtraidos: [],
+  preaprobacion: null,
   versionPolitica: VERSION_POLITICA,
+};
+
+const preaprobacionValida = {
+  preaprobadaEn: "2026-10-18T12:30:00.000Z",
+  decision: {
+    regla: "Regla 2 · preaprobación dentro de la política",
+    permitido: true,
+    motivo: "La solicitud cumple la política.",
+    valores: {
+      monto: 4_000_000,
+      plazoMeses: 24,
+      cuotaMensual: 206_723,
+      ingresoVerificado: 3_800_000,
+    },
+    versionPolitica: VERSION_POLITICA,
+  },
 };
 
 const clon = <T>(valor: T): T => structuredClone(valor);
@@ -293,8 +310,8 @@ describe("compartido/solicitud: SolicitudRegistrada", () => {
     }
   });
 
-  it("el estado solo puede ser en_estudio", () => {
-    for (const estado of ["anulada", "reservada", "preaprobada"]) {
+  it("el estado es en_estudio o preaprobada, y ningún otro", () => {
+    for (const estado of ["anulada", "reservada", "aprobada", "rechazada"]) {
       assert.equal(
         esquemaSolicitudRegistrada.safeParse({ ...solicitudValida, estado }).success,
         false,
@@ -417,5 +434,51 @@ describe("compartido/solicitud: clave de idempotencia (R6)", () => {
 
   it("cabe en el largo de la clave: 64 caracteres", () => {
     assert.equal(claveIdempotenciaSolicitud(ID_SOLICITANTE, 4_000_000, 24).length, 64);
+  });
+});
+
+describe("compartido/solicitud: preaprobación de la solicitud registrada (#14, R6)", () => {
+  const preaprobada = {
+    ...solicitudValida,
+    estado: "preaprobada",
+    preaprobacion: preaprobacionValida,
+  };
+
+  it("una solicitud preaprobada trae su constancia", () => {
+    assert.equal(esquemaSolicitudRegistrada.safeParse(preaprobada).success, true);
+  });
+
+  it("una solicitud en estudio no trae constancia: preaprobacion es null", () => {
+    assert.equal(esquemaSolicitudRegistrada.safeParse(solicitudValida).success, true);
+    assert.equal(
+      esquemaSolicitudRegistrada.safeParse({
+        ...solicitudValida,
+        preaprobacion: preaprobacionValida,
+      }).success,
+      false,
+    );
+  });
+
+  it("estado preaprobada sin constancia no pasa: el estado y la constancia van juntos", () => {
+    assert.equal(
+      esquemaSolicitudRegistrada.safeParse({ ...solicitudValida, estado: "preaprobada" }).success,
+      false,
+    );
+  });
+
+  it("la constancia no puede guardar una decisión bloqueada", () => {
+    const bloqueada = {
+      ...preaprobacionValida,
+      decision: { ...preaprobacionValida.decision, permitido: false, codigo: "monto_sobre_tope" },
+    };
+    assert.equal(
+      esquemaSolicitudRegistrada.safeParse({ ...preaprobada, preaprobacion: bloqueada }).success,
+      false,
+    );
+  });
+
+  it("la solicitud sin el campo preaprobacion no pasa: es obligatorio, con null si no hay", () => {
+    const { preaprobacion: _quitado, ...sinCampo } = solicitudValida;
+    assert.equal(esquemaSolicitudRegistrada.safeParse(sinCampo).success, false);
   });
 });

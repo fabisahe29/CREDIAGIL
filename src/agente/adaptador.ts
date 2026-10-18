@@ -16,6 +16,8 @@ import {
   type Respuesta,
 } from "../compartido/errores.ts";
 import { DESCRIPCION_CAPACIDAD_PAGO } from "../compartido/capacidad-pago.ts";
+import { CODIGOS_BLOQUEO, DESCRIPCION_PREAPROBAR_CREDITO } from "../compartido/preaprobacion.ts";
+import { REGLA_2 } from "../politica/preaprobacion.ts";
 import {
   DATOS_CON_PROCEDENCIA,
   DESCRIPCION_REGISTRAR_SOLICITUD,
@@ -72,7 +74,8 @@ export interface SenalEscalamiento {
     | "caso_no_cubierto"
     | "documento_no_extraible"
     | "discrepancia_de_ingreso"
-    | "inconsistencia_documental";
+    | "inconsistencia_documental"
+    | "preaprobacion_fuera_de_politica";
   regla: string;
   resultado: "escalada";
   correlationId: string;
@@ -92,6 +95,8 @@ export interface SenalEscalamiento {
   umbralPorcentaje?: number;
   /** Reglas de consistencia que detienen (#11, motivo inconsistencia_documental), separadas por coma. */
   reglas?: string;
+  /** Código de la decisión que bloqueó la preaprobación (#14, motivo preaprobacion_fuera_de_politica). */
+  codigo?: string;
 }
 
 export const CAUSAS_NO_CUBIERTO = ["moneda_extranjera", "documento_no_soportado", "otro"] as const;
@@ -409,13 +414,14 @@ function resultadoDeRegistro(registro: RegistroExtraccion): ResultadoExtraccion 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
 /** Regla de negocio de cada motivo de escalamiento; los técnicos no tienen. */
-export const ORDEN_REGLA: Partial<Record<SenalEscalamiento["motivo"], 1 | 3 | 4 | 5>> = {
+export const ORDEN_REGLA: Partial<Record<SenalEscalamiento["motivo"], 1 | 2 | 3 | 4 | 5>> = {
   pide_persona: 4,
   caso_no_cubierto: 5,
   identidad_ambigua: 1,
   identidad_no_verificable: 1,
   discrepancia_de_ingreso: 3,
   inconsistencia_documental: 3,
+  preaprobacion_fuera_de_politica: 2,
 };
 
 /**
@@ -442,7 +448,7 @@ export const admiteRegistro = (herramienta: string, estado: EstadoConversacion):
   estado.escalamiento !== null &&
   MOTIVOS_QUE_ADMITEN_REGISTRO.includes(estado.escalamiento.motivo);
 
-/** Orden de evaluación obligatorio (constitución, Principio I); la Regla 2 llega con el #14. */
+/** Orden de evaluación obligatorio (constitución, Principio I). */
 const ORDEN_EVALUACION = [4, 5, 1, 3, 2];
 
 /**
@@ -758,9 +764,11 @@ export function crearAdaptador({
    */
   async function revisarRegla5AlCerrarTurno(desde: number): Promise<number> {
     const actual = estado.escalamiento;
-    // Solo una señal de la Regla 1 o de la 3 (posteriores a la 5 en el orden) se deja reemplazar.
+    // Solo una señal de la Regla 1, la 2 o la 3 (posteriores a la 5 en el orden) se deja reemplazar.
     const reglaActual = actual === null ? undefined : ORDEN_REGLA[actual.motivo];
-    if (actual !== null && reglaActual !== 1 && reglaActual !== 3) return documentos.length;
+    if (actual !== null && reglaActual !== 1 && reglaActual !== 2 && reglaActual !== 3) {
+      return documentos.length;
+    }
     cerrarTurnoDocumentos(estado, documentos);
     if (estado.escalamiento !== null && estado.escalamiento !== actual) return documentos.length;
     for (const documento of documentos) {
@@ -982,6 +990,42 @@ export function crearAdaptador({
     );
     if (!respuesta.ok) return aResultadoMcp(respuesta);
     const { solicitud, repetida } = respuesta.datos;
+    return aResultadoMcp(
+      exito({ idSolicitud: solicitud.idSolicitud, estado: solicitud.estado, repetida }),
+    );
+  }
+
+  /**
+   * Herramienta del modelo: preaprueba la solicitud registrada (#14). No recibe ningún dato: el core
+   * decide con la solicitud. El evento de negocio lo emite el código, no el modelo (R9); un bloqueo
+   * por la Regla 2 deja la señal de escalamiento y el agente no insiste (R5).
+   */
+  async function preaprobarCredito(_entrada: Record<string, never>) {
+    const respuesta = await llamarConReintentos("preaprobar_credito", () =>
+      core.preaprobarSolicitud(estado.correlationId),
+    );
+    if (!respuesta.ok) {
+      if (CODIGOS_BLOQUEO.some((codigo) => codigo === respuesta.error.codigo)) {
+        senal({
+          motivo: "preaprobacion_fuera_de_politica",
+          regla: REGLA_2,
+          herramienta: "preaprobar_credito",
+          codigo: respuesta.error.codigo,
+        });
+      }
+      return aResultadoMcp(respuesta);
+    }
+    const { solicitud, repetida } = respuesta.datos;
+    if (!repetida && solicitud.preaprobacion !== null) {
+      emitirEvento(estado, {
+        tipo: "preaprobacion",
+        descripcion:
+          "Tu solicitud cumple la política y quedó preaprobada. La decisión definitiva la toma un analista.",
+        motivo: "cumple_la_politica",
+        regla: REGLA_2,
+        valores: solicitud.preaprobacion.decision.valores,
+      });
+    }
     return aResultadoMcp(
       exito({ idSolicitud: solicitud.idSolicitud, estado: solicitud.estado, repetida }),
     );
@@ -1306,6 +1350,7 @@ export function crearAdaptador({
     consultar_extracciones: { esquema: {}, manejar: consultarExtracciones },
     calcular_capacidad_pago: { esquema: esquemaCapacidadPago, manejar: calcularCapacidadPago },
     registrar_solicitud: { esquema: esquemaRegistrarSolicitud, manejar: registrarSolicitud },
+    preaprobar_credito: { esquema: {}, manejar: preaprobarCredito },
   };
 
   const servidor = createSdkMcpServer({
@@ -1366,6 +1411,7 @@ export function crearAdaptador({
         esquemaRegistrarSolicitud,
         (argumentos) => registrarSolicitud(argumentos),
       ),
+      tool("preaprobar_credito", DESCRIPCION_PREAPROBAR_CREDITO, {}, () => preaprobarCredito({})),
     ],
   });
 

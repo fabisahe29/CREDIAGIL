@@ -81,6 +81,8 @@ const esquemaSolicitudConsultada = esquemaRespuesta(
 
 export type RespuestaCapacidadPago = Respuesta<{ simulacion: SimulacionCapacidadPago }>;
 export type RespuestaRegistroSolicitud = Respuesta<ResultadoRegistro>;
+/** La preaprobación devuelve la misma forma que el registro: la solicitud y si fue una repetición. */
+export type RespuestaPreaprobacion = Respuesta<ResultadoRegistro>;
 export type RespuestaSolicitudRegistrada = Respuesta<{ solicitud: SolicitudRegistrada | null }>;
 export type RespuestaVerificacionIngreso = Respuesta<{ verificacion: VerificacionIngreso }>;
 export type RespuestaVerificacionConsultada = Respuesta<{
@@ -141,6 +143,11 @@ export interface ClienteCore {
   ): Promise<RespuestaRegistroSolicitud>;
   /** Solo lectura: la solicitud registrada en la conversación, o `null`. */
   consultarSolicitudRegistrada(correlationId: string): Promise<RespuestaSolicitudRegistrada>;
+  /**
+   * Preaprueba la solicitud registrada de la conversación (#14). No lleva datos del modelo: el
+   * core decide con la solicitud, la identidad y la política.
+   */
+  preaprobarSolicitud(correlationId: string): Promise<RespuestaPreaprobacion>;
   cerrar(): Promise<void>;
 }
 
@@ -286,6 +293,9 @@ export async function crearClienteCore({
         { correlationId },
         esquemaSolicitudConsultada,
       );
+    },
+    preaprobarSolicitud(correlationId) {
+      return llamar("preaprobar_credito", { correlationId }, esquemaRegistroSolicitud);
     },
     async cerrar() {
       if (cerrado) return;

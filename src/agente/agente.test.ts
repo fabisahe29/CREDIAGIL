@@ -5,6 +5,7 @@ import { errorNegocio, errorTransitorio, exito, fallo } from "../compartido/erro
 import type { ClienteCore } from "./cliente-core.ts";
 import { dejarSenal, emitirEvento, REGLA_NO_EXTRAIBLE } from "./adaptador.ts";
 import { REGLA_3 } from "../politica/ingreso.ts";
+import { REGLA_2 } from "../politica/preaprobacion.ts";
 import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
 
 const core: ClienteCore = {
@@ -960,10 +961,14 @@ describe("agente: control de identidad registrado como hook (#9, US4)", () => {
       const hooks = options["hooks"] as {
         PreToolUse: { matcher: string; hooks: unknown[] }[];
       };
-      assert.equal(hooks.PreToolUse.length, 1);
+      assert.equal(hooks.PreToolUse.length, 2);
       assert.equal(hooks.PreToolUse[0]!.matcher, "mcp__originacion__.*");
       assert.equal(hooks.PreToolUse[0]!.hooks.length, 1);
       assert.equal(typeof hooks.PreToolUse[0]!.hooks[0], "function");
+      // El hook de la Regla 2 (#14) solo actúa sobre preaprobar_credito.
+      assert.equal(hooks.PreToolUse[1]!.matcher, "mcp__originacion__preaprobar_credito");
+      assert.equal(hooks.PreToolUse[1]!.hooks.length, 1);
+      assert.equal(typeof hooks.PreToolUse[1]!.hooks[0], "function");
     }
   });
 
@@ -1514,5 +1519,136 @@ describe("agente: registro de la solicitud (#13, US1)", () => {
       );
       assert.equal(llamadas.length, 0);
     });
+  });
+});
+describe("agente: preaprobación (#14, US1, US2 y US3)", () => {
+  const ok = () => consultaFalsa([[resultado("success", "end_turn", "Listo.")]]);
+
+  async function promptDelSistema(t: Parameters<typeof capturarLogs>[0]) {
+    capturarLogs(t);
+    const { fn, llamadas } = ok();
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    return String(llamadas[0]!.options["systemPrompt"]);
+  }
+
+  it("el systemPrompt nombra preaprobar_credito, dice que compromete a la fintech y que no se usa para explorar", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(prompt, /preaprobar_credito/);
+    assert.match(
+      prompt,
+      /Cuando la solicitud del solicitante verificado ya esté registrada y su ingreso verificado, llama a preaprobar_credito, sin enviarle datos\./,
+    );
+    assert.match(
+      prompt,
+      /Compromete a la fintech: no la uses para explorar ni para decir cuánto pagaría/,
+    );
+    assert.match(prompt, /para eso está calcular_capacidad_pago/);
+  });
+
+  it("el systemPrompt dice que ante un rechazo no se insiste ni se ofrecen alternativas, y que si falta registrar se registra una vez", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(
+      prompt,
+      /Si preaprobar_credito se rechaza porque no cumple las condiciones, no insistas, no la intentes con otros datos ni ofrezcas un monto o plazo alternativo: el caso pasa a un analista\./,
+    );
+    assert.match(
+      prompt,
+      /Si dice que falta registrar la solicitud, regístrala y vuelve a intentar una vez\./,
+    );
+  });
+
+  it("el systemPrompt dice que la preaprobación es solo la constancia y que decide un analista", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(
+      prompt,
+      /Una preaprobación es solo la constancia de que se cumple la política; no digas que el crédito está aprobado ni inventes una vigencia ni condiciones\. La decisión definitiva la toma un analista\./,
+    );
+  });
+
+  it("el systemPrompt no da el tope ni el porcentaje de la Regla 2", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.doesNotMatch(prompt, /5\.000\.000|5_000_000|30\s?%/);
+  });
+
+  it("una señal preaprobacion_fuera_de_politica escala con su aviso, la Regla 2 y un evento de escalamiento", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "preaprobacion_fuera_de_politica",
+          regla: REGLA_2,
+          herramienta: "preaprobar_credito",
+          codigo: "monto_sobre_tope",
+        });
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const r = await conversar("Quiero preaprobación", {
+      ejecutarConsulta: fn,
+      core,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.match(
+      r.respuesta,
+      /^Tu solicitud no cumple las condiciones para una preaprobación automática\. Pasa a un analista, que te contactará\./,
+    );
+    assert.equal(r.escalamiento?.motivo, "preaprobacion_fuera_de_politica");
+    assert.equal(r.escalamiento?.codigo, "monto_sobre_tope");
+    const evento = r.eventos.at(-1);
+    assert.equal(evento?.tipo, "escalamiento");
+    assert.equal(evento?.regla, REGLA_2);
+  });
+
+  it("el aviso de la señal no da el tope ni el porcentaje", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "preaprobacion_fuera_de_politica",
+          regla: REGLA_2,
+          herramienta: "preaprobar_credito",
+          codigo: "cuota_sobre_porcentaje",
+        });
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const r = await conversar("Quiero preaprobación", {
+      ejecutarConsulta: fn,
+      core,
+      ...sinEspera,
+    });
+    assert.doesNotMatch(JSON.stringify(r.eventos), /5\.000\.000|5_000_000|30\s?%/);
+    assert.doesNotMatch(r.respuesta, /5\.000\.000|5_000_000|30\s?%/);
+  });
+
+  it("al cerrar el turno, una señal de la Regla 5 por documentos reemplaza a la de la Regla 2", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "preaprobacion_fuera_de_politica",
+          regla: REGLA_2,
+          herramienta: "preaprobar_credito",
+          codigo: "monto_sobre_tope",
+        });
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const r = await conversar("Adjunto mi certificado", {
+      ejecutarConsulta: fn,
+      core,
+      documentos: [
+        {
+          adjunto: 1,
+          nombre: "certificado.md",
+          soportado: true,
+          contenido: "Certificado ficticio\nSalario mensual: USD 1.200",
+        },
+      ],
+      ...sinEspera,
+    });
+    assert.equal(r.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(r.escalamiento?.causa, "moneda_extranjera");
   });
 });
