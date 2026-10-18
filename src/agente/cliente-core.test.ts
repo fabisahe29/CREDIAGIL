@@ -818,3 +818,137 @@ const simulacionDeEjemplo = {
   aviso: "Simulación no vinculante.",
   versionPolitica: "2026-10-18.2",
 } as const;
+describe("cliente del core: registrarSolicitud y consultarSolicitudRegistrada (#13, US1)", () => {
+  const CITA = (fragmento: string) => ({ tipo: "afirmacion", fragmento }) as const;
+  const entradaRegistro = {
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    monto: 4_000_000,
+    plazoMeses: 24,
+    claveIdempotencia: "clave-cliente-1",
+    procedencia: {
+      monto: CITA("quiero 4 millones"),
+      plazoMeses: CITA("a 24 meses"),
+    },
+  };
+
+  it("registra contra el servidor real y la consulta devuelve la misma solicitud", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const correlationId = randomUUID();
+      const unico = SOLICITANTES_EJEMPLO.find((s) => s.idSolicitante === ID_SOLICITANTE_UNICO)!;
+      const identidad = await core.verificarIdentidad(
+        unico.idSolicitante,
+        unico.fechaExpedicion,
+        randomUUID(),
+        correlationId,
+      );
+      assert.equal(identidad.ok, true);
+
+      const registro = await core.registrarSolicitud(entradaRegistro, correlationId);
+      assert.equal(registro.ok, true, JSON.stringify(registro));
+      if (!registro.ok) return;
+      assert.equal(registro.datos.repetida, false);
+      assert.equal(registro.datos.solicitud.estado, "en_estudio");
+      assert.deepEqual(
+        registro.datos.solicitud.monto.procedencia,
+        entradaRegistro.procedencia.monto,
+      );
+
+      const lectura = await core.consultarSolicitudRegistrada(correlationId);
+      assert.equal(lectura.ok, true);
+      if (lectura.ok) assert.deepEqual(lectura.datos.solicitud, registro.datos.solicitud);
+
+      const repetida = await core.registrarSolicitud(entradaRegistro, correlationId);
+      assert.equal(repetida.ok && repetida.datos.repetida, true);
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("sin identidad devuelve el rechazo del servidor, validado por el contrato", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const r = await core.registrarSolicitud(entradaRegistro, randomUUID());
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.error.codigo, "identidad_no_verificada");
+      const lectura = await core.consultarSolicitudRegistrada(randomUUID());
+      assert.deepEqual(lectura, { ok: true, datos: { solicitud: null } });
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("envía los argumentos y el correlationId al llamador", async () => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return {
+            structuredContent: { ok: true, datos: { solicitud: null } },
+          };
+        },
+        close: async () => {},
+      },
+    });
+    const correlationId = randomUUID();
+    await core.consultarSolicitudRegistrada(correlationId);
+    assert.deepEqual(llamadas[0], {
+      name: "consultar_solicitud_registrada",
+      arguments: { correlationId },
+    });
+    await core.registrarSolicitud(entradaRegistro, correlationId);
+    assert.equal(llamadas[1]?.name, "registrar_solicitud");
+    assert.deepEqual(llamadas[1]?.arguments, {
+      ...entradaRegistro,
+      correlationId,
+    });
+  });
+
+  it("una respuesta fuera de contrato es respuesta_fuera_de_contrato, no se adivina", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({
+          structuredContent: {
+            ok: true,
+            datos: { solicitud: { idSolicitud: "SOL-1" }, repetida: false },
+          },
+        }),
+        close: async () => {},
+      },
+    });
+    const r = await core.registrarSolicitud(entradaRegistro, randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
+    const lectura = await core.consultarSolicitudRegistrada(randomUUID());
+    assert.equal(lectura.ok, false);
+  });
+
+  it("una falla del llamador es el error transitorio core_no_disponible, y un tiempo agotado tiempo_agotado", async () => {
+    const caido = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new Error("conexión rota");
+        },
+        close: async () => {},
+      },
+    });
+    const r = await caido.registrarSolicitud(entradaRegistro, randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.error.codigo, "core_no_disponible");
+      assert.equal(r.error.reintentable, true);
+    }
+    const lento = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "tiempo");
+        },
+        close: async () => {},
+      },
+    });
+    const t = await lento.consultarSolicitudRegistrada(randomUUID());
+    assert.equal(t.ok, false);
+    if (!t.ok) assert.equal(t.error.codigo, "tiempo_agotado");
+  });
+});

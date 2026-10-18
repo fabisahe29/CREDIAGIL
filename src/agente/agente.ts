@@ -68,6 +68,12 @@ const SYSTEM_PROMPT = [
   // Simulación de cuota (#12, R8): el modelo guía; la cuota y su aviso los calcula el código.
   "Llama a calcular_capacidad_pago solo con el monto, el plazo y el ingreso que dio el solicitante; si falta alguno, pídelo. Preséntala siempre como una simulación no vinculante y repite el aviso que devuelve.",
   "Una simulación no es una preaprobación: no digas que el solicitante califica o que el crédito está aprobado a partir de ella.",
+  // Registro de la solicitud (#13, R3 y R5): el modelo aporta lo que oyó; el código decide y comprueba.
+  "Cuando el solicitante verificado confirme que quiere registrar su solicitud con un monto y un plazo que dijo, llama a registrar_solicitud con su idSolicitante, el monto, el plazo y, en origen, una cita literal de lo que dijo el solicitante para cada dato. Si falta el monto o el plazo, pídelo.",
+  "No registres con datos que no dijo el solicitante ni con citas que no sean suyas. El ingreso verificado, las discrepancias y los datos extraídos los toma el sistema: no los envíes.",
+  "Si verificar_ingreso devuelve escalada por discrepancia o inconsistencia y el solicitante ya dijo monto y plazo en su mensaje, la escalada no te exime de registrar: llama a registrar_solicitud en este mismo turno, antes de escribir tu respuesta. El analista debe recibir la solicitud registrada con su discrepancia. Registrar no preaprueba ni decide, y no le digas al solicitante que no puedes registrarla.",
+  "Si registrar_solicitud rechaza un dato por su origen, corrígelo con una cita literal del solicitante y vuélvelo a intentar una vez; no inventes la cita. Esta es la única excepción a no reintentar un error.",
+  "Si registrar_solicitud dice que ya hay una solicitud abierta, infórmalo; no la cambies ni registres otra.",
 ].join(" ");
 
 /**
@@ -347,6 +353,11 @@ export async function conversar(
     documentos,
     ejecutarSubagente: ejecutarSubagente ?? crearSubagente({ modelo }),
     clasificarDocumento: clasificarDocumento ?? crearClasificador({ modelo }),
+    // Lo que dijo el solicitante: contra esto se comprueba la cita de cada afirmación (#13, R3).
+    mensajesSolicitante: [
+      ...historial.filter((turno) => turno.autor === "solicitante").map((turno) => turno.texto),
+      mensaje,
+    ],
     ...(alUsarHerramienta !== undefined ? { alUsarHerramienta } : {}),
   });
   // Regla 1 antes de las herramientas que exigen identidad, consultando el core (#9, R7).

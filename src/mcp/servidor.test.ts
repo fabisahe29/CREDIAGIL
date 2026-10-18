@@ -1,4 +1,4 @@
-import { after, before, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -30,6 +30,7 @@ import {
   DESCRIPCION_CAPACIDAD_PAGO,
   esquemaSimulacionCapacidadPago,
 } from "../compartido/capacidad-pago.ts";
+import { DESCRIPCION_REGISTRAR_SOLICITUD } from "../compartido/solicitud.ts";
 
 const PRINCIPAL = fileURLToPath(new URL("./principal.ts", import.meta.url));
 
@@ -1022,5 +1023,329 @@ describe("servidor MCP del core: calcular_capacidad_pago con entradas inválidas
     });
     assert.equal(isError, true);
     assert.equal(contenido.error?.codigo, "monto_invalido");
+  });
+});
+describe("servidor MCP del core: registrar_solicitud y consultar_solicitud_registrada (#13)", () => {
+  let conexion: Conexion;
+  // Un servidor por prueba: cada solicitante puede tener una sola solicitud abierta en el core.
+  beforeEach(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  afterEach(async () => {
+    await conexion.cerrar();
+  });
+
+  const FECHA_UNICO = SOLICITANTES_EJEMPLO.find(
+    (s) => s.idSolicitante === ID_SOLICITANTE_UNICO,
+  )!.fechaExpedicion;
+  const CITA_MONTO = {
+    tipo: "afirmacion",
+    fragmento: "quiero cuatro millones",
+  };
+  const CITA_PLAZO = { tipo: "afirmacion", fragmento: "a veinticuatro meses" };
+  const CITA_INGRESO = {
+    tipo: "afirmacion",
+    fragmento: "gano tres millones ochocientos",
+  };
+
+  async function verificado(id = ID_SOLICITANTE_UNICO, fecha = FECHA_UNICO) {
+    const correlationId = randomUUID();
+    const r = await llamarHerramienta(conexion, "verificar_identidad", {
+      idSolicitante: id,
+      fechaExpedicion: fecha,
+      idIntento: randomUUID(),
+      correlationId,
+    });
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    return correlationId;
+  }
+
+  async function conDocumentos(correlationId: string, declarado: number) {
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      const v = validarSalida(e.salida, e, new Date());
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = await llamarHerramienta(conexion, "registrar_extraccion", {
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      });
+      assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    }
+    const v = await llamarHerramienta(conexion, "verificar_ingreso", {
+      correlationId,
+      ingresoDeclarado: declarado,
+    });
+    assert.equal(v.isError, false, JSON.stringify(v.contenido));
+  }
+
+  const entrada = (correlationId: string, cambios: Record<string, unknown> = {}) => ({
+    correlationId,
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    monto: 4_000_000,
+    plazoMeses: 24,
+    claveIdempotencia: `clave-${correlationId}`,
+    procedencia: {
+      monto: CITA_MONTO,
+      plazoMeses: CITA_PLAZO,
+      ingresoDeclarado: CITA_INGRESO,
+    },
+    ...cambios,
+  });
+
+  const registrar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "registrar_solicitud", argumentos);
+
+  const leer = (correlationId: string) =>
+    llamarHerramienta(conexion, "consultar_solicitud_registrada", {
+      correlationId,
+    });
+
+  it("anuncia registrar_solicitud con efectos y consultar_solicitud_registrada como solo lectura", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const registrarH = tools.find((t) => t.name === "registrar_solicitud");
+    const leerH = tools.find((t) => t.name === "consultar_solicitud_registrada");
+    assert.ok(registrarH, "falta registrar_solicitud");
+    assert.ok(leerH, "falta consultar_solicitud_registrada");
+    assert.notEqual(registrarH.annotations?.readOnlyHint, true);
+    assert.equal(leerH.annotations?.readOnlyHint, true);
+    assert.ok(registrarH.outputSchema);
+    assert.ok(leerH.outputSchema);
+    for (const campo of [
+      "idSolicitante",
+      "monto",
+      "plazoMeses",
+      "claveIdempotencia",
+      "procedencia",
+    ]) {
+      assert.ok(registrarH.inputSchema.properties?.[campo], campo);
+    }
+    for (const campo of [
+      "ingresoVerificado",
+      "discrepancias",
+      "datosExtraidos",
+      "ingresoDeclarado",
+    ]) {
+      assert.equal(registrarH.inputSchema.properties?.[campo], undefined, campo);
+    }
+    assert.equal(registrarH.description, DESCRIPCION_REGISTRAR_SOLICITUD);
+  });
+
+  it("registra con identidad verificada y la solicitud se consulta con la procedencia de cada dato", async () => {
+    const correlationId = await verificado();
+    await conDocumentos(correlationId, 4_300_000);
+    const r = await registrar(entrada(correlationId));
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    const datos = r.contenido.datos as {
+      solicitud: Record<string, any>;
+      repetida: boolean;
+    };
+    assert.equal(datos.repetida, false);
+    assert.equal(datos.solicitud["estado"], "en_estudio");
+    assert.deepEqual(datos.solicitud["monto"], {
+      valor: 4_000_000,
+      procedencia: CITA_MONTO,
+    });
+    const verificacion = datos.solicitud["verificacionIngreso"] as {
+      estado: string;
+      discrepancia: { diferenciaPorcentaje: number };
+    };
+    assert.equal(verificacion.estado, "discrepancia");
+    assert.equal(datos.solicitud["verificacionIngreso"].discrepancia.diferenciaPorcentaje, 13.16);
+
+    const consulta = await leer(correlationId);
+    assert.equal(consulta.isError, false);
+    assert.deepEqual(consulta.contenido.datos?.["solicitud"], datos.solicitud);
+
+    const id = datos.solicitud["idSolicitud"] as string;
+    const resumen = await llamarHerramienta(conexion, "consultar_solicitud", {
+      idSolicitud: id,
+      correlationId,
+    });
+    assert.equal(
+      (resumen.contenido.datos?.["solicitud"] as { estado: string }).estado,
+      "en_estudio",
+    );
+  });
+
+  it("la consulta de una conversación sin registro devuelve solicitud null", async () => {
+    const r = await leer(randomUUID());
+    assert.equal(r.isError, false);
+    assert.equal(r.contenido.datos?.["solicitud"], null);
+    const mala = await leer("no-uuid");
+    assert.equal(mala.contenido.error?.campo, "correlationId");
+  });
+
+  it("repetir la misma clave devuelve la misma solicitud con repetida true", async () => {
+    const correlationId = await verificado();
+    const primera = await registrar(entrada(correlationId, { procedencia: base() }));
+    const segunda = await registrar(entrada(correlationId, { procedencia: base() }));
+    assert.equal(segunda.isError, false);
+    assert.equal(segunda.contenido.datos?.["repetida"], true);
+    assert.deepEqual(
+      segunda.contenido.datos?.["solicitud"],
+      primera.contenido.datos?.["solicitud"],
+    );
+  });
+
+  function base() {
+    return { monto: CITA_MONTO, plazoMeses: CITA_PLAZO };
+  }
+
+  it("un campo de más es formato_invalido sobre ese campo, sin guardar nada", async () => {
+    const correlationId = await verificado();
+    for (const campo of [
+      "ingresoVerificado",
+      "discrepancias",
+      "datosExtraidos",
+      "ingresoDeclarado",
+    ]) {
+      const r = await registrar(entrada(correlationId, { procedencia: base(), [campo]: 1 }));
+      assert.equal(r.isError, true, campo);
+      assert.equal(r.contenido.error?.codigo, "formato_invalido", campo);
+      assert.equal(r.contenido.error?.campo, campo, campo);
+    }
+    const consulta = await leer(correlationId);
+    assert.equal(consulta.contenido.datos?.["solicitud"], null);
+  });
+
+  it("la entrada sin correlationId o con uno inválido es formato_invalido sobre correlationId", async () => {
+    const { correlationId: _quitado, ...sinId } = entrada(randomUUID());
+    const sin = await registrar(sinId);
+    assert.equal(sin.contenido.error?.campo, "correlationId");
+    const mal = await registrar(entrada("no-uuid"));
+    assert.equal(mal.contenido.error?.campo, "correlationId");
+  });
+
+  it("deja una auditoría por registro nuevo, ninguna por la repetición, y sin fragmentos ni documentos", async () => {
+    const correlationId = await verificado();
+    await conDocumentos(correlationId, 3_800_000);
+    await registrar(entrada(correlationId));
+    await registrar(entrada(correlationId));
+    const registros = await registrosDe(conexion, correlationId);
+    const auditorias = registros.filter((l) => l["evento"] === "auditoria_solicitud");
+    assert.equal(auditorias.length, 1);
+    const auditoria = auditorias[0]!;
+    assert.equal(auditoria["resultado"], "registrada");
+    assert.equal(auditoria["regla"], "Regla 1 · identidad verificada antes de registrar");
+    assert.equal(auditoria["monto"], 4_000_000);
+    assert.equal(auditoria["plazoMeses"], 24);
+    assert.equal(auditoria["ingresoDeclarado"], 3_800_000);
+    assert.equal(auditoria["ingresoVerificado"], 3_800_000);
+    assert.equal(auditoria["estadoVerificacion"], "verificado");
+    assert.equal(auditoria["documentos"], 4);
+    assert.equal(auditoria["versionPolitica"], VERSION_POLITICA);
+    assert.match(String(auditoria["idSolicitud"]), /^SOL-000\d{7}$/);
+    assert.equal(typeof auditoria["ts"], "string");
+
+    const herramienta = registros.find(
+      (l) => l["evento"] === "herramienta" && l["herramienta"] === "registrar_solicitud",
+    );
+    assert.equal(herramienta?.["resultado"], "ok");
+    assert.equal(herramienta?.["idSolicitud"], auditoria["idSolicitud"]);
+    for (const campo of ["monto", "plazoMeses", "procedencia", "claveIdempotencia"]) {
+      assert.equal(campo in herramienta!, false, `${campo} en el log de la herramienta`);
+    }
+    const delRegistro = registros.filter(
+      (l) => l["evento"] === "auditoria_solicitud" || l["herramienta"] === "registrar_solicitud",
+    );
+    const texto = JSON.stringify(delRegistro);
+    for (const dato of [
+      "cuatro millones",
+      "veinticuatro meses",
+      "tres millones ochocientos",
+      "certificado",
+      "extracto",
+      "Industrias",
+      "Ficticia",
+    ]) {
+      assert.equal(texto.includes(dato), false, `«${dato}» en el log`);
+    }
+  });
+
+  describe("Regla 1 del lado del servidor, sin pasar por el hook (US2)", () => {
+    it("sin identidad verificada se rechaza con identidad_no_verificada y no queda solicitud", async () => {
+      const correlationId = randomUUID();
+      const r = await registrar(entrada(correlationId, { procedencia: base() }));
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.categoria, "negocio");
+      assert.equal(r.contenido.error?.reintentable, false);
+      assert.equal(r.contenido.error?.codigo, "identidad_no_verificada");
+      const consulta = await leer(correlationId);
+      assert.equal(consulta.contenido.datos?.["solicitud"], null);
+      const registros = await registrosDe(conexion, correlationId);
+      const auditoria = registros.find((l) => l["evento"] === "auditoria_solicitud");
+      assert.equal(auditoria?.["resultado"], "rechazada");
+      assert.equal(auditoria?.["codigo"], "identidad_no_verificada");
+      assert.equal(JSON.stringify(registros).includes("cuatro millones"), false);
+    });
+
+    it("con la identidad verificada de otra persona se rechaza: no se transfiere", async () => {
+      const correlationId = await verificado();
+      const r = await registrar(
+        entrada(correlationId, {
+          idSolicitante: ID_HOMONIMO_1,
+          procedencia: base(),
+        }),
+      );
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.codigo, "identidad_no_verificada");
+      const consulta = await leer(correlationId);
+      assert.equal(consulta.contenido.datos?.["solicitud"], null);
+    });
+  });
+
+  describe("dato sin procedencia (US3)", () => {
+    it("falta la procedencia de un dato: procedencia_faltante con su campo", async () => {
+      const correlationId = await verificado();
+      const r = await registrar(
+        entrada(correlationId, { procedencia: { plazoMeses: CITA_PLAZO } }),
+      );
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.categoria, "validacion");
+      assert.equal(r.contenido.error?.reintentable, false);
+      assert.equal(r.contenido.error?.codigo, "procedencia_faltante");
+      assert.equal(r.contenido.error?.campo, "procedencia.monto");
+      const consulta = await leer(correlationId);
+      assert.equal(consulta.contenido.datos?.["solicitud"], null);
+    });
+
+    it("una procedencia mal formada es procedencia_invalida y no repite el fragmento", async () => {
+      const correlationId = await verificado();
+      const largo = "x".repeat(301);
+      const r = await registrar(
+        entrada(correlationId, {
+          procedencia: {
+            monto: { tipo: "afirmacion", fragmento: largo },
+            plazoMeses: CITA_PLAZO,
+          },
+        }),
+      );
+      assert.equal(r.contenido.error?.codigo, "procedencia_invalida");
+      assert.equal(r.contenido.error?.campo, "procedencia.monto");
+      assert.equal(JSON.stringify(r.contenido).includes(largo), false);
+      const registros = await registrosDe(conexion, correlationId);
+      assert.equal(JSON.stringify(registros).includes(largo), false);
+    });
+
+    it("un documento que no está entre los extraídos es procedencia_documento_desconocida", async () => {
+      const correlationId = await verificado();
+      const r = await registrar(
+        entrada(correlationId, {
+          procedencia: {
+            monto: {
+              tipo: "documento",
+              adjunto: 3,
+              nombre: "carta.md",
+              fragmento: "x",
+            },
+            plazoMeses: CITA_PLAZO,
+          },
+        }),
+      );
+      assert.equal(r.contenido.error?.codigo, "procedencia_documento_desconocida");
+      assert.equal(r.contenido.error?.campo, "procedencia.monto");
+    });
   });
 });

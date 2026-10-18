@@ -23,11 +23,11 @@ Las reglas no negociables (reglas de negocio, datos ficticios, decisiones determ
 | `specs/NNN-…/` | Una carpeta por feature: spec, plan, research, contratos y tareas |
 | `.specify/` | Spec Kit: plantillas, scripts, hooks (`extensions.yml`) y constitución |
 | `.claude/` | Comandos propios (`skills/`), reglas por zona (`rules/`) y configuración compartida (`settings.json`) |
-| `src/politica/` | Módulo único de política de crédito: Regla 1 desde el #9; Regla 5 de documentos desde el #10; Regla 3 desde el #11 (ingreso verificado, discrepancia y consistencia entre documentos); tasa y cuota desde el #12 (`cuota.ts`); umbrales de monto y cuota con el #14 |
-| `src/agente/` | Agente, adaptador de herramientas, control de identidad (#9) y subagente de extracción de documentos (#10); herramienta `calcular_capacidad_pago` (#12) |
-| `src/mcp/` | Servidor MCP del core de originación (#7); identificación y verificación desde el #9; registro de extracciones desde el #10; verificación de ingreso y reextracción desde el #11; simulación de cuota `calcular_capacidad_pago` desde el #12 |
+| `src/politica/` | Módulo único de política de crédito: Regla 1 desde el #9; Regla 5 de documentos desde el #10; Regla 3 desde el #11 (ingreso verificado, discrepancia y consistencia entre documentos); tasa y cuota desde el #12 (`cuota.ts`); diferencia porcentual de ingreso informativa desde el #13 (`ingreso.ts`); umbrales de monto y cuota con el #14 |
+| `src/agente/` | Agente, adaptador de herramientas, control de identidad (#9) y subagente de extracción de documentos (#10); herramienta `calcular_capacidad_pago` (#12); herramienta `registrar_solicitud` y hook de la Regla 1 sobre el registro (#13) |
+| `src/mcp/` | Servidor MCP del core de originación (#7); identificación y verificación desde el #9; registro de extracciones desde el #10; verificación de ingreso y reextracción desde el #11; simulación de cuota `calcular_capacidad_pago` desde el #12; registro de la solicitud con procedencia (`registrar_solicitud`, `consultar_solicitud_registrada`) desde el #13 |
 | `src/chat/` | Chat de terminal: `npm run chat` (issue #8) |
-| `src/compartido/` | Contrato de errores, catálogo de eventos de negocio, logs, validación de extracciones con procedencia (#10) y esquemas de la verificación de ingreso (#11) y contrato de la simulación de capacidad de pago (#12) |
+| `src/compartido/` | Contrato de errores, catálogo de eventos de negocio, logs, validación de extracciones con procedencia (#10) y esquemas de la verificación de ingreso (#11) y contrato de la simulación de capacidad de pago (#12) y del registro de la solicitud con procedencia (#13) |
 | `casos/` | Casos de prueba ficticios para la demo (`/caso` en el chat) |
 | `DECISIONES.md` | Decisiones de diseño con su alternativa descartada |
 

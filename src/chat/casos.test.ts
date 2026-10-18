@@ -207,3 +207,67 @@ describe("casos: ingreso verificado y consistencia (#11)", () => {
     });
   }
 });
+
+describe("casos: registro de la solicitud (#13)", () => {
+  /** Documentos que son copia exacta de los del caso de ingreso del #11 que les corresponde. */
+  const COPIAS: Record<string, string> = {
+    "registro-solicitud": "ingreso-consistente",
+    "registro-discrepancia": "ingreso-inflado",
+  };
+  const DOCUMENTOS = [
+    "certificado-completo.md",
+    "extracto-2026-07.md",
+    "extracto-2026-08.md",
+    "extracto-2026-09.md",
+  ];
+
+  const fechaExpedicion = SOLICITANTES_EJEMPLO.find(
+    (s) => s.idSolicitante === ID_SOLICITANTE_UNICO,
+  )!.fechaExpedicion;
+
+  for (const [nombre, origen] of Object.entries(COPIAS)) {
+    it(`el caso versionado casos/${nombre} carga sin errores y verifica primero la identidad`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.equal(r.ok, true, r.ok ? "" : r.problema);
+      const texto = readFileSync(resolve("casos", nombre, "caso.json"), "utf8");
+      assert.ok(texto.includes(fechaExpedicion));
+    });
+
+    it(`casos/${nombre} pide registrar la solicitud con un monto y un plazo que dice el solicitante`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.ok(r.ok);
+      if (!r.ok) return;
+      const mensajes = r.caso.pasos.flatMap((p) => ("mensaje" in p ? [p.mensaje] : []));
+      const registro = mensajes.find((m) => /registrar/i.test(m));
+      assert.ok(registro, "falta el mensaje que pide registrar");
+      assert.match(registro, /4 millones a 24 meses/);
+    });
+
+    it(`los documentos de casos/${nombre} son idénticos a los de casos/${origen}`, () => {
+      for (const archivo of DOCUMENTOS) {
+        assert.equal(
+          readFileSync(resolve("casos", nombre, archivo), "utf8"),
+          readFileSync(resolve("casos", origen, archivo), "utf8"),
+          archivo,
+        );
+      }
+    });
+
+    it(`los documentos de casos/${nombre} cumplen la convención de datos ficticios`, () => {
+      const carpeta = resolve("casos", nombre);
+      for (const archivo of readdirSync(carpeta)) {
+        const texto = readFileSync(join(carpeta, archivo), "utf8");
+        const bloqueos = datosReales({
+          herramienta: "Write",
+          rutas: [`casos/${nombre}/${archivo}`],
+          textos: [{ origen: `casos/${nombre}/${archivo}`, texto }],
+        });
+        assert.deepEqual(
+          bloqueos.map((b) => b.detectado),
+          [],
+          archivo,
+        );
+      }
+    });
+  }
+});

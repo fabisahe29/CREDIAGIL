@@ -1386,3 +1386,133 @@ describe("agente: ingreso verificado (#11)", () => {
     });
   });
 });
+describe("agente: registro de la solicitud (#13, US1)", () => {
+  const ok = () => consultaFalsa([[resultado("success", "end_turn", "Listo.")]]);
+
+  async function promptDelSistema(t: Parameters<typeof capturarLogs>[0]) {
+    capturarLogs(t);
+    const { fn, llamadas } = ok();
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    return String(llamadas[0]!.options["systemPrompt"]);
+  }
+
+  it("el systemPrompt nombra registrar_solicitud y pide citas literales del solicitante", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(prompt, /registrar_solicitud/);
+    assert.match(
+      prompt,
+      /llama a registrar_solicitud con su idSolicitante, el monto, el plazo y, en origen, una cita literal de lo que dijo el solicitante para cada dato/,
+    );
+    assert.match(prompt, /Si falta el monto o el plazo, pídelo\./);
+  });
+
+  it("el systemPrompt dice que el sistema toma el ingreso verificado, las discrepancias y los datos extraídos", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(
+      prompt,
+      /El ingreso verificado, las discrepancias y los datos extraídos los toma el sistema: no los envíes\./,
+    );
+    assert.match(prompt, /No registres con datos que no dijo el solicitante/);
+  });
+
+  it("el systemPrompt manda registrar tras una escalada por discrepancia o inconsistencia, sin decidir", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(
+      prompt,
+      /la escalada no te exime de registrar: llama a registrar_solicitud en este mismo turno, antes de escribir tu respuesta/,
+    );
+    assert.match(
+      prompt,
+      /Registrar no preaprueba ni decide, y no le digas al solicitante que no puedes registrarla\./,
+    );
+  });
+
+  it("el systemPrompt permite corregir una cita rechazada una vez, y no registrar otra solicitud abierta", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(
+      prompt,
+      /Si registrar_solicitud rechaza un dato por su origen, corrígelo con una cita literal del solicitante y vuélvelo a intentar una vez; no inventes la cita\./,
+    );
+    assert.match(prompt, /Esta es la única excepción a no reintentar un error\./);
+    assert.match(
+      prompt,
+      /Si registrar_solicitud dice que ya hay una solicitud abierta, infórmalo; no la cambies ni registres otra\./,
+    );
+  });
+
+  it("el systemPrompt conserva que no se aprueba ni se rechaza y que el error no se reintenta", async (t) => {
+    const prompt = await promptDelSistema(t);
+    assert.match(prompt, /No tomas decisiones de crédito: no apruebas ni rechazas\./);
+    assert.match(prompt, /explica su mensaje con tus palabras y no lo reintentes/);
+  });
+
+  describe("las citas se comprueban contra lo que dijo el solicitante, no contra el agente", () => {
+    const coreRegistro = () => {
+      const llamadas: unknown[] = [];
+      const cliente: ClienteCore = {
+        ...core,
+        async registrarSolicitud(entrada) {
+          llamadas.push(entrada);
+          return fallo(errorNegocio("no_simulado", "el core falso no registra"));
+        },
+      };
+      return { cliente, llamadas };
+    };
+
+    const origen = (monto: string, plazo: string) => ({
+      monto: { fragmento: monto },
+      plazoMeses: { fragmento: plazo },
+    });
+
+    async function registrarCon(
+      historial: { autor: "solicitante" | "agente"; texto: string }[],
+      mensaje: string,
+      cita: { monto: string; plazo: string },
+      t: Parameters<typeof capturarLogs>[0],
+    ) {
+      capturarLogs(t);
+      const { cliente, llamadas } = coreRegistro();
+      const { fn } = consultaFalsa([
+        async (contexto) => {
+          await contexto.herramientas.registrar_solicitud.manejar({
+            idSolicitante: "CLI-0001000001",
+            monto: 4_000_000,
+            plazoMeses: 24,
+            origen: origen(cita.monto, cita.plazo),
+          });
+          return [resultado("success", "end_turn", "Listo.")];
+        },
+      ]);
+      await conversar(mensaje, {
+        ejecutarConsulta: fn,
+        core: cliente,
+        historial,
+        ...sinEspera,
+      });
+      return llamadas;
+    }
+
+    it("una cita del mensaje nuevo o de un turno del solicitante llega al core", async (t) => {
+      const llamadas = await registrarCon(
+        [{ autor: "solicitante", texto: "Quiero 4 millones" }],
+        "A 24 meses, por favor",
+        { monto: "Quiero 4 millones", plazo: "a 24 meses" },
+        t,
+      );
+      assert.equal(llamadas.length, 1);
+    });
+
+    it("una cita que solo dijo el agente no llega al core", async (t) => {
+      const llamadas = await registrarCon(
+        [
+          { autor: "agente", texto: "¿Quieres 4 millones a 24 meses?" },
+          { autor: "solicitante", texto: "Sí" },
+        ],
+        "Regístralo",
+        { monto: "Quieres 4 millones", plazo: "a 24 meses" },
+        t,
+      );
+      assert.equal(llamadas.length, 0);
+    });
+  });
+});

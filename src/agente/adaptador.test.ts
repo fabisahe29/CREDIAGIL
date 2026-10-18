@@ -8,7 +8,9 @@ import {
   crearAdaptador,
   crearEstado,
   emitirEvento,
+  MOTIVOS_QUE_ADMITEN_REGISTRO,
   ORDEN_REGLA,
+  SIGUIENTE_PASO_REGISTRO,
   REGLA_NO_CUBIERTO,
   REGLA_NO_EXTRAIBLE,
   REGLA_5_DOCUMENTOS,
@@ -56,6 +58,7 @@ import {
   type SalidaSubagente,
 } from "../compartido/extraccion.ts";
 import { REGLA_3 } from "../politica/ingreso.ts";
+import { claveIdempotenciaSolicitud, esquemaSolicitudRegistrada } from "../compartido/solicitud.ts";
 import {
   ejemploCertificado,
   ejemploExtracto,
@@ -749,6 +752,7 @@ describe("adaptador: consultar_identidad no se expone al modelo (#9, US4)", () =
       "verificar_ingreso",
       "consultar_extracciones",
       "calcular_capacidad_pago",
+      "registrar_solicitud",
     ]);
   });
 });
@@ -1732,7 +1736,11 @@ describe("adaptador: verificar_ingreso (#11, US1, US2 y US4)", () => {
     const p = prepararExtraccion([], []);
     await registrarEjemplos(p, documentosDeIngreso());
     const r = await verificarIngreso(p, 4_300_000);
-    assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "discrepancia" });
+    assert.deepEqual(contenidoDe(r).datos, {
+      escalada: true,
+      estado: "discrepancia",
+      siguientePaso: SIGUIENTE_PASO_REGISTRO,
+    });
     const senal = p.estado.escalamiento;
     assert.equal(senal?.motivo, "discrepancia_de_ingreso");
     assert.equal(senal?.regla, REGLA_3);
@@ -1922,7 +1930,11 @@ describe("adaptador: verificación interna tras extraer_documento (#11, US3)", (
     const ajeno = ejemploExtracto({ titular: "Otra Persona Inventada" });
     const p = conEjemplos([ajeno]);
     const r = await p.extraer(ajeno.adjunto);
-    assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "inconsistencia" });
+    assert.deepEqual(contenidoDe(r).datos, {
+      escalada: true,
+      estado: "inconsistencia",
+      siguientePaso: SIGUIENTE_PASO_REGISTRO,
+    });
     const senal = p.estado.escalamiento;
     assert.equal(senal?.motivo, "inconsistencia_documental");
     assert.equal(senal?.regla, REGLA_3);
@@ -2112,7 +2124,11 @@ describe("adaptador: reextracción de inconsistencias corregibles (#11, US5)", (
     const { errada, documento } = lecturaErrada();
     const p = prepararExtraccion([documento], [valida(errada.salida)]);
     const r = await p.extraer(documento.adjunto);
-    assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "inconsistencia" });
+    assert.deepEqual(contenidoDe(r).datos, {
+      escalada: true,
+      estado: "inconsistencia",
+      siguientePaso: SIGUIENTE_PASO_REGISTRO,
+    });
     assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental");
     assert.equal(p.estado.escalamiento?.reglas, "titular_vs_solicitante");
     // Una extracción y una ronda: la lectura sigue siendo válida pero errada, así que no hay más intentos.
@@ -2192,7 +2208,11 @@ describe("adaptador: reextracción de inconsistencias corregibles (#11, US5)", (
       });
       enMemoria.verificar(p.correlationId);
       const r = await p.extraer(documento.adjunto);
-      assert.deepEqual(contenidoDe(r).datos, { escalada: true, estado: "inconsistencia" }, codigo);
+      assert.deepEqual(
+        contenidoDe(r).datos,
+        { escalada: true, estado: "inconsistencia", siguientePaso: SIGUIENTE_PASO_REGISTRO },
+        codigo,
+      );
       assert.equal(p.estado.escalamiento?.motivo, "inconsistencia_documental", codigo);
     }
   });
@@ -2408,5 +2428,494 @@ describe("adaptador: calcular_capacidad_pago con entradas inválidas (#12, US4)"
       assert.equal(contenido.error?.campo, campo, JSON.stringify(entrada));
       assert.equal(contenido.error?.reintentable, false);
     }
+  });
+});
+describe("adaptador: registrar_solicitud (#13, US1)", () => {
+  const CITA_MONTO = "quiero 4 millones";
+  const CITA_PLAZO = "a 24 meses";
+  const MENSAJES = [`Hola, ${CITA_MONTO} ${CITA_PLAZO}, por favor`];
+
+  const solicitudDeEjemplo = esquemaSolicitudRegistrada.parse({
+    idSolicitud: "SOL-0002000001",
+    correlationId: "0b0b6b6e-5f0e-4a39-9d57-6a0c1c1f0a11",
+    claveIdempotencia: "x",
+    estado: "en_estudio",
+    registradaEn: "2026-10-18T12:00:00.000Z",
+    solicitante: {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      nombre: "Ana Pérez Ficticia",
+      documentoEnmascarado: "******4567",
+    },
+    monto: {
+      valor: 4_000_000,
+      procedencia: { tipo: "afirmacion", fragmento: CITA_MONTO },
+    },
+    plazoMeses: {
+      valor: 24,
+      procedencia: { tipo: "afirmacion", fragmento: CITA_PLAZO },
+    },
+    ingresoDeclarado: null,
+    verificacionIngreso: null,
+    datosExtraidos: [],
+    versionPolitica: "2026-10-18.2",
+  });
+
+  type EntradaCore = Parameters<ClienteCore["registrarSolicitud"]>[0];
+
+  function coreRegistro(respuesta?: Awaited<ReturnType<ClienteCore["registrarSolicitud"]>>) {
+    const llamadas: { entrada: EntradaCore; correlationId: string }[] = [];
+    const core: ClienteCore = {
+      ...CORE_NO_SIMULADO,
+      async consultarSolicitud() {
+        return exito({ solicitud: null });
+      },
+      async registrarSolicitud(entrada, correlationId) {
+        llamadas.push({ entrada, correlationId });
+        return respuesta ?? exito({ solicitud: solicitudDeEjemplo, repetida: false });
+      },
+      async cerrar() {},
+    };
+    return { core, llamadas };
+  }
+
+  const argumentos = {
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    monto: 4_000_000,
+    plazoMeses: 24,
+    origen: {
+      monto: { fragmento: CITA_MONTO },
+      plazoMeses: { fragmento: CITA_PLAZO },
+    },
+  };
+
+  const documentos: DocumentoConversacion[] = [
+    {
+      adjunto: 1,
+      nombre: "certificado.md",
+      soportado: true,
+      contenido: CONTENIDO_CERTIFICADO,
+    },
+  ];
+
+  function adaptadorCon(
+    core: ClienteCore,
+    opciones: {
+      estado?: ReturnType<typeof crearEstado>;
+      mensajes?: readonly string[];
+      docs?: readonly DocumentoConversacion[];
+      alUsarHerramienta?: (info: InfoHerramienta) => void;
+    } = {},
+  ) {
+    const estado = opciones.estado ?? crearEstado(randomUUID());
+    const adaptador = crearAdaptador({
+      core,
+      estado,
+      dormir: async () => {},
+      azar: () => 0.5,
+      mensajesSolicitante: opciones.mensajes ?? MENSAJES,
+      documentos: opciones.docs ?? documentos,
+      ...(opciones.alUsarHerramienta !== undefined
+        ? { alUsarHerramienta: opciones.alUsarHerramienta }
+        : {}),
+    });
+    return { adaptador, estado };
+  }
+
+  function senal(estado: ReturnType<typeof crearEstado>, motivo: SenalEscalamiento["motivo"]) {
+    estado.escalamiento = {
+      motivo,
+      regla: "regla de prueba",
+      resultado: "escalada",
+      correlationId: estado.correlationId,
+      ts: new Date().toISOString(),
+    };
+  }
+
+  it("expone registrar_solicitud sin correlationId ni clave de idempotencia en su entrada", () => {
+    const { core } = coreRegistro();
+    const { adaptador } = adaptadorCon(core);
+    assert.deepEqual(Object.keys(adaptador.herramientas.registrar_solicitud.esquema), [
+      "idSolicitante",
+      "monto",
+      "plazoMeses",
+      "origen",
+    ]);
+  });
+
+  it("arma la afirmación del solicitante y llama al core con la clave calculada por el código", async () => {
+    const { core, llamadas } = coreRegistro();
+    const { adaptador, estado } = adaptadorCon(core);
+    await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    assert.equal(llamadas.length, 1);
+    assert.equal(llamadas[0]?.correlationId, estado.correlationId);
+    assert.deepEqual(llamadas[0]?.entrada, {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto: 4_000_000,
+      plazoMeses: 24,
+      claveIdempotencia: claveIdempotenciaSolicitud(ID_SOLICITANTE_UNICO, 4_000_000, 24),
+      procedencia: {
+        monto: { tipo: "afirmacion", fragmento: CITA_MONTO },
+        plazoMeses: { tipo: "afirmacion", fragmento: CITA_PLAZO },
+      },
+    });
+  });
+
+  it("con adjunto arma el documento con su nombre real, tomado de la conversación", async () => {
+    const { core, llamadas } = coreRegistro();
+    const { adaptador } = adaptadorCon(core);
+    await adaptador.herramientas.registrar_solicitud.manejar({
+      ...argumentos,
+      origen: {
+        monto: { fragmento: "Salario básico mensual", adjunto: 1 },
+        plazoMeses: { fragmento: CITA_PLAZO },
+      },
+    });
+    assert.deepEqual(llamadas[0]?.entrada.procedencia.monto, {
+      tipo: "documento",
+      adjunto: 1,
+      nombre: "certificado.md",
+      fragmento: "Salario básico mensual",
+    });
+  });
+
+  it("incluye la procedencia del ingreso declarado solo si el modelo la dio", async () => {
+    const { core, llamadas } = coreRegistro();
+    const { adaptador } = adaptadorCon(core, {
+      mensajes: [...MENSAJES, "gano 3.800.000"],
+    });
+    await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    assert.equal("ingresoDeclarado" in (llamadas[0]?.entrada.procedencia ?? {}), false);
+    await adaptador.herramientas.registrar_solicitud.manejar({
+      ...argumentos,
+      origen: {
+        ...argumentos.origen,
+        ingresoDeclarado: { fragmento: "gano 3.800.000" },
+      },
+    });
+    assert.deepEqual(llamadas[1]?.entrada.procedencia.ingresoDeclarado, {
+      tipo: "afirmacion",
+      fragmento: "gano 3.800.000",
+    });
+  });
+
+  it("la clave es la misma con otro adaptador (otro turno) y cambia con el monto, el plazo o el solicitante", async () => {
+    const { core, llamadas } = coreRegistro();
+    await adaptadorCon(core).adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    await adaptadorCon(core).adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    await adaptadorCon(core).adaptador.herramientas.registrar_solicitud.manejar({
+      ...argumentos,
+      monto: 3_000_000,
+    });
+    await adaptadorCon(core).adaptador.herramientas.registrar_solicitud.manejar({
+      ...argumentos,
+      plazoMeses: 12,
+    });
+    await adaptadorCon(core).adaptador.herramientas.registrar_solicitud.manejar({
+      ...argumentos,
+      idSolicitante: ID_HOMONIMO_1,
+    });
+    const claves = llamadas.map((l) => l.entrada.claveIdempotencia);
+    assert.equal(claves[0], claves[1]);
+    assert.equal(new Set(claves).size, 4);
+  });
+
+  it("al modelo le devuelve solo el identificador, el estado y si fue una repetición", async () => {
+    const { core } = coreRegistro();
+    const { adaptador } = adaptadorCon(core);
+    const resultado = await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    assert.equal(resultado.isError, false);
+    assert.deepEqual(resultado.structuredContent, {
+      ok: true,
+      datos: {
+        idSolicitud: "SOL-0002000001",
+        estado: "en_estudio",
+        repetida: false,
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(resultado), /quiero 4 millones|Ficticia|procedencia/);
+  });
+
+  it("una repetición se informa como repetida", async () => {
+    const { core } = coreRegistro(exito({ solicitud: solicitudDeEjemplo, repetida: true }));
+    const { adaptador } = adaptadorCon(core);
+    const resultado = await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    const contenido = resultado.structuredContent as {
+      datos: { repetida: boolean };
+    };
+    assert.equal(contenido.datos.repetida, true);
+  });
+
+  it("un error del core pasa tal cual al modelo, sin reintentar si no es transitorio", async () => {
+    const error = errorNegocio("solicitud_abierta", "Ya hay una abierta: SOL-0002000001.");
+    const { core, llamadas } = coreRegistro(fallo(error));
+    const { adaptador, estado } = adaptadorCon(core);
+    const resultado = await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    assert.equal(resultado.isError, true);
+    assert.deepEqual(resultado.structuredContent, { ok: false, error });
+    assert.equal(llamadas.length, 1);
+    assert.equal(estado.escalamiento, null);
+  });
+
+  it("si los reintentos se agotan deja la señal de falla transitoria persistente", async () => {
+    const { core, llamadas } = coreRegistro(
+      fallo(errorTransitorio("core_no_disponible", "El core no está disponible.")),
+    );
+    const { adaptador, estado } = adaptadorCon(core);
+    const resultado = await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    assert.equal(resultado.isError, true);
+    assert.equal(estado.escalamiento?.motivo, "falla_transitoria_persistente");
+    assert.equal(estado.escalamiento?.herramienta, "registrar_solicitud");
+    assert.ok(llamadas.length > 1);
+  });
+
+  it("tras una señal de la Regla 3 la llamada sí llega al core, para que el analista reciba la solicitud", async () => {
+    for (const motivo of MOTIVOS_QUE_ADMITEN_REGISTRO) {
+      const { core, llamadas } = coreRegistro();
+      const { adaptador, estado } = adaptadorCon(core);
+      senal(estado, motivo);
+      const resultado = await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+      assert.equal(resultado.isError, false, motivo);
+      assert.equal(llamadas.length, 1, motivo);
+      assert.equal(estado.escalamiento?.motivo, motivo, "la señal no se pierde");
+    }
+  });
+
+  it("los motivos que admiten el registro son solo los de la Regla 3", () => {
+    assert.deepEqual([...MOTIVOS_QUE_ADMITEN_REGISTRO].sort(), [
+      "discrepancia_de_ingreso",
+      "inconsistencia_documental",
+    ]);
+    for (const motivo of MOTIVOS_QUE_ADMITEN_REGISTRO) assert.equal(ORDEN_REGLA[motivo], 3);
+  });
+
+  it("tras la Regla 4, la Regla 5 o una falla técnica no llega al core: transitorio_agotado", async () => {
+    const motivos: SenalEscalamiento["motivo"][] = [
+      "pide_persona",
+      "caso_no_cubierto",
+      "falla_transitoria_persistente",
+      "identidad_ambigua",
+      "identidad_no_verificable",
+      "documento_no_extraible",
+    ];
+    for (const motivo of motivos) {
+      const { core, llamadas } = coreRegistro();
+      const { adaptador, estado } = adaptadorCon(core);
+      senal(estado, motivo);
+      const resultado = await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+      const contenido = resultado.structuredContent as {
+        error: { codigo: string };
+      };
+      assert.equal(llamadas.length, 0, motivo);
+      assert.equal(contenido.error.codigo, "transitorio_agotado", motivo);
+    }
+  });
+
+  it("la excepción es solo del registro: con la señal de la Regla 3 las demás herramientas siguen cortando", async () => {
+    const { core, llamadas } = coreFalso([exito({ solicitud: null })]);
+    const estado = crearEstado(randomUUID());
+    senal(estado, "discrepancia_de_ingreso");
+    const adaptador = crearAdaptador({ core, estado, dormir: async () => {} });
+    const resultado = await adaptador.herramientas.consultar_solicitud.manejar({
+      idSolicitud: ID_EN_ESTUDIO,
+    });
+    const contenido = resultado.structuredContent as {
+      error: { codigo: string };
+    };
+    assert.equal(llamadas.length, 0);
+    assert.equal(contenido.error.codigo, "transitorio_agotado");
+  });
+
+  it("no emite eventos de negocio y el modo de demostración la muestra", async () => {
+    const { core } = coreRegistro();
+    const vistas: InfoHerramienta[] = [];
+    const { adaptador, estado } = adaptadorCon(core, {
+      alUsarHerramienta: (info) => vistas.push(info),
+    });
+    await adaptador.herramientas.registrar_solicitud.manejar(argumentos);
+    assert.deepEqual(estado.eventos, []);
+    assert.deepEqual(vistas, [{ herramienta: "registrar_solicitud", intento: 1, resultado: "ok" }]);
+  });
+});
+
+describe("adaptador: registrar_solicitud comprueba las citas antes de llamar al core (#13, US3)", () => {
+  const CITA_MONTO = "quiero 4 millones";
+  const CITA_PLAZO = "a 24 meses";
+
+  type EntradaCore = Parameters<ClienteCore["registrarSolicitud"]>[0];
+
+  function coreRegistro() {
+    const llamadas: EntradaCore[] = [];
+    const core: ClienteCore = {
+      ...CORE_NO_SIMULADO,
+      async consultarSolicitud() {
+        return exito({ solicitud: null });
+      },
+      async registrarSolicitud(entrada) {
+        llamadas.push(entrada);
+        return fallo(errorNegocio("no_simulado", "el core falso no registra"));
+      },
+      async cerrar() {},
+    };
+    return { core, llamadas };
+  }
+
+  const documentos: DocumentoConversacion[] = [
+    {
+      adjunto: 1,
+      nombre: "certificado.md",
+      soportado: true,
+      contenido: CONTENIDO_CERTIFICADO,
+    },
+    { adjunto: 2, nombre: "foto.png", soportado: false },
+  ];
+
+  const argumentos = {
+    idSolicitante: ID_SOLICITANTE_UNICO,
+    monto: 4_000_000,
+    plazoMeses: 24,
+    origen: {
+      monto: { fragmento: CITA_MONTO },
+      plazoMeses: { fragmento: CITA_PLAZO },
+    },
+  };
+
+  async function registrar(
+    mensajes: readonly string[],
+    origen: Record<string, unknown>,
+    docs: readonly DocumentoConversacion[] = documentos,
+  ) {
+    const { core, llamadas } = coreRegistro();
+    const adaptador = crearAdaptador({
+      core,
+      estado: crearEstado(randomUUID()),
+      dormir: async () => {},
+      mensajesSolicitante: mensajes,
+      documentos: docs,
+    });
+    const resultado = await adaptador.herramientas.registrar_solicitud.manejar({
+      ...argumentos,
+      origen,
+    } as never);
+    return { resultado, llamadas };
+  }
+
+  const rechazo = (resultado: { structuredContent: unknown }) =>
+    (
+      resultado.structuredContent as {
+        error: { codigo: string; campo?: string; mensaje: string };
+      }
+    ).error;
+
+  it("una afirmación que el solicitante no dijo es procedencia_invalida y no llama al core", async () => {
+    const { resultado, llamadas } = await registrar(["Hola, quiero un crédito"], argumentos.origen);
+    assert.equal(resultado.isError, true);
+    const error = rechazo(resultado);
+    assert.equal(error.codigo, "procedencia_invalida");
+    assert.equal(error.campo, "procedencia.monto");
+    assert.equal(llamadas.length, 0);
+  });
+
+  it("la cita del plazo y la del ingreso declarado también se comprueban, en ese orden", async () => {
+    const soloMonto = await registrar([CITA_MONTO], argumentos.origen);
+    assert.equal(rechazo(soloMonto.resultado).campo, "procedencia.plazoMeses");
+    const conIngreso = await registrar([CITA_MONTO, CITA_PLAZO], {
+      ...argumentos.origen,
+      ingresoDeclarado: { fragmento: "gano 3.800.000" },
+    });
+    assert.equal(rechazo(conIngreso.resultado).campo, "procedencia.ingresoDeclarado");
+    assert.equal(conIngreso.llamadas.length, 0);
+  });
+
+  it("una afirmación presente, con otras tildes, mayúsculas y espacios, pasa al core", async () => {
+    const { llamadas } = await registrar(["QUIERO   4 MILLONES", "A 24 Meses"], argumentos.origen);
+    assert.equal(llamadas.length, 1);
+  });
+
+  it("una cita que solo está en un mensaje del agente no cuenta: solo valen los del solicitante", async () => {
+    const { resultado, llamadas } = await registrar([], argumentos.origen);
+    assert.equal(rechazo(resultado).codigo, "procedencia_invalida");
+    assert.equal(llamadas.length, 0);
+  });
+
+  it("un adjunto que no existe, o que no es soportado, es procedencia_invalida", async () => {
+    for (const adjunto of [9, 2]) {
+      const { resultado, llamadas } = await registrar([CITA_PLAZO], {
+        ...argumentos.origen,
+        monto: { fragmento: "Salario", adjunto },
+      });
+      const error = rechazo(resultado);
+      assert.equal(error.codigo, "procedencia_invalida", `adjunto ${adjunto}`);
+      assert.equal(error.campo, "procedencia.monto");
+      assert.equal(llamadas.length, 0);
+    }
+  });
+
+  it("un fragmento que no está en el contenido del documento es procedencia_invalida", async () => {
+    const { resultado, llamadas } = await registrar([CITA_PLAZO], {
+      ...argumentos.origen,
+      monto: { fragmento: "texto que el documento no tiene", adjunto: 1 },
+    });
+    assert.equal(rechazo(resultado).codigo, "procedencia_invalida");
+    assert.equal(llamadas.length, 0);
+  });
+
+  it("un fragmento del documento, con su adjunto, pasa y toma el nombre real", async () => {
+    const { llamadas } = await registrar([CITA_PLAZO], {
+      ...argumentos.origen,
+      monto: { fragmento: "Salario básico mensual", adjunto: 1 },
+    });
+    assert.equal(llamadas.length, 1);
+    assert.deepEqual(llamadas[0]?.procedencia.monto, {
+      tipo: "documento",
+      adjunto: 1,
+      nombre: "certificado.md",
+      fragmento: "Salario básico mensual",
+    });
+  });
+
+  it("un fragmento vacío o de más de 300 caracteres no llega al core", async () => {
+    for (const fragmento of ["", "x".repeat(301)]) {
+      const { resultado, llamadas } = await registrar([CITA_PLAZO, fragmento], {
+        ...argumentos.origen,
+        monto: { fragmento },
+      });
+      assert.equal(rechazo(resultado).codigo, "procedencia_invalida");
+      assert.equal(llamadas.length, 0);
+    }
+  });
+
+  it("el error nombra el dato y no repite el fragmento", async () => {
+    const { resultado } = await registrar([], {
+      ...argumentos.origen,
+      monto: { fragmento: "frase secreta del modelo" },
+    });
+    const error = rechazo(resultado);
+    assert.equal(error.mensaje.includes("frase secreta del modelo"), false);
+    assert.match(error.mensaje, /monto/);
+    assert.equal(JSON.stringify(resultado).includes("frase secreta del modelo"), false);
+  });
+
+  it("si falta el origen de un dato, el core lo decide: llega sin esa clave", async () => {
+    const { llamadas } = await registrar([CITA_MONTO], {
+      monto: { fragmento: CITA_MONTO },
+    });
+    assert.equal(llamadas.length, 1);
+    assert.equal("plazoMeses" in llamadas[0]!.procedencia, false);
+  });
+});
+
+describe("adaptador: tras la Regla 3 el modelo debe registrar antes de responder (#13, escenario 5)", () => {
+  it("la indicación nombra registrar_solicitud, pide monto y plazo ya dichos y aclara que no decide", () => {
+    assert.match(SIGUIENTE_PASO_REGISTRO, /llama a registrar_solicitud/);
+    assert.match(SIGUIENTE_PASO_REGISTRO, /si el solicitante ya dijo monto y plazo/);
+    assert.match(SIGUIENTE_PASO_REGISTRO, /Registrar no preaprueba ni decide\./);
+    assert.doesNotMatch(SIGUIENTE_PASO_REGISTRO, /30\s?%|10\s?%|5\.000\.000/);
+  });
+
+  it("no la recibe el modelo cuando el ingreso queda verificado, porque no hay nada que registrar para un analista", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    const verificado = await verificarIngreso(p, 3_800_000);
+    assert.equal("siguientePaso" in (contenidoDe(verificado).datos ?? {}), false);
   });
 });

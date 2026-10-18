@@ -4,6 +4,76 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-18 · Registro de la solicitud con procedencia
+
+**Issue**: [#13 — Registro de la solicitud con procedencia](https://github.com/fabisahe29/CREDIAGIL/issues/13)
+
+**Detalle**: [specs/011-registro-solicitud-procedencia/research.md](specs/011-registro-solicitud-procedencia/research.md), decisiones R1 a R11
+
+### Decisión 1: el core toma lo que ya sabe y el modelo solo aporta lo que oyó
+
+`registrar_solicitud` recibe `idSolicitante`, `monto`, `plazoMeses` y la procedencia de cada uno. El solicitante, el ingreso declarado, el ingreso verificado, las discrepancias, las inconsistencias y los datos extraídos los lee el core de su propio estado. No existe un campo de entrada para ellos.
+
+**Motivo**: el ingreso verificado y las discrepancias no pueden salir del modelo (Regla 3). Si nada de lo que el core sabe viaja de vuelta por el modelo, «dato sin procedencia» solo puede ocurrir en lo que dijo el solicitante.
+
+**Alternativas descartadas**: que el modelo envíe todo y el core compare, que añade superficie de error y de manipulación sin ganancia; rechazar el registro sin ingreso verificado, que contradice registrar siempre con identidad verificada.
+
+### Decisión 2: la procedencia es una afirmación o un documento, y se comprueba en dos sitios
+
+Lo que dijo el solicitante lleva `{ tipo: "afirmacion", fragmento }`; lo que salió de un documento, `{ tipo: "documento", adjunto, nombre, fragmento }`. El adaptador comprueba que la cita esté literal en un mensaje del solicitante o en el documento; el core, que el documento esté entre los extraídos.
+
+**Motivo**: es lo máximo que cada lado puede garantizar sin que el core guarde la conversación ni el contenido de los documentos (Principio VI).
+
+**Alternativas descartadas**: comprobar que el monto aparezca en la cita, porque la gente dice «cuatro millones» y se rechazarían registros legítimos; guardar la conversación en el core, que viola no guardar contenido; aceptar cualquier cita, porque una procedencia inventada es peor que ninguna.
+
+### Decisión 3: la Regla 1 en dos capas de código
+
+`registrar_solicitud` entra en `HERRAMIENTAS_CON_IDENTIDAD` y el core vuelve a aplicar `evaluarRegla1` con la identidad del solicitante que se registra. El hook decide con el estado que guarda el core, nunca con lo que afirme el modelo.
+
+**Motivo**: una sola capa deja una puerta; el servidor también se usa directamente desde Claude Code (Principio IV).
+
+**Alternativas descartadas**: solo el hook, que incumple la defensa en profundidad de la constitución; sin `idSolicitante` en la entrada, que impide detectar el intento de registrar a otra persona.
+
+### Decisión 4: el registro sigue permitido tras una señal de escalamiento de la Regla 3
+
+El hook y el adaptador dejan de denegar `registrar_solicitud` si la señal vigente es `discrepancia_de_ingreso` o `inconsistencia_documental`. Con la Regla 4, la Regla 5 o una falla técnica, todo sigue denegado.
+
+**Motivo**: la discrepancia solo existe tras `verificar_ingreso`, que ya escaló. Sin la excepción, el criterio «la discrepancia queda guardada» sería inalcanzable y el analista recibiría un caso sin la solicitud.
+
+**Alternativas descartadas**: dejar el registro al #15, que incumple el criterio del #13; registrar por código al cerrar el turno, que tendría que inventar la procedencia; quitar el bloqueo por escalamiento para todas las herramientas, que rompe las reglas 4 y 5.
+
+### Decisión 5: la clave de idempotencia la calcula el código desde solicitante, monto y plazo
+
+`huella([idSolicitante, monto, plazoMeses])`. Una misma clave devuelve la solicitud registrada; otra clave con una solicitud abierta se rechaza con `solicitud_abierta`.
+
+**Motivo**: el adaptador se crea de nuevo en cada turno, así que una clave aleatoria por turno daría otra cada vez y repetir el registro chocaría con la solicitud abierta. Derivada del contenido, la repetición es idéntica entre turnos.
+
+**Alternativas descartadas**: clave aleatoria por turno, por lo dicho; clave enviada por el modelo, porque un error suyo duplicaría solicitudes; devolver la existente ante otra clave, que oculta un monto o plazo distinto al analista.
+
+### Decisión 6: «solicitud abierta» cuenta solo las registradas por esta herramienta
+
+Las solicitudes de ejemplo del #7, como la de Ana Pérez Ficticia, no bloquean un registro nuevo.
+
+**Motivo**: son datos de prueba de la consulta; si contaran, ninguna demo de Ana podría registrar.
+
+**Alternativas descartadas**: contarlas, por lo dicho; retirarlas, porque las pruebas del #7 las usan.
+
+### Decisión 7: el porcentaje de diferencia es informativo y sale de una función de política
+
+`calcularDiferenciaPorcentaje` usa `BigInt` y dos decimales. La decisión de la Regla 3 sigue en `evaluarDiscrepancia` con la comparación exacta; `VERSION_POLITICA` no cambia.
+
+**Motivo**: el registro debe guardar el porcentaje, y el redondeo a dos decimales no puede mover el borde del 10%.
+
+**Alternativas descartadas**: calcularlo en flotante en el core, por el error en el borde que prohíbe el Principio III; subir la versión de la política, que marcaría un cambio que no ocurrió.
+
+### Riesgos residuales aceptados
+
+- La cita de una afirmación no prueba que el valor esté en ella; el analista ve ambos juntos.
+- **Fallo conocido (escenario 5 del quickstart):** tras una discrepancia de ingreso, el modelo no llama a `registrar_solicitud`, aunque el solicitante lo pidió en el mismo mensaje. La señal de escalamiento cierra la conversación dentro de `verificar_ingreso`, y el modelo termina el turno. Se probaron tres ajustes (la indicación en el resultado, el prompt y el prompt reforzado) sin resultado en el chat real. Queda pendiente la decisión de diseño: aplazar la señal al cierre del turno (que cumpliría FR-015) o mover el registro al #15 (que cambiaría FR-015). El escalamiento con entrega completa, que no depende del modelo, sigue siendo del #15.
+- Si el solicitante verificado cambia en la conversación, la verificación de ingreso de la otra persona se ignora y la solicitud queda sin ingreso verificado.
+
+---
+
 ## 2026-10-18 · Simulación de cuota y capacidad de pago
 
 **Issue**: [#12 — Simulación de cuota y capacidad de pago](https://github.com/fabisahe29/CREDIAGIL/issues/12)

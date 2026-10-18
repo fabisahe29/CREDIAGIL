@@ -134,6 +134,26 @@ export function evaluarDiscrepancia(declarado: number, verificado: number): Disc
   };
 }
 
+/**
+ * Qué porcentaje del ingreso verificado es la diferencia con el declarado, con dos decimales y
+ * aritmética entera: la mitad exacta de la centésima va hacia arriba (#13, R9). Es informativo, para
+ * guardarlo con la solicitud: la decisión de la Regla 3 la toma `evaluarDiscrepancia`, con la
+ * comparación exacta, y el redondeo no puede mover su borde.
+ */
+export function calcularDiferenciaPorcentaje(declarado: number, verificado: number): number {
+  if (!Number.isSafeInteger(declarado) || declarado < 0) {
+    throw new RangeError("el ingreso declarado debe ser un entero de pesos no negativo");
+  }
+  if (!Number.isSafeInteger(verificado) || verificado <= 0) {
+    throw new RangeError("el ingreso verificado debe ser un entero de pesos positivo");
+  }
+  const diferencia = BigInt(Math.abs(declarado - verificado));
+  const denominador = BigInt(verificado);
+  // round_half_up(diferencia · 10.000 / verificado) = floor((diferencia · 20.000 + verificado) / (2 · verificado))
+  const centesimas = (diferencia * 20_000n + denominador) / (2n * denominador);
+  return Number(centesimas) / 100;
+}
+
 export interface EntradaDecisionIngreso {
   registros: readonly RegistroExtraccion[];
   /** Nombre del solicitante verificado, para contrastarlo con los documentos (US3). */

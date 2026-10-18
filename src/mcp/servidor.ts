@@ -19,6 +19,10 @@ import {
 } from "../compartido/capacidad-pago.ts";
 import { esquemaRegistroExtraccion } from "../compartido/extraccion.ts";
 import { esquemaVerificacionIngreso } from "../compartido/ingreso.ts";
+import {
+  DESCRIPCION_REGISTRAR_SOLICITUD,
+  esquemaSolicitudRegistrada,
+} from "../compartido/solicitud.ts";
 import { registrar } from "../compartido/logs.ts";
 import { MAX_INTENTOS_VERIFICACION } from "../politica/politica.ts";
 import {
@@ -71,6 +75,19 @@ const ENTRADAS = {
       correlationId,
     })
     .strict(),
+  // #13: el ingreso verificado, las discrepancias y los datos extraídos no son campos de entrada: los
+  // toma el core de su propio estado (R2). Los valores los valida el core, con su código y su campo.
+  registrar_solicitud: z
+    .object({
+      idSolicitante: z.unknown(),
+      monto: z.unknown(),
+      plazoMeses: z.unknown(),
+      claveIdempotencia: z.unknown(),
+      procedencia: z.unknown(),
+      correlationId,
+    })
+    .strict(),
+  consultar_solicitud_registrada: z.object({ correlationId }).strict(),
 } as const;
 
 type NombreHerramienta = keyof typeof ENTRADAS;
@@ -411,6 +428,76 @@ export function crearServidor(core: Core): McpServer {
         respuesta,
         respuesta.ok ? { fuenteIngreso: respuesta.datos.simulacion.fuenteIngreso } : {},
       );
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "registrar_solicitud",
+    {
+      title: "Registrar solicitud",
+      description: DESCRIPCION_REGISTRAR_SOLICITUD,
+      inputSchema: z.looseObject({
+        idSolicitante: anunciado(
+          "Obligatorio. Identificador del solicitante verificado: CLI- y 10 dígitos.",
+        ),
+        monto: anunciado("Obligatorio. Monto en pesos colombianos, entero positivo."),
+        plazoMeses: anunciado("Obligatorio. Plazo en meses, entero positivo."),
+        claveIdempotencia: anunciado(
+          "Obligatorio. Clave de la solicitud (1 a 64 caracteres); repetirla no crea otra.",
+        ),
+        procedencia: anunciado(
+          "Obligatorio. Origen de cada dato: monto, plazoMeses e ingresoDeclarado si lo hay; cada uno es una afirmación del solicitante (tipo afirmacion, fragmento) o un documento (tipo documento, adjunto, nombre, fragmento).",
+        ),
+        correlationId: CORRELATION_ID_ANUNCIADO,
+      }),
+      outputSchema: salida({
+        solicitud: esquemaSolicitudRegistrada,
+        repetida: z.boolean(),
+      }),
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("registrar_solicitud", argumentos);
+      if (!validacion.ok) {
+        registrarHerramienta("registrar_solicitud", argumentos, validacion.respuesta);
+        return aResultadoMcp(validacion.respuesta);
+      }
+      const { respuesta, auditoria } = core.registrarSolicitud(validacion.entrada);
+      // Solo el resultado y el identificador: nunca montos, citas ni nombres de documentos (R9).
+      registrarHerramienta(
+        "registrar_solicitud",
+        argumentos,
+        respuesta,
+        respuesta.ok ? { idSolicitud: respuesta.datos.solicitud.idSolicitud } : {},
+      );
+      if (auditoria !== null) {
+        registrar("auditoria_solicitud", {
+          correlationId: validacion.entrada.correlationId,
+          ...auditoria,
+        });
+      }
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "consultar_solicitud_registrada",
+    {
+      title: "Consultar solicitud registrada",
+      description:
+        "Devuelve la solicitud registrada en la conversación, con la procedencia de cada dato, o null si todavía no se registró. Solo lectura.",
+      inputSchema: z.looseObject({ correlationId: CORRELATION_ID_ANUNCIADO }),
+      outputSchema: salida({ solicitud: esquemaSolicitudRegistrada.nullable() }),
+      annotations: { readOnlyHint: true },
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("consultar_solicitud_registrada", argumentos);
+      const respuesta = validacion.ok
+        ? core.consultarSolicitudRegistrada(validacion.entrada.correlationId)
+        : validacion.respuesta;
+      registrarHerramienta("consultar_solicitud_registrada", argumentos, respuesta, {
+        solicitud: respuesta.ok ? respuesta.datos.solicitud !== null : null,
+      });
       return aResultadoMcp(respuesta);
     },
   );

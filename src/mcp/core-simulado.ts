@@ -10,6 +10,7 @@ import {
   errorValidacion,
   exito,
   fallo,
+  type ErrorCore,
   type Respuesta,
 } from "../compartido/errores.ts";
 import {
@@ -19,7 +20,12 @@ import {
   type Solicitud,
 } from "./datos-ejemplo.ts";
 import { crearFalla, type ModoFalla } from "./falla.ts";
-import { alcanzaLimite, evaluarRegla1, type EstadoIdentidad } from "../politica/identidad.ts";
+import {
+  REGLA_1,
+  alcanzaLimite,
+  evaluarRegla1,
+  type EstadoIdentidad,
+} from "../politica/identidad.ts";
 import {
   MAX_INTENTOS_VERIFICACION,
   MAX_REEXTRACCIONES_POR_REGLA,
@@ -35,8 +41,17 @@ import {
 } from "../compartido/capacidad-pago.ts";
 import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
 import { validarConsistencia } from "../politica/consistencia.ts";
-import { decidirIngreso } from "../politica/ingreso.ts";
+import { calcularDiferenciaPorcentaje, decidirIngreso } from "../politica/ingreso.ts";
 import type { VerificacionIngreso } from "../compartido/ingreso.ts";
+import {
+  esquemaSolicitudRegistrada,
+  validarFormaRegistroSolicitud,
+  validarProcedenciaDato,
+  type FormaRegistroSolicitud,
+  type ResultadoRegistro,
+  type SolicitudRegistrada,
+  type VerificacionRegistrada,
+} from "../compartido/solicitud.ts";
 import {
   TAMANO_MAXIMO_CONTENIDO,
   huella,
@@ -186,6 +201,32 @@ export interface AuditoriaIngreso {
 
 export type RespuestaVerificacionIngreso = Respuesta<{ verificacion: VerificacionIngreso }>;
 
+/**
+ * Auditoría de un registro de solicitud (#13, R9): la Regla 1, el resultado y los enteros relevantes;
+ * nunca fragmentos, nombres de documentos ni texto de la conversación.
+ */
+export interface AuditoriaRegistro {
+  resultado: "registrada" | "rechazada";
+  regla: string;
+  /** Solo en un rechazo: el código del error. */
+  codigo?: string;
+  /** Solo en un rechazo con un campo: el campo del error. */
+  campo?: string;
+  /** Solo en un registro: la solicitud creada. */
+  idSolicitud?: string;
+  idSolicitante: string | null;
+  monto: number | null;
+  plazoMeses: number | null;
+  ingresoDeclarado: number | null;
+  ingresoVerificado: number | null;
+  estadoVerificacion: VerificacionIngreso["estado"] | null;
+  /** Documentos extraídos de la conversación que usa la solicitud. */
+  documentos: number;
+  versionPolitica: string;
+}
+
+export type RespuestaRegistroSolicitud = Respuesta<ResultadoRegistro>;
+
 export interface Core {
   consultarSolicitud(idSolicitud: unknown): Respuesta<{ solicitud: Solicitud | null }>;
   buscarSolicitante(criterio: CriterioBusqueda): Respuesta<{ coincidencias: Coincidencia[] }>;
@@ -219,6 +260,21 @@ export interface Core {
    * escribe nada y no audita. La fuente del ingreso la decide el core con la verificación guardada.
    */
   calcularCapacidadPago(entrada: unknown): Respuesta<{ simulacion: SimulacionCapacidadPago }>;
+  /**
+   * Registra la solicitud de un solicitante con la identidad verificada, con la procedencia de cada
+   * dato (#13). Toma del estado del core el solicitante, el ingreso declarado, la verificación de
+   * ingreso y los datos extraídos; del llamador, solo monto, plazo y procedencia. Es idempotente por
+   * `claveIdempotencia` dentro de la conversación. `auditoria` es `null` si no hubo decisión que
+   * auditar: falla simulada, error de forma o repetición.
+   */
+  registrarSolicitud(entrada: unknown): {
+    respuesta: RespuestaRegistroSolicitud;
+    auditoria: AuditoriaRegistro | null;
+  };
+  /** Solo lectura (#13, R8): la solicitud registrada en la conversación, o `null`. */
+  consultarSolicitudRegistrada(
+    correlationId: unknown,
+  ): Respuesta<{ solicitud: SolicitudRegistrada | null }>;
 }
 
 export interface OpcionesCore {
@@ -301,6 +357,10 @@ export function crearCore({
   /** Última verificación de ingreso y último ingreso declarado, por conversación (#11, R8). */
   const verificaciones = new Map<string, VerificacionIngreso>();
   const declarados = new Map<string, number | null>();
+  /** Solicitudes registradas por identificador, las de cada conversación y el contador (#13, R7, R8). */
+  const registradas = new Map<string, SolicitudRegistrada>();
+  const registradasPorConversacion = new Map<string, string[]>();
+  let siguienteNumeroSolicitud = 2_000_001;
 
   /** Valida y evalúa un intento en el orden de R4; no guarda la respuesta. */
   function evaluarIntento(
@@ -402,6 +462,118 @@ export function crearCore({
       intentosFallidos: contador.fallidos,
     });
     return exito({ identidad: { ...identidad } });
+  }
+
+  /** La verificación de ingreso de la conversación solo si es del solicitante que se registra (R2). */
+  function verificacionPropia(correlationId: string, idSolicitante: string) {
+    const verificacion = verificaciones.get(correlationId);
+    return verificacion?.idSolicitante === idSolicitante ? verificacion : null;
+  }
+
+  /** Copia de la verificación de ingreso para el registro, con el porcentaje de diferencia (R9). */
+  function verificacionRegistrada(v: VerificacionIngreso): VerificacionRegistrada {
+    return structuredClone({
+      estado: v.estado,
+      ingresoVerificado: v.ingreso,
+      discrepancia:
+        v.discrepancia === null
+          ? null
+          : {
+              ...v.discrepancia,
+              diferenciaPorcentaje: calcularDiferenciaPorcentaje(
+                v.discrepancia.declarado,
+                v.discrepancia.verificado,
+              ),
+            },
+      inconsistencias: v.inconsistencias,
+      sinContrastar: v.sinContrastar,
+      calculadaEn: v.calculadaEn,
+    });
+  }
+
+  /** Extracciones de la conversación, ordenadas por adjunto. */
+  const extraccionesDe = (correlationId: string): RegistroExtraccion[] =>
+    [...(extracciones.get(correlationId)?.values() ?? [])].sort(
+      (a, b) => (a.adjuntos[0] ?? 0) - (b.adjuntos[0] ?? 0),
+    );
+
+  /** Un documento citado debe estar entre las extracciones de la conversación, con ese número y nombre. */
+  const estaExtraido = (correlationId: string, adjunto: number, nombre: string): boolean =>
+    extraccionesDe(correlationId).some((r) => r.adjuntos.includes(adjunto) && r.nombre === nombre);
+
+  /**
+   * El primer problema de la procedencia, en el orden monto, plazo, ingreso declarado (R3). El ingreso
+   * declarado es el que `verificar_ingreso` guardó: si el core no tiene uno, no admite procedencia.
+   */
+  function errorDeProcedencia(
+    forma: FormaRegistroSolicitud,
+    ingresoDeclarado: number | null,
+  ): ErrorCore | null {
+    const enviada =
+      typeof forma.procedencia === "object" && forma.procedencia !== null
+        ? (forma.procedencia as Record<string, unknown>)
+        : {};
+    for (const dato of ["monto", "plazoMeses", "ingresoDeclarado"] as const) {
+      const valor = enviada[dato];
+      if (dato === "ingresoDeclarado" && ingresoDeclarado === null) {
+        if (valor === undefined || valor === null) continue;
+        return errorValidacion(
+          "ingreso_declarado_no_verificado",
+          "El core no tiene un ingreso declarado de este solicitante: envíalo primero a verificar_ingreso.",
+          "procedencia.ingresoDeclarado",
+        );
+      }
+      const validacion = validarProcedenciaDato(dato, valor);
+      if (!validacion.ok) return validacion.error;
+      const { procedencia } = validacion;
+      if (
+        procedencia.tipo === "documento" &&
+        !estaExtraido(forma.correlationId, procedencia.adjunto, procedencia.nombre)
+      ) {
+        return errorValidacion(
+          "procedencia_documento_desconocida",
+          `El documento citado como origen de ${dato} no está entre los extraídos de la conversación.`,
+          `procedencia.${dato}`,
+        );
+      }
+    }
+    return null;
+  }
+
+  /** Auditoría de un registro: los enteros del contexto, sin fragmentos ni nombres de documentos. */
+  function auditoriaDeRegistro(
+    resultado: AuditoriaRegistro["resultado"],
+    forma: FormaRegistroSolicitud,
+    extra: Pick<AuditoriaRegistro, "codigo" | "campo" | "idSolicitud"> = {},
+  ): AuditoriaRegistro {
+    const verificacion = verificacionPropia(forma.correlationId, forma.idSolicitante);
+    return {
+      resultado,
+      regla: REGLA_1,
+      ...extra,
+      idSolicitante: forma.idSolicitante,
+      monto: forma.monto,
+      plazoMeses: forma.plazoMeses,
+      ingresoDeclarado:
+        verificacion === null ? null : (declarados.get(forma.correlationId) ?? null),
+      ingresoVerificado: verificacion?.ingreso?.monto ?? null,
+      estadoVerificacion: verificacion?.estado ?? null,
+      documentos: extraccionesDe(forma.correlationId).length,
+      versionPolitica: VERSION_POLITICA,
+    };
+  }
+
+  function rechazarRegistro(
+    forma: FormaRegistroSolicitud,
+    error: ErrorCore,
+  ): { respuesta: RespuestaRegistroSolicitud; auditoria: AuditoriaRegistro } {
+    return {
+      respuesta: fallo(error),
+      auditoria: auditoriaDeRegistro("rechazada", forma, {
+        codigo: error.codigo,
+        ...(error.campo !== undefined ? { campo: error.campo } : {}),
+      }),
+    };
   }
 
   const aCoincidencia = (s: Solicitante): Coincidencia => ({
@@ -849,6 +1021,146 @@ export function crearCore({
           versionPolitica: VERSION_POLITICA,
         },
       });
+    },
+
+    registrarSolicitud(entrada) {
+      if (fallaSimulada.debeFallar()) return { respuesta: fallo(noDisponible()), auditoria: null };
+      const validacion = validarFormaRegistroSolicitud(entrada);
+      if (!validacion.ok) return { respuesta: fallo(validacion.error), auditoria: null };
+      const forma = validacion.entrada;
+      const { correlationId, idSolicitante } = forma;
+
+      // Regla 1 del lado del servidor: sin identidad verificada, y de este solicitante, no se guarda
+      // nada (Principio IV). El solicitante que se guarda es siempre el verificado.
+      const identidad = identidades.get(correlationId) ?? {
+        correlationId,
+        verificada: false,
+        idSolicitante: null,
+        verificadaEn: null,
+      };
+      const solicitante = registrados.find((s) => s.idSolicitante === identidad.idSolicitante);
+      if (!evaluarRegla1(identidad, idSolicitante).permitido || solicitante === undefined) {
+        return rechazarRegistro(
+          forma,
+          errorNegocio(
+            "identidad_no_verificada",
+            "No se registra una solicitud sin la identidad del solicitante verificada.",
+          ),
+        );
+      }
+
+      // Repetición: la misma clave en la conversación devuelve la solicitud ya registrada.
+      const deLaConversacion = (registradasPorConversacion.get(correlationId) ?? [])
+        .map((id) => registradas.get(id))
+        .filter((s): s is SolicitudRegistrada => s !== undefined);
+      const previa = deLaConversacion.find((s) => s.claveIdempotencia === forma.claveIdempotencia);
+      if (previa !== undefined) {
+        return {
+          respuesta: exito({ solicitud: structuredClone(previa), repetida: true }),
+          auditoria: null,
+        };
+      }
+
+      // Solicitud abierta (R7): solo cuentan las registradas por esta herramienta.
+      const abierta = [...registradas.values()].find(
+        (s) => s.solicitante.idSolicitante === idSolicitante && s.estado === "en_estudio",
+      );
+      if (abierta !== undefined) {
+        return rechazarRegistro(
+          forma,
+          errorNegocio(
+            "solicitud_abierta",
+            `Este solicitante ya tiene la solicitud ${abierta.idSolicitud} abierta; un analista decide si se cambia.`,
+          ),
+        );
+      }
+
+      // Un documento no cubierto o no extraíble ya escaló: no se registra como solicitud (R11).
+      const documentos = extraccionesDe(correlationId);
+      const noAptos = documentos.filter((d) => d.estado !== "extraido");
+      if (noAptos.length > 0) {
+        return rechazarRegistro(
+          forma,
+          errorNegocio(
+            "documentos_no_aptos",
+            `No se registra con documentos no cubiertos o no extraíbles: adjunto ${noAptos
+              .flatMap((d) => d.adjuntos)
+              .join(", ")}.`,
+          ),
+        );
+      }
+
+      // El ingreso declarado y la verificación solo valen si son de este solicitante (R2).
+      const verificacion = verificacionPropia(correlationId, idSolicitante);
+      const ingresoDeclarado =
+        verificacion === null ? null : (declarados.get(correlationId) ?? null);
+      const errorProcedencia = errorDeProcedencia(forma, ingresoDeclarado);
+      if (errorProcedencia !== null) return rechazarRegistro(forma, errorProcedencia);
+
+      // Ya validado: se arma con lo que sabe el core y lo que citó el llamador.
+      const enviada = forma.procedencia as Record<string, unknown>;
+      const idSolicitud = `SOL-000${String(siguienteNumeroSolicitud).padStart(7, "0")}`;
+      const registradaEn = ahora().toISOString();
+      const solicitud = esquemaSolicitudRegistrada.parse({
+        idSolicitud,
+        correlationId,
+        claveIdempotencia: forma.claveIdempotencia,
+        estado: "en_estudio",
+        registradaEn,
+        solicitante: {
+          idSolicitante: solicitante.idSolicitante,
+          nombre: solicitante.nombre,
+          documentoEnmascarado: enmascararDocumento(solicitante.documento),
+        },
+        monto: { valor: forma.monto, procedencia: enviada["monto"] },
+        plazoMeses: { valor: forma.plazoMeses, procedencia: enviada["plazoMeses"] },
+        ingresoDeclarado:
+          ingresoDeclarado === null
+            ? null
+            : { valor: ingresoDeclarado, procedencia: enviada["ingresoDeclarado"] },
+        verificacionIngreso: verificacion === null ? null : verificacionRegistrada(verificacion),
+        datosExtraidos: structuredClone(documentos),
+        versionPolitica: VERSION_POLITICA,
+      });
+      siguienteNumeroSolicitud++;
+      registradas.set(idSolicitud, solicitud);
+      registradasPorConversacion.set(correlationId, [
+        ...deLaConversacion.map((s) => s.idSolicitud),
+        idSolicitud,
+      ]);
+      almacen.set(idSolicitud, {
+        idSolicitud,
+        solicitante: {
+          nombre: solicitante.nombre,
+          documento: solicitante.documento,
+          correo: solicitante.correo,
+        },
+        monto: forma.monto,
+        plazoMeses: forma.plazoMeses,
+        estado: "en_estudio",
+        creadaEn: registradaEn,
+      });
+      return {
+        respuesta: exito({ solicitud: structuredClone(solicitud), repetida: false }),
+        auditoria: auditoriaDeRegistro("registrada", forma, { idSolicitud }),
+      };
+    },
+
+    consultarSolicitudRegistrada(correlationId) {
+      if (fallaSimulada.debeFallar()) return fallo(noDisponible());
+      const id = z.uuid().safeParse(correlationId);
+      if (!id.success) {
+        return fallo(
+          errorValidacion(
+            "formato_invalido",
+            "El correlationId debe ser un UUID.",
+            "correlationId",
+          ),
+        );
+      }
+      const ultima = registradasPorConversacion.get(id.data)?.at(-1);
+      const solicitud = ultima === undefined ? undefined : registradas.get(ultima);
+      return exito({ solicitud: solicitud === undefined ? null : structuredClone(solicitud) });
     },
 
     consultarExtracciones(correlationId) {
