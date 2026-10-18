@@ -1,9 +1,10 @@
 // Módulo único de política de crédito (constitución, Principio I; specs/007-verificacion-identidad,
 // research.md, R5). Es la única fuente de los límites de las reglas de negocio: ningún otro archivo
-// los repite como literal. Los umbrales de monto, cuota e ingreso y la tasa llegan con el #12 y el #14.
+// los repite como literal. El umbral del 10% de ingreso llegó con el #11; los de monto y cuota y la
+// tasa llegan con el #12 y el #14.
 
 /** Versión de la política; acompaña cada decisión para poder auditarla. */
-export const VERSION_POLITICA = "2026-10-17.2";
+export const VERSION_POLITICA = "2026-10-18.1";
 
 /** Regla 1: intentos fallidos de verificación de identidad antes de bloquearla (aclaración Q2 del #9). */
 export const MAX_INTENTOS_VERIFICACION = 3;
@@ -58,3 +59,28 @@ export const EXPRESIONES_MONEDA: Readonly<Record<string, readonly string[]>> = {
 
 /** Intentos de extracción por documento, el primero incluido (spec del #10, FR-012). */
 export const MAX_INTENTOS_EXTRACCION = 3;
+
+/**
+ * Regla 3 (constitución, Principio I; specs/009-ingreso-verificado-consistencia, research.md, R2):
+ * diferencia relativa, en porcentaje del ingreso **verificado**, a partir de la cual el ingreso
+ * declarado obliga a pasar el caso a un analista. Con exactamente este valor no hay discrepancia.
+ */
+export const UMBRAL_DISCREPANCIA_INGRESO_PORCENTAJE = 10;
+
+/**
+ * Palabras que, en la descripción de un abono, lo reconocen como abono de nómina (R3). En minúsculas
+ * y sin tildes; se buscan como palabra completa.
+ */
+export const PALABRAS_NOMINA: readonly string[] = ["nomina", "salario", "sueldo"];
+
+/** Formas societarias que no cuentan al comparar empleador y pagador (R4). Minúsculas, sin puntos. */
+export const SUFIJOS_SOCIETARIOS: readonly string[] = ["sas", "sa", "ltda", "cia", "sca", "eu"];
+
+/** Palabras vacías que no cuentan al comparar empleador y pagador (R4). Minúsculas, sin tildes. */
+export const PALABRAS_VACIAS_NOMBRE: readonly string[] = ["de", "del", "la", "las", "los", "y"];
+
+/** Un extracto es un mes: uno de más días no se puede promediar como tal (R3, R4). */
+export const MAX_DIAS_PERIODO_EXTRACTO = 31;
+
+/** Reextracciones de un documento por una misma regla de consistencia (R6). */
+export const MAX_REEXTRACCIONES_POR_REGLA = 1;

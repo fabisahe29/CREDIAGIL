@@ -64,6 +64,8 @@ export const MOTIVOS_ERROR = [
   "fecha_futura",
   "huella_no_coincide",
   "decision_no_coincide",
+  /** Solo como error de entrada de una reextracción por inconsistencia (#11, R6). */
+  "inconsistencia_entre_documentos",
 ] as const;
 
 /** Un error concreto, con el campo y el motivo: es lo que se le dice al subagente al reintentar. */
@@ -216,7 +218,12 @@ export type ResultadoExtraccion = z.infer<typeof esquemaResultadoExtraccion>;
 /** Lo que guarda el core: el resultado y los adjuntos con ese mismo contenido. */
 export const esquemaRegistroExtraccion = z.discriminatedUnion(
   "estado",
-  crearVariantes({ adjuntos: z.array(z.int().min(1)).min(1), registradoEn: z.iso.datetime() }),
+  crearVariantes({
+    adjuntos: z.array(z.int().min(1)).min(1),
+    registradoEn: z.iso.datetime(),
+    /** Reglas de consistencia por las que se reemplazó el registro (#11, R6). */
+    reextraidaPor: z.array(z.string().min(1)).default([]),
+  }),
 );
 export type RegistroExtraccion = z.infer<typeof esquemaRegistroExtraccion>;
 

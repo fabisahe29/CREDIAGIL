@@ -4,8 +4,10 @@ import { readFileSync } from "node:fs";
 import {
   camposFaltantes,
   construirResultado,
+  esquemaErrorExtraccion,
   esquemaRegistroExtraccion,
   esquemaResultadoExtraccion,
+  MOTIVOS_ERROR,
   esquemaSalidaSubagente,
   fechaLocal,
   huella,
@@ -723,6 +725,34 @@ describe("extraccion: construirResultado", () => {
     const registro = { ...resultado, adjuntos: [1], registradoEn: HOY.toISOString() };
     assert.ok(esquemaRegistroExtraccion.safeParse(registro).success);
     assert.equal(esquemaResultadoExtraccion.safeParse(registro).success, false);
+  });
+
+  it("el registro admite reextraidaPor y, sin el campo, queda en lista vacía (#11)", () => {
+    const doc = documento(CONTENIDO_CERTIFICADO);
+    const resultado = construirResultado(validada(certificadoCompleto(), doc.contenido), doc, 1);
+    const base = { ...resultado, adjuntos: [1], registradoEn: HOY.toISOString() };
+    const sin = esquemaRegistroExtraccion.parse(base);
+    assert.deepEqual(sin.reextraidaPor, []);
+    const con = esquemaRegistroExtraccion.parse({
+      ...base,
+      reextraidaPor: ["titular_vs_solicitante"],
+    });
+    assert.deepEqual(con.reextraidaPor, ["titular_vs_solicitante"]);
+    assert.equal(
+      esquemaRegistroExtraccion.safeParse({ ...base, reextraidaPor: [3] }).success,
+      false,
+    );
+  });
+
+  it("el motivo inconsistencia_entre_documentos es un error de entrada válido (#11)", () => {
+    assert.ok(MOTIVOS_ERROR.includes("inconsistencia_entre_documentos"));
+    assert.ok(
+      esquemaErrorExtraccion.safeParse({
+        campo: "titular",
+        motivo: "inconsistencia_entre_documentos",
+        detalle: "Regla titular_vs_solicitante. Valor extraído: «X».",
+      }).success,
+    );
   });
 });
 
