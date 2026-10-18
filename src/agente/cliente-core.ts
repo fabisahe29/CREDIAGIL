@@ -30,6 +30,7 @@ import {
   type RegistroExtraccion,
   type ResultadoExtraccion,
 } from "../compartido/extraccion.ts";
+import { esquemaVerificacionIngreso, type VerificacionIngreso } from "../compartido/ingreso.ts";
 
 const PRINCIPAL_CORE = fileURLToPath(new URL("../mcp/principal.ts", import.meta.url));
 export const TIEMPO_LIMITE_CORE_MS = 5_000;
@@ -50,6 +51,18 @@ const esquemaRegistro = esquemaRespuesta(
 const esquemaExtracciones = esquemaRespuesta(
   z.object({ extracciones: z.array(esquemaRegistroExtraccion) }).strict(),
 );
+
+const esquemaVerificacion = esquemaRespuesta(
+  z.object({ verificacion: esquemaVerificacionIngreso }).strict(),
+);
+const esquemaVerificacionOpcional = esquemaRespuesta(
+  z.object({ verificacion: esquemaVerificacionIngreso.nullable() }).strict(),
+);
+
+export type RespuestaVerificacionIngreso = Respuesta<{ verificacion: VerificacionIngreso }>;
+export type RespuestaVerificacionConsultada = Respuesta<{
+  verificacion: VerificacionIngreso | null;
+}>;
 
 export type RespuestaRegistroExtraccion = Respuesta<{ extraccion: RegistroExtraccion }>;
 export type RespuestaExtracciones = Respuesta<{ extracciones: RegistroExtraccion[] }>;
@@ -76,6 +89,16 @@ export interface ClienteCore {
   ): Promise<RespuestaRegistroExtraccion>;
   /** Solo lectura: las extracciones ya registradas en la conversación. */
   consultarExtracciones(correlationId: string): Promise<RespuestaExtracciones>;
+  /**
+   * Calcula el ingreso verificado en el core (#11, R8). `ingresoDeclarado` ausente conserva el último
+   * declarado y `null` lo borra. No hay forma de enviar un ingreso verificado: lo calcula el core.
+   */
+  verificarIngreso(
+    entrada: { ingresoDeclarado?: number | null },
+    correlationId: string,
+  ): Promise<RespuestaVerificacionIngreso>;
+  /** Solo lectura: la última verificación de ingreso de la conversación, o `null`. */
+  consultarVerificacionIngreso(correlationId: string): Promise<RespuestaVerificacionConsultada>;
   cerrar(): Promise<void>;
 }
 
@@ -86,6 +109,8 @@ export interface EntradaRegistroExtraccion {
   /** El texto exacto del documento, para que el core revalide; el core no lo guarda. */
   contenido: string;
   resultado: ResultadoExtraccion;
+  /** Reemplaza el registro tras una inconsistencia corregible; el core la recalcula (#11, R6). */
+  reextraccion?: { regla: string };
 }
 
 /** Lo mínimo que se usa del cliente MCP; inyectable para probar respuestas fuera de contrato. */
@@ -183,6 +208,20 @@ export async function crearClienteCore({
     },
     consultarExtracciones(correlationId) {
       return llamar("consultar_extracciones", { correlationId }, esquemaExtracciones);
+    },
+    verificarIngreso({ ingresoDeclarado }, correlationId) {
+      return llamar(
+        "verificar_ingreso",
+        { ...(ingresoDeclarado !== undefined ? { ingresoDeclarado } : {}), correlationId },
+        esquemaVerificacion,
+      );
+    },
+    consultarVerificacionIngreso(correlationId) {
+      return llamar(
+        "consultar_verificacion_ingreso",
+        { correlationId },
+        esquemaVerificacionOpcional,
+      );
     },
     async cerrar() {
       if (cerrado) return;
