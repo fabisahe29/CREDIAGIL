@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { errorValidacion, type ErrorCore } from "./errores.ts";
 import { huella, esquemaRegistroExtraccion } from "./extraccion.ts";
+import { esquemaPreaprobacion } from "./preaprobacion.ts";
 import {
   ESTADOS_VERIFICACION,
   esquemaDiscrepancia,
@@ -241,28 +242,35 @@ export const esquemaVerificacionRegistrada = z
   });
 export type VerificacionRegistrada = z.infer<typeof esquemaVerificacionRegistrada>;
 
-export const esquemaSolicitudRegistrada = z.strictObject({
-  idSolicitud: z.string().regex(/^SOL-000\d{7}$/),
-  correlationId: z.uuid(),
-  claveIdempotencia: z.string().min(1).max(64),
-  estado: z.literal("en_estudio"),
-  registradaEn: z.iso.datetime(),
-  solicitante: z.strictObject({
-    idSolicitante: z.string().regex(FORMA_ID_SOLICITANTE),
-    nombre: z.string().min(1),
-    documentoEnmascarado: z.string().min(1),
-  }),
-  monto: datoRegistrado(enteroPositivo),
-  plazoMeses: datoRegistrado(enteroPositivo),
-  ingresoDeclarado: datoRegistrado(z.int().min(0)).nullable(),
-  verificacionIngreso: esquemaVerificacionRegistrada.nullable(),
-  datosExtraidos: z
-    .array(esquemaRegistroExtraccion)
-    .refine((registros) => registros.every((r) => r.estado === "extraido"), {
-      message: "los datos extraídos solo incluyen documentos extraídos",
+export const esquemaSolicitudRegistrada = z
+  .strictObject({
+    idSolicitud: z.string().regex(/^SOL-000\d{7}$/),
+    correlationId: z.uuid(),
+    claveIdempotencia: z.string().min(1).max(64),
+    estado: z.enum(["en_estudio", "preaprobada"]),
+    registradaEn: z.iso.datetime(),
+    solicitante: z.strictObject({
+      idSolicitante: z.string().regex(FORMA_ID_SOLICITANTE),
+      nombre: z.string().min(1),
+      documentoEnmascarado: z.string().min(1),
     }),
-  versionPolitica: z.string().min(1),
-});
+    monto: datoRegistrado(enteroPositivo),
+    plazoMeses: datoRegistrado(enteroPositivo),
+    ingresoDeclarado: datoRegistrado(z.int().min(0)).nullable(),
+    verificacionIngreso: esquemaVerificacionRegistrada.nullable(),
+    datosExtraidos: z
+      .array(esquemaRegistroExtraccion)
+      .refine((registros) => registros.every((r) => r.estado === "extraido"), {
+        message: "los datos extraídos solo incluyen documentos extraídos",
+      }),
+    /** La constancia de la preaprobación (#14), o `null` mientras la solicitud sigue en estudio. */
+    preaprobacion: esquemaPreaprobacion.nullable(),
+    versionPolitica: z.string().min(1),
+  })
+  .refine((s) => (s.estado === "preaprobada") === (s.preaprobacion !== null), {
+    message: "el estado preaprobada y la constancia de la preaprobación van juntos",
+    path: ["preaprobacion"],
+  });
 export type SolicitudRegistrada = z.infer<typeof esquemaSolicitudRegistrada>;
 
 /** Lo que devuelve `registrar_solicitud` en `datos`. */

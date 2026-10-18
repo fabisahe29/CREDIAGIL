@@ -23,12 +23,14 @@ import { conReintentos } from "./reintentos.ts";
  * por el prompt (FR-011a del #9). La verificación de ingreso (#11) también: sin identidad no se
  * compara nada con el solicitante. El registro de la solicitud (#13) también: la Regla 1 es que
  * ninguna solicitud se registra sin la identidad verificada, y el hook la aplica por código, sin
- * importar lo que digan el prompt o el modelo; el core la vuelve a aplicar.
+ * importar lo que digan el prompt o el modelo; el core la vuelve a aplicar. La preaprobación (#14)
+ * también: ninguna se emite sin identidad verificada; la Regla 2 la decide su propio hook.
  */
 export const HERRAMIENTAS_CON_IDENTIDAD: readonly string[] = [
   "extraer_documento",
   "verificar_ingreso",
   "registrar_solicitud",
+  "preaprobar_credito",
 ];
 
 export interface OpcionesControlIdentidad {

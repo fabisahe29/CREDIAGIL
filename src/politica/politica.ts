@@ -1,10 +1,10 @@
 // Módulo único de política de crédito (constitución, Principio I; specs/007-verificacion-identidad,
 // research.md, R5). Es la única fuente de los límites de las reglas de negocio: ningún otro archivo
-// los repite como literal. El umbral del 10% de ingreso llegó con el #11 y la tasa con el #12; los
-// de monto y cuota llegan con el #14.
+// los repite como literal. El umbral del 10% de ingreso llegó con el #11, la tasa con el #12 y los
+// de monto y cuota con el #14.
 
 /** Versión de la política; acompaña cada decisión para poder auditarla. */
-export const VERSION_POLITICA = "2026-10-18.2";
+export const VERSION_POLITICA = "2026-10-18.3";
 
 /**
  * Tasa de interés fija ficticia, en puntos base: 180 es el 1,8% mensual (constitución, Principio I;
@@ -94,3 +94,17 @@ export const MAX_DIAS_PERIODO_EXTRACTO = 31;
 
 /** Reextracciones de un documento por una misma regla de consistencia (R6). */
 export const MAX_REEXTRACCIONES_POR_REGLA = 1;
+
+/**
+ * Regla 2 (constitución, Principio I; specs/012-preaprobacion-automatica-politica, research.md, R1):
+ * monto máximo, en pesos, que se preaprueba de forma automática. Con exactamente este valor se
+ * preaprueba; con un peso más, el caso va a un analista.
+ */
+export const TOPE_MONTO_PREAPROBACION = 5_000_000;
+
+/**
+ * Regla 2: relación máxima, en porcentaje, entre la cuota mensual y el ingreso mensual verificado
+ * para preaprobar. Con exactamente este valor se preaprueba. Se compara con enteros
+ * (`cuota · 100 ≤ porcentaje · ingreso`), nunca con la relación redondeada a dos decimales.
+ */
+export const PORCENTAJE_MAXIMO_CUOTA_INGRESO = 30;

@@ -42,6 +42,8 @@ import {
 import { REGLA_5, REGLA_PRINCIPIO_V } from "../politica/documentos.ts";
 import { validarConsistencia } from "../politica/consistencia.ts";
 import { calcularDiferenciaPorcentaje, decidirIngreso } from "../politica/ingreso.ts";
+import { REGLA_2, evaluarRegla2, type DecisionRegla2 } from "../politica/preaprobacion.ts";
+import { validarEntradaPreaprobacion } from "../compartido/preaprobacion.ts";
 import type { VerificacionIngreso } from "../compartido/ingreso.ts";
 import {
   esquemaSolicitudRegistrada,
@@ -67,7 +69,7 @@ export const esquemaSolicitud = z.object({
   solicitante: z.object({ nombre: z.string(), documento: z.string(), correo: z.string() }),
   monto: z.number().int(),
   plazoMeses: z.number().int(),
-  estado: z.enum(["en_estudio", "anulada", "reservada"]),
+  estado: z.enum(["en_estudio", "preaprobada", "anulada", "reservada"]),
   creadaEn: z.string(),
 });
 
@@ -227,6 +229,26 @@ export interface AuditoriaRegistro {
 
 export type RespuestaRegistroSolicitud = Respuesta<ResultadoRegistro>;
 
+/**
+ * Auditoría de una decisión de preaprobación (#14, R10): la Regla 2, el resultado y los enteros
+ * relevantes; nunca fragmentos, nombres de documentos ni contenido.
+ */
+export interface AuditoriaPreaprobacion {
+  resultado: "preaprobada" | "bloqueada";
+  regla: string;
+  /** Solo en un bloqueo: el código del error. */
+  codigo?: string;
+  idSolicitud?: string;
+  idSolicitante: string | null;
+  monto: number | null;
+  plazoMeses: number | null;
+  cuotaMensual: number | null;
+  ingresoVerificado: number | null;
+  versionPolitica: string;
+}
+
+export type RespuestaPreaprobacion = Respuesta<ResultadoRegistro>;
+
 export interface Core {
   consultarSolicitud(idSolicitud: unknown): Respuesta<{ solicitud: Solicitud | null }>;
   buscarSolicitante(criterio: CriterioBusqueda): Respuesta<{ coincidencias: Coincidencia[] }>;
@@ -270,6 +292,16 @@ export interface Core {
   registrarSolicitud(entrada: unknown): {
     respuesta: RespuestaRegistroSolicitud;
     auditoria: AuditoriaRegistro | null;
+  };
+  /**
+   * Preaprueba la solicitud registrada de la conversación si cumple la Regla 2 (#14). No recibe datos
+   * del modelo: decide con la solicitud, la identidad verificada y la política. Es idempotente por
+   * solicitud. `auditoria` es `null` si no hubo decisión que auditar: falla simulada, error de
+   * forma, falta de solicitud o repetición.
+   */
+  preaprobarSolicitud(entrada: unknown): {
+    respuesta: RespuestaPreaprobacion;
+    auditoria: AuditoriaPreaprobacion | null;
   };
   /** Solo lectura (#13, R8): la solicitud registrada en la conversación, o `null`. */
   consultarSolicitudRegistrada(
@@ -1063,7 +1095,9 @@ export function crearCore({
 
       // Solicitud abierta (R7): solo cuentan las registradas por esta herramienta.
       const abierta = [...registradas.values()].find(
-        (s) => s.solicitante.idSolicitante === idSolicitante && s.estado === "en_estudio",
+        (s) =>
+          s.solicitante.idSolicitante === idSolicitante &&
+          (s.estado === "en_estudio" || s.estado === "preaprobada"),
       );
       if (abierta !== undefined) {
         return rechazarRegistro(
@@ -1120,6 +1154,7 @@ export function crearCore({
             : { valor: ingresoDeclarado, procedencia: enviada["ingresoDeclarado"] },
         verificacionIngreso: verificacion === null ? null : verificacionRegistrada(verificacion),
         datosExtraidos: structuredClone(documentos),
+        preaprobacion: null,
         versionPolitica: VERSION_POLITICA,
       });
       siguienteNumeroSolicitud++;
@@ -1143,6 +1178,107 @@ export function crearCore({
       return {
         respuesta: exito({ solicitud: structuredClone(solicitud), repetida: false }),
         auditoria: auditoriaDeRegistro("registrada", forma, { idSolicitud }),
+      };
+    },
+
+    preaprobarSolicitud(entrada) {
+      if (fallaSimulada.debeFallar()) return { respuesta: fallo(noDisponible()), auditoria: null };
+      const forma = validarEntradaPreaprobacion(entrada);
+      if (!forma.ok) return { respuesta: fallo(forma.error), auditoria: null };
+      const { correlationId } = forma;
+
+      const auditar = (
+        resultado: AuditoriaPreaprobacion["resultado"],
+        solicitud: SolicitudRegistrada | undefined,
+        decision: DecisionRegla2 | null,
+        codigo?: string,
+      ): AuditoriaPreaprobacion => ({
+        resultado,
+        regla: REGLA_2,
+        ...(codigo !== undefined ? { codigo } : {}),
+        ...(solicitud !== undefined ? { idSolicitud: solicitud.idSolicitud } : {}),
+        idSolicitante: solicitud?.solicitante.idSolicitante ?? null,
+        monto: solicitud?.monto.valor ?? null,
+        plazoMeses: solicitud?.plazoMeses.valor ?? null,
+        cuotaMensual: numeroDe(decision?.valores["cuotaMensual"]),
+        ingresoVerificado: solicitud?.verificacionIngreso?.ingresoVerificado?.monto ?? null,
+        versionPolitica: VERSION_POLITICA,
+      });
+      const bloquear = (
+        error: ReturnType<typeof errorNegocio>,
+        solicitud: SolicitudRegistrada | undefined,
+        decision: DecisionRegla2 | null = null,
+      ) => ({
+        respuesta: fallo<ResultadoRegistro>(error),
+        auditoria: auditar("bloqueada", solicitud, decision, error.codigo),
+      });
+      const sinIdentidad = () =>
+        errorNegocio(
+          "identidad_no_verificada",
+          "No se preaprueba sin la identidad del solicitante verificada.",
+        );
+
+      // Regla 1 del lado del servidor (Principio IV): la identidad debe estar verificada y, una vez
+      // hay solicitud, ser la de su dueño: la verificación de una persona no se transfiere a otra.
+      const identidad = identidades.get(correlationId) ?? {
+        correlationId,
+        verificada: false,
+        idSolicitante: null,
+        verificadaEn: null,
+      };
+      if (!evaluarRegla1(identidad).permitido) return bloquear(sinIdentidad(), undefined);
+
+      const ultima = registradasPorConversacion.get(correlationId)?.at(-1);
+      const solicitud = ultima === undefined ? undefined : registradas.get(ultima);
+      if (solicitud === undefined) {
+        return {
+          respuesta: fallo<ResultadoRegistro>(
+            errorNegocio(
+              "solicitud_no_registrada",
+              "No hay una solicitud registrada en esta conversación: regístrala antes de preaprobar.",
+            ),
+          ),
+          auditoria: null,
+        };
+      }
+      if (!evaluarRegla1(identidad, solicitud.solicitante.idSolicitante).permitido) {
+        return bloquear(sinIdentidad(), solicitud);
+      }
+
+      // Idempotente por solicitud (R7): ya preaprobada, se devuelve la misma sin otro efecto.
+      if (solicitud.estado === "preaprobada") {
+        return {
+          respuesta: exito({ solicitud: structuredClone(solicitud), repetida: true }),
+          auditoria: null,
+        };
+      }
+
+      // Regla 2 con los datos de la solicitud registrada, nunca con lo que envíe el modelo (R3).
+      const decision = evaluarRegla2({
+        monto: solicitud.monto.valor,
+        plazoMeses: solicitud.plazoMeses.valor,
+        verificacion: solicitud.verificacionIngreso,
+      });
+      if (!decision.permitido) {
+        return bloquear(
+          errorNegocio(decision.codigo ?? "fuera_de_politica", decision.motivo),
+          solicitud,
+          decision,
+        );
+      }
+
+      const preaprobadaEn = ahora().toISOString();
+      const preaprobada = esquemaSolicitudRegistrada.parse({
+        ...solicitud,
+        estado: "preaprobada",
+        preaprobacion: { preaprobadaEn, decision },
+      });
+      registradas.set(preaprobada.idSolicitud, preaprobada);
+      const resumen = almacen.get(preaprobada.idSolicitud);
+      if (resumen !== undefined) resumen.estado = "preaprobada";
+      return {
+        respuesta: exito({ solicitud: structuredClone(preaprobada), repetida: false }),
+        auditoria: auditar("preaprobada", preaprobada, decision),
       };
     },
 
@@ -1182,6 +1318,10 @@ export function crearCore({
     },
   };
 }
+
+/** Un valor de la decisión como número entero, o `null` si no está. */
+const numeroDe = (valor: string | number | undefined): number | null =>
+  typeof valor === "number" ? valor : null;
 
 /** Dos verificaciones son la misma decisión si solo difiere la marca de tiempo (R9). */
 function mismaVerificacion(a: VerificacionIngreso, b: VerificacionIngreso): boolean {

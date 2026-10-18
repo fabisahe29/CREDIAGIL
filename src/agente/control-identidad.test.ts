@@ -92,7 +92,7 @@ describe("control de identidad (#9, US4)", () => {
   it("exige identidad para extraer documentos (#10), verificar el ingreso (#11) y registrar la solicitud (#13)", () => {
     assert.deepEqual(
       [...HERRAMIENTAS_CON_IDENTIDAD],
-      ["extraer_documento", "verificar_ingreso", "registrar_solicitud"],
+      ["extraer_documento", "verificar_ingreso", "registrar_solicitud", "preaprobar_credito"],
     );
   });
 
@@ -565,7 +565,7 @@ describe("control de identidad: registrar_solicitud, sin el modelo (#13, US2 · 
   it("registrar_solicitud exige identidad: está en la lista de herramientas con identidad", () => {
     assert.deepEqual(
       [...HERRAMIENTAS_CON_IDENTIDAD],
-      ["extraer_documento", "verificar_ingreso", "registrar_solicitud"],
+      ["extraer_documento", "verificar_ingreso", "registrar_solicitud", "preaprobar_credito"],
     );
   });
 
@@ -718,5 +718,61 @@ describe("control de identidad: registrar_solicitud, sin el modelo (#13, US2 · 
       assert.equal(decision(salida), "deny", herramienta);
       assert.equal(llamadas(), 0, herramienta);
     }
+  });
+});
+
+describe("control de identidad: preaprobar_credito (#14, US2)", () => {
+  const PREAPROBAR = "mcp__originacion__preaprobar_credito";
+
+  it("preaprobar_credito exige identidad verificada: está en la lista de herramientas con identidad", () => {
+    assert.ok(HERRAMIENTAS_CON_IDENTIDAD.includes("preaprobar_credito"));
+  });
+
+  it("con la identidad sin verificar deniega con el bloqueo de la Regla 1 y el siguiente paso, sin señal de la Regla 2", async (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    const { core } = coreCon([identidad(estado.correlationId, false)]);
+    const hook = crearControlIdentidad({ core, estado, dormir: async () => {}, azar: () => 0.5 });
+    const salida = await hook(entrada(PREAPROBAR), "uso-1", {
+      signal: new AbortController().signal,
+    });
+    assert.equal(decision(salida), "deny");
+    assert.equal(estado.eventos.length, 1);
+    const evento = estado.eventos[0]!;
+    assert.equal(evento.tipo, "bloqueo_por_regla");
+    assert.equal(evento.regla, "Regla 1 · identidad verificada antes de registrar");
+    if (evento.tipo === "bloqueo_por_regla") {
+      assert.match(evento.siguientePaso, /número de documento/);
+      assert.equal(evento.valores["herramienta"], "preaprobar_credito");
+    }
+    assert.equal(estado.escalamiento, null);
+  });
+
+  it("con la identidad verificada deja pasar a preaprobar_credito: la Regla 2 la decide su propio hook", async (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    const { core } = coreCon([identidad(estado.correlationId, true)]);
+    const hook = crearControlIdentidad({ core, estado, dormir: async () => {}, azar: () => 0.5 });
+    assert.deepEqual(
+      await hook(entrada(PREAPROBAR), "uso-1", { signal: new AbortController().signal }),
+      {},
+    );
+  });
+
+  it("con una señal de la Regla 3 deniega por escalada: la excepción de la Regla 3 es solo del registro", async (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "discrepancia_de_ingreso",
+      regla: "Regla 3",
+      herramienta: "verificar_ingreso",
+    });
+    const { core, llamadas } = coreCon([identidad(estado.correlationId, true)]);
+    const hook = crearControlIdentidad({ core, estado, dormir: async () => {}, azar: () => 0.5 });
+    const salida = await hook(entrada(PREAPROBAR), "uso-1", {
+      signal: new AbortController().signal,
+    });
+    assert.equal(decision(salida), "deny");
+    assert.equal(llamadas(), 0);
   });
 });

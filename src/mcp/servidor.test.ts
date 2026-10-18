@@ -31,6 +31,7 @@ import {
   esquemaSimulacionCapacidadPago,
 } from "../compartido/capacidad-pago.ts";
 import { DESCRIPCION_REGISTRAR_SOLICITUD } from "../compartido/solicitud.ts";
+import { DESCRIPCION_PREAPROBAR_CREDITO } from "../compartido/preaprobacion.ts";
 
 const PRINCIPAL = fileURLToPath(new URL("./principal.ts", import.meta.url));
 
@@ -1346,6 +1347,228 @@ describe("servidor MCP del core: registrar_solicitud y consultar_solicitud_regis
       );
       assert.equal(r.contenido.error?.codigo, "procedencia_documento_desconocida");
       assert.equal(r.contenido.error?.campo, "procedencia.monto");
+    });
+  });
+});
+describe("servidor MCP del core: preaprobar_credito (#14)", () => {
+  let conexion: Conexion;
+  // Un servidor por prueba: cada solicitante puede tener una sola solicitud abierta en el core.
+  beforeEach(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  afterEach(async () => {
+    await conexion.cerrar();
+  });
+
+  const FECHA_UNICO = SOLICITANTES_EJEMPLO.find(
+    (s) => s.idSolicitante === ID_SOLICITANTE_UNICO,
+  )!.fechaExpedicion;
+  const cita = (fragmento: string) => ({ tipo: "afirmacion", fragmento });
+
+  async function verificado() {
+    const correlationId = randomUUID();
+    const r = await llamarHerramienta(conexion, "verificar_identidad", {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      fechaExpedicion: FECHA_UNICO,
+      idIntento: randomUUID(),
+      correlationId,
+    });
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    return correlationId;
+  }
+
+  /** Identidad, documentos con ingreso de 3.800.000 y la solicitud registrada con el monto y el plazo dados. */
+  async function conSolicitudRegistrada(monto: number, plazoMeses: number) {
+    const correlationId = await verificado();
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      const v = validarSalida(e.salida, e, new Date());
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = await llamarHerramienta(conexion, "registrar_extraccion", {
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      });
+      assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    }
+    const ingreso = await llamarHerramienta(conexion, "verificar_ingreso", {
+      correlationId,
+      ingresoDeclarado: 3_800_000,
+    });
+    assert.equal(ingreso.isError, false, JSON.stringify(ingreso.contenido));
+    const registro = await llamarHerramienta(conexion, "registrar_solicitud", {
+      correlationId,
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto,
+      plazoMeses,
+      claveIdempotencia: `clave-${correlationId}`,
+      procedencia: {
+        monto: cita("quiero el monto"),
+        plazoMeses: cita("a ese plazo"),
+        ingresoDeclarado: cita("gano ese ingreso"),
+      },
+    });
+    assert.equal(registro.isError, false, JSON.stringify(registro.contenido));
+    return correlationId;
+  }
+
+  const preaprobar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "preaprobar_credito", argumentos);
+
+  const leer = (correlationId: string) =>
+    llamarHerramienta(conexion, "consultar_solicitud_registrada", {
+      correlationId,
+    });
+
+  const estadoDe = async (correlationId: string) =>
+    (
+      (await leer(correlationId)).contenido.datos?.["solicitud"] as {
+        estado: string;
+      } | null
+    )?.estado;
+
+  it("anuncia preaprobar_credito con efectos, la descripción compartida y solo el correlationId", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "preaprobar_credito");
+    assert.ok(herramienta, "falta preaprobar_credito");
+    assert.notEqual(herramienta.annotations?.readOnlyHint, true);
+    assert.equal(herramienta.description, DESCRIPCION_PREAPROBAR_CREDITO);
+    assert.ok(herramienta.outputSchema);
+    assert.deepEqual(Object.keys(herramienta.inputSchema.properties ?? {}), ["correlationId"]);
+  });
+
+  it("preaprueba un caso simple y deja la solicitud en preaprobada", async () => {
+    const correlationId = await conSolicitudRegistrada(4_000_000, 24);
+    const r = await preaprobar({ correlationId });
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    const datos = r.contenido.datos as {
+      solicitud: {
+        estado: string;
+        preaprobacion: { decision: { permitido: boolean } };
+      };
+      repetida: boolean;
+    };
+    assert.equal(datos.repetida, false);
+    assert.equal(datos.solicitud.estado, "preaprobada");
+    assert.equal(datos.solicitud.preaprobacion.decision.permitido, true);
+    assert.equal(await estadoDe(correlationId), "preaprobada");
+  });
+
+  it("repetir devuelve la misma preaprobación con repetida true y una sola auditoría", async () => {
+    const correlationId = await conSolicitudRegistrada(4_000_000, 24);
+    const primera = await preaprobar({ correlationId });
+    const segunda = await preaprobar({ correlationId });
+    assert.equal(segunda.isError, false);
+    assert.equal(segunda.contenido.datos?.["repetida"], true);
+    assert.deepEqual(
+      segunda.contenido.datos?.["solicitud"],
+      primera.contenido.datos?.["solicitud"],
+    );
+    const registros = await registrosDe(conexion, correlationId);
+    const auditorias = registros.filter((l) => l["evento"] === "auditoria_preaprobacion");
+    assert.equal(auditorias.length, 1);
+    assert.equal(auditorias[0]?.["resultado"], "preaprobada");
+  });
+
+  it("un campo de más, como monto, cuota o ingreso, es formato_invalido sobre ese campo", async () => {
+    const correlationId = await conSolicitudRegistrada(4_000_000, 24);
+    for (const campo of ["monto", "cuota", "cuotaMensual", "ingresoMensual", "idSolicitud"]) {
+      const r = await preaprobar({ correlationId, [campo]: 1 });
+      assert.equal(r.isError, true, campo);
+      assert.equal(r.contenido.error?.codigo, "formato_invalido", campo);
+      assert.equal(r.contenido.error?.campo, campo, campo);
+    }
+    assert.equal(await estadoDe(correlationId), "en_estudio");
+  });
+
+  it("sin correlationId o con uno inválido es formato_invalido sobre correlationId", async () => {
+    assert.equal((await preaprobar({})).contenido.error?.campo, "correlationId");
+    assert.equal(
+      (await preaprobar({ correlationId: "no-uuid" })).contenido.error?.campo,
+      "correlationId",
+    );
+  });
+
+  it("el log de la herramienta lleva el resultado y la solicitud, sin montos, cuotas ni ingresos", async () => {
+    const correlationId = await conSolicitudRegistrada(4_000_000, 24);
+    await preaprobar({ correlationId });
+    const registros = await registrosDe(conexion, correlationId);
+    const herramienta = registros.find(
+      (l) => l["evento"] === "herramienta" && l["herramienta"] === "preaprobar_credito",
+    );
+    assert.equal(herramienta?.["resultado"], "ok");
+    assert.match(String(herramienta?.["idSolicitud"]), /^SOL-000\d{7}$/);
+    for (const campo of ["monto", "plazoMeses", "cuotaMensual", "ingresoVerificado", "ingreso"]) {
+      assert.equal(campo in herramienta!, false, `${campo} en el log de la herramienta`);
+    }
+    const auditoria = registros.find((l) => l["evento"] === "auditoria_preaprobacion");
+    assert.equal(auditoria?.["resultado"], "preaprobada");
+    assert.equal(auditoria?.["cuotaMensual"], 206_723);
+    assert.equal(auditoria?.["versionPolitica"], VERSION_POLITICA);
+    assert.equal(typeof auditoria?.["ts"], "string");
+    const texto = JSON.stringify(
+      registros.filter((l) => l["evento"] === "auditoria_preaprobacion"),
+    );
+    for (const dato of ["certificado", "extracto", "Industrias", "Ficticia", "quiero el monto"]) {
+      assert.equal(texto.includes(dato), false, `«${dato}» en la auditoría`);
+    }
+  });
+
+  describe("rechazo del lado del servidor, sin pasar por ningún hook (US2)", () => {
+    it("sin identidad verificada se rechaza con identidad_no_verificada", async () => {
+      const correlationId = randomUUID();
+      const r = await preaprobar({ correlationId });
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.categoria, "negocio");
+      assert.equal(r.contenido.error?.reintentable, false);
+      assert.equal(r.contenido.error?.codigo, "identidad_no_verificada");
+      const registros = await registrosDe(conexion, correlationId);
+      const auditoria = registros.find((l) => l["evento"] === "auditoria_preaprobacion");
+      assert.equal(auditoria?.["resultado"], "bloqueada");
+      assert.equal(auditoria?.["codigo"], "identidad_no_verificada");
+    });
+
+    it("un monto por encima del tope se rechaza con monto_sobre_tope y la solicitud sigue en estudio", async () => {
+      const correlationId = await conSolicitudRegistrada(6_000_000, 24);
+      const r = await preaprobar({ correlationId });
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.codigo, "monto_sobre_tope");
+      assert.doesNotMatch(r.contenido.error?.mensaje ?? "", /5\.000\.000|30\s?%/);
+      assert.equal(await estadoDe(correlationId), "en_estudio");
+      const registros = await registrosDe(conexion, correlationId);
+      const auditoria = registros.find((l) => l["evento"] === "auditoria_preaprobacion");
+      assert.equal(auditoria?.["resultado"], "bloqueada");
+      assert.equal(auditoria?.["codigo"], "monto_sobre_tope");
+      const herramienta = registros.find(
+        (l) => l["evento"] === "herramienta" && l["herramienta"] === "preaprobar_credito",
+      );
+      assert.equal(herramienta?.["resultado"], "monto_sobre_tope");
+      assert.equal("monto" in herramienta!, false);
+    });
+
+    it("una cuota por encima del 30% del ingreso verificado se rechaza con cuota_sobre_porcentaje", async () => {
+      const correlationId = await conSolicitudRegistrada(4_500_000, 3);
+      const r = await preaprobar({ correlationId });
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.codigo, "cuota_sobre_porcentaje");
+      assert.equal(await estadoDe(correlationId), "en_estudio");
+    });
+  });
+
+  describe("solo se preaprueba una solicitud registrada (US3)", () => {
+    it("con la identidad verificada y sin solicitud registrada responde solicitud_no_registrada", async () => {
+      const correlationId = await verificado();
+      const r = await preaprobar({ correlationId });
+      assert.equal(r.isError, true);
+      assert.equal(r.contenido.error?.categoria, "negocio");
+      assert.equal(r.contenido.error?.codigo, "solicitud_no_registrada");
+      assert.equal(await estadoDe(correlationId), undefined);
+      const registros = await registrosDe(conexion, correlationId);
+      assert.equal(
+        registros.some((l) => l["evento"] === "auditoria_preaprobacion"),
+        false,
+      );
     });
   });
 });

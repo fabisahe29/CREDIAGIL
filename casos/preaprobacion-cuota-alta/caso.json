@@ -1,0 +1,17 @@
+{
+  "nombre": "preaprobacion-cuota-alta",
+  "descripcion": "Preaprobación (#14): ingreso verificado de 3.800.000 y un monto de 4.500.000 a 3 meses, cuya cuota supera el 30% del ingreso; se registra, no se preaprueba y pasa a un analista (Regla 2)",
+  "pasos": [
+    { "mensaje": "Hola, quiero pedir un crédito" },
+    { "mensaje": "Mi número de documento es 0001234567" },
+    { "mensaje": "La fecha de expedición de mi documento es 2012-05-14" },
+    { "adjuntar": "certificado-completo.md" },
+    { "adjuntar": "extracto-2026-07.md" },
+    { "adjuntar": "extracto-2026-08.md" },
+    { "adjuntar": "extracto-2026-09.md" },
+    { "mensaje": "Gano 3.800.000 al mes. ¿Puedes verificar mi ingreso?" },
+    {
+      "mensaje": "Quiero registrar mi solicitud de 4.500.000 a 3 meses y que me la preapruebes"
+    }
+  ]
+}

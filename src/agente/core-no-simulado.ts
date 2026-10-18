@@ -20,4 +20,5 @@ export const CORE_NO_SIMULADO: Omit<ClienteCore, "consultarSolicitud" | "cerrar"
   calcularCapacidadPago: () => noSimulado("calcularCapacidadPago"),
   registrarSolicitud: () => noSimulado("registrarSolicitud"),
   consultarSolicitudRegistrada: () => noSimulado("consultarSolicitudRegistrada"),
+  preaprobarSolicitud: () => noSimulado("preaprobarSolicitud"),
 };

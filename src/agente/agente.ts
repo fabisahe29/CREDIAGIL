@@ -23,8 +23,10 @@ import {
   type SenalEscalamiento,
 } from "./adaptador.ts";
 import { REGLA_3 } from "../politica/ingreso.ts";
+import { REGLA_2 } from "../politica/preaprobacion.ts";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
 import { crearControlIdentidad } from "./control-identidad.ts";
+import { crearControlPreaprobacion } from "./control-preaprobacion.ts";
 import {
   crearClasificador,
   crearSubagente,
@@ -74,6 +76,10 @@ const SYSTEM_PROMPT = [
   "Si verificar_ingreso devuelve escalada por discrepancia o inconsistencia y el solicitante ya dijo monto y plazo en su mensaje, la escalada no te exime de registrar: llama a registrar_solicitud en este mismo turno, antes de escribir tu respuesta. El analista debe recibir la solicitud registrada con su discrepancia. Registrar no preaprueba ni decide, y no le digas al solicitante que no puedes registrarla.",
   "Si registrar_solicitud rechaza un dato por su origen, corrígelo con una cita literal del solicitante y vuélvelo a intentar una vez; no inventes la cita. Esta es la única excepción a no reintentar un error.",
   "Si registrar_solicitud dice que ya hay una solicitud abierta, infórmalo; no la cambies ni registres otra.",
+  // Preaprobación (#14, R5 y R8): el modelo guía; la Regla 2 la aplica el código y el escalamiento también.
+  "Cuando la solicitud del solicitante verificado ya esté registrada y su ingreso verificado, llama a preaprobar_credito, sin enviarle datos. Compromete a la fintech: no la uses para explorar ni para decir cuánto pagaría; para eso está calcular_capacidad_pago.",
+  "Si preaprobar_credito se rechaza porque no cumple las condiciones, no insistas, no la intentes con otros datos ni ofrezcas un monto o plazo alternativo: el caso pasa a un analista. Si dice que falta registrar la solicitud, regístrala y vuelve a intentar una vez.",
+  "Una preaprobación es solo la constancia de que se cumple la política; no digas que el crédito está aprobado ni inventes una vigencia ni condiciones. La decisión definitiva la toma un analista.",
 ].join(" ");
 
 /**
@@ -186,6 +192,8 @@ const AVISOS: Readonly<Record<Motivo, string>> = {
     "Los ingresos de tus documentos no coinciden con lo que declaraste. Tu caso pasa a un analista, que te contactará.",
   inconsistencia_documental:
     "Encontré datos que no coinciden entre tus documentos. Tu caso pasa a un analista, que te contactará.",
+  preaprobacion_fuera_de_politica:
+    "Tu solicitud no cumple las condiciones para una preaprobación automática. Pasa a un analista, que te contactará.",
 };
 
 const REGLAS: Readonly<Record<Motivo, string>> = {
@@ -200,6 +208,7 @@ const REGLAS: Readonly<Record<Motivo, string>> = {
   documento_no_extraible: REGLA_NO_EXTRAIBLE,
   discrepancia_de_ingreso: REGLA_3,
   inconsistencia_documental: REGLA_3,
+  preaprobacion_fuera_de_politica: REGLA_2,
 };
 
 const REGLA_CORE_NO_ARRANCO = "constitución, Principio VI · el core no arrancó";
@@ -374,6 +383,8 @@ export async function conversar(
           )
         : Promise.resolve(false),
   });
+  // Regla 2 antes de preaprobar: recalcula con la solicitud registrada del core (#14, R4).
+  const controlPreaprobacion = crearControlPreaprobacion({ core: coreEnUso, estado, dormir, azar });
   const prompt = componerPrompt(mensaje, historial);
 
   async function intentar(): Promise<Intento> {
@@ -398,7 +409,13 @@ export async function conversar(
       abortController,
       env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" },
       hooks: {
-        PreToolUse: [{ matcher: `mcp__${CLAVE_SERVIDOR}__.*`, hooks: [controlIdentidad] }],
+        PreToolUse: [
+          { matcher: `mcp__${CLAVE_SERVIDOR}__.*`, hooks: [controlIdentidad] },
+          {
+            matcher: `mcp__${CLAVE_SERVIDOR}__preaprobar_credito`,
+            hooks: [controlPreaprobacion],
+          },
+        ],
       },
     };
     try {
