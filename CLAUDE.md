@@ -23,11 +23,11 @@ Las reglas no negociables (reglas de negocio, datos ficticios, decisiones determ
 | `specs/NNN-…/` | Una carpeta por feature: spec, plan, research, contratos y tareas |
 | `.specify/` | Spec Kit: plantillas, scripts, hooks (`extensions.yml`) y constitución |
 | `.claude/` | Comandos propios (`skills/`), reglas por zona (`rules/`) y configuración compartida (`settings.json`) |
-| `src/politica/` | Módulo único de política de crédito: Regla 1 desde el #9; Regla 5 de documentos desde el #10; umbrales y tasa con #12 y #14 |
+| `src/politica/` | Módulo único de política de crédito: Regla 1 desde el #9; Regla 5 de documentos desde el #10; Regla 3 desde el #11 (ingreso verificado, discrepancia y consistencia entre documentos); umbrales y tasa con #12 y #14 |
 | `src/agente/` | Agente, adaptador de herramientas, control de identidad (#9) y subagente de extracción de documentos (#10) |
-| `src/mcp/` | Servidor MCP del core de originación (#7); identificación y verificación desde el #9; registro de extracciones desde el #10 |
+| `src/mcp/` | Servidor MCP del core de originación (#7); identificación y verificación desde el #9; registro de extracciones desde el #10; verificación de ingreso y reextracción desde el #11 |
 | `src/chat/` | Chat de terminal: `npm run chat` (issue #8) |
-| `src/compartido/` | Contrato de errores, catálogo de eventos de negocio, logs y validación de extracciones con procedencia (#10) |
+| `src/compartido/` | Contrato de errores, catálogo de eventos de negocio, logs, validación de extracciones con procedencia (#10) y esquemas de la verificación de ingreso (#11) |
 | `casos/` | Casos de prueba ficticios para la demo (`/caso` en el chat) |
 | `DECISIONES.md` | Decisiones de diseño con su alternativa descartada |
 
