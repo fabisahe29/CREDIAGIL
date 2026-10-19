@@ -2,7 +2,26 @@
 
 Agente conversacional que atiende solicitudes de crédito de consumo de Crediágil. Está construido con TypeScript, el Claude Agent SDK y un servidor MCP propio que simula el core de originación.
 
-**Todos los datos son ficticios**: solicitantes, empleadores, documentos y montos. Las reglas de negocio no negociables están en la [constitución](.specify/memory/constitution.md), y las decisiones de diseño, en [DECISIONES.md](DECISIONES.md).
+**Todos los datos son ficticios**: solicitantes, empleadores, documentos y montos. Las reglas de negocio no negociables están en la [constitución](.specify/memory/constitution.md). Las decisiones de diseño están resumidas por necesidad en [DECISIONES.md](DECISIONES.md), y su detalle por ticket, en [docs/registro-decisiones.md](docs/registro-decisiones.md).
+
+## Inicio rápido
+
+Menos de 5 minutos, sin credenciales:
+
+```text
+npm install
+npm test
+npm run casos
+```
+
+- `npm test` corre las pruebas, sin red ni modelo.
+- `npm run casos` ejecuta los siete casos obligatorios con respuestas guionadas y entrega un veredicto por caso. Ver [Casos obligatorios](#casos-obligatorios).
+- Para conversar con el agente (`npm run chat`) hace falta `ANTHROPIC_API_KEY` en la sesión. Ver [Requisitos](#requisitos) e [Iniciar el chat](#iniciar-el-chat).
+
+**Enlaces de la entrega**
+
+- [GitHub Project](https://github.com/users/fabisahe29/projects/1): el backlog y el estado de cada ticket.
+- [Video de funcionamiento](https://drive.google.com/file/d/1yzjPuf3hHKW0aGjrBs1IzW1YIyCenfhV/view?usp=sharing): los siete casos, en 5 minutos o menos.
 
 ## Requisitos
 
@@ -130,7 +149,7 @@ La numeración es la del issue #17. En tickets anteriores se citó otra del enun
 
 ### Reproducir un caso en el chat (para el video)
 
-**Video de la ejecución de los casos de prueba**: [ver en Google Drive](https://drive.google.com/file/d/1yzjPuf3hHKW0aGjrBs1IzW1YIyCenfhV/view?usp=sharing).
+El video de la ejecución de los casos de prueba está enlazado en el [Inicio rápido](#inicio-rápido).
 
 Cada caso se reproduce con los mismos documentos y pasos que usa el comando. Con el modelo real, el chat necesita `ANTHROPIC_API_KEY`:
 
@@ -156,12 +175,31 @@ npm run typecheck
 npm run format:check
 ```
 
+### Paquete de entrega
+
+El `.zip` se arma desde un árbol limpio (sin cambios sin commit) y se revisa antes de subirlo:
+
+```text
+npm run entrega:armar        # genera dist/crediagil-entrega.zip: lo versionado y .git
+npm run entrega:verificar    # revisa nombres, .git, peso (máx. 50 MB), secretos, historial y specs/
+```
+
+| Código de salida | Significado |
+|------------------|-------------|
+| 0 | `listo`: todas las comprobaciones en `ok` |
+| 1 | `bloqueado`: hay al menos un hallazgo; el informe da el tipo y la ubicación, nunca el valor |
+| 2 | Opciones inválidas, o el `.zip` no existe o no se puede leer |
+| 3 | `incompleto`: sin hallazgos, pero algo no se pudo verificar (por ejemplo, no hay `origin/main`); no es éxito |
+
+El detalle está en [specs/017-paquete-de-entrega/contracts/comando-entrega.md](specs/017-paquete-de-entrega/contracts/comando-entrega.md).
+
 ## Estructura
 
 | Ruta | Contenido |
 |------|-----------|
 | `src/chat/` | Chat de terminal |
 | `src/e2e/` | Ejecutor de los casos obligatorios (`npm run casos`) |
+| `src/entrega/` | Armado y verificación del `.zip` de entrega (`npm run entrega:armar` y `entrega:verificar`) |
 | `src/agente/` | Agente (Claude Agent SDK) y adaptador hacia el core |
 | `src/mcp/` | Servidor MCP que simula el core de originación |
 | `src/compartido/` | Contrato de errores, catálogo de eventos y logs |

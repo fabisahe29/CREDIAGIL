@@ -8,6 +8,9 @@ node_modules/
 dist/
 build/
 coverage/
+
+# Paquete de entrega: el .zip se arma con npm run entrega:armar y no se versiona (specs/017-paquete-de-entrega)
+*.zip
 *.log
 
 # Logs JSON de cada ejecución del chat (specs/006-interfaz-chat/research.md, R6)
