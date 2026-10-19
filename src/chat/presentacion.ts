@@ -174,6 +174,10 @@ export function formatearHandoff(handoff: ResumenAnalista, color: boolean): stri
       ? []
       : [`Decisión: ${handoff.decision.motivo} · ${formatearValores(handoff.decision.valores)}`]),
     `Pendientes: ${handoff.pendientes.length === 0 ? "ninguno" : handoff.pendientes.join(", ")}`,
+    // Lo que el solicitante planteó en su mensaje y no se atendió (#16, R7).
+    ...(handoff.asuntosPendientes.length === 0
+      ? []
+      : [`Asuntos pendientes: ${handoff.asuntosPendientes.join(", ")}`]),
   ];
   return lineas.join("\n");
 }

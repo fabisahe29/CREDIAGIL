@@ -1,0 +1,13 @@
+{
+  "nombre": "mensaje-varios-asuntos",
+  "descripcion": "Caso de prueba 1 (#16): el mensaje del enunciado trae la solicitud, el certificado y los extractos adjuntos y la pregunta por la cuota; una sola respuesta con el estado de cada asunto: la cuota simulada con el ingreso declarado, y la solicitud y los documentos pendientes de verificar la identidad",
+  "pasos": [
+    { "adjuntar": "certificado-completo.md" },
+    { "adjuntar": "extracto-2026-07.md" },
+    { "adjuntar": "extracto-2026-08.md" },
+    { "adjuntar": "extracto-2026-09.md" },
+    {
+      "mensaje": "Hola, quiero pedir un crédito de $4.000.000 a 24 meses. Te pego mi certificado laboral y mis extractos de los últimos tres meses. Gano más o menos $3.500.000 al mes. ¿En cuánto me quedaría la cuota?"
+    }
+  ]
+}

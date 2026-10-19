@@ -3614,3 +3614,75 @@ describe("core simulado: escalarAAnalista, la causa y la acción de cada código
     });
   }
 });
+describe("core simulado: escalarAAnalista con asuntos pendientes (#16, R7)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  it("copia los asuntos pendientes de la entrada al resumen y a la auditoría", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const resultado = core.escalarAAnalista(
+      entradaEscalamiento(correlationId, {
+        asuntosPendientes: ["documentos", "cuota"],
+      }),
+    );
+    const { escalamiento } = escaladoOk(resultado);
+    assert.deepEqual(escalamiento.asuntosPendientes, ["documentos", "cuota"]);
+    assert.deepEqual(resultado.auditoria?.asuntosPendientes, ["documentos", "cuota"]);
+    assert.equal(esquemaResumenAnalista.safeParse(escalamiento).success, true);
+  });
+
+  it("sin asuntosPendientes, el resumen los trae vacíos como en el #15", () => {
+    const core = crearCore({ ahora });
+    const { escalamiento } = escaladoOk(core.escalarAAnalista(entradaEscalamiento(randomUUID())));
+    assert.deepEqual(escalamiento.asuntosPendientes, []);
+  });
+
+  it("un valor fuera del catálogo o repetido se rechaza con su campo y no guarda nada", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    for (const asuntosPendientes of [["hipoteca"], ["cuota", "cuota"]]) {
+      const error = escaladoError(
+        core.escalarAAnalista(entradaEscalamiento(correlationId, { asuntosPendientes })),
+      );
+      assert.equal(error.codigo, "formato_invalido");
+      assert.equal(error.campo, "asuntosPendientes");
+    }
+    const guardado = core.consultarEscalamiento(correlationId);
+    assert.ok(guardado.ok);
+    if (guardado.ok) assert.equal(guardado.datos.escalamiento, null);
+  });
+
+  it("repetir con otra clave u otros asuntos devuelve el resumen original", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    escaladoOk(
+      core.escalarAAnalista(entradaEscalamiento(correlationId, { asuntosPendientes: ["cuota"] })),
+    );
+    const repetido = core.escalarAAnalista(
+      entradaEscalamiento(correlationId, {
+        claveIdempotencia: "otra-clave",
+        asuntosPendientes: ["solicitud"],
+      }),
+    );
+    const { escalamiento, repetida } = escaladoOk(repetido);
+    assert.equal(repetida, true);
+    assert.deepEqual(escalamiento.asuntosPendientes, ["cuota"]);
+    assert.equal(repetido.auditoria, null);
+  });
+
+  it("consultarEscalamiento devuelve los asuntos pendientes guardados", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          asuntosPendientes: ["solicitud", "cuota"],
+        }),
+      ),
+    );
+    const leido = core.consultarEscalamiento(correlationId);
+    assert.ok(leido.ok);
+    if (leido.ok)
+      assert.deepEqual(leido.datos.escalamiento?.asuntosPendientes, ["solicitud", "cuota"]);
+  });
+});

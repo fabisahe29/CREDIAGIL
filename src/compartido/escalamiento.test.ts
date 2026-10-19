@@ -568,3 +568,74 @@ describe("compartido: DESCRIPCION_ESCALAR_A_ANALISTA", () => {
     }
   });
 });
+describe("compartido: asuntosPendientes en la entrada y en el resumen (#16, R7)", () => {
+  it("la entrada acepta una lista de asuntos del catálogo", () => {
+    for (const asuntosPendientes of [["cuota"], ["solicitud", "documentos", "cuota"], []]) {
+      assert.equal(
+        esquemaEntradaEscalamiento.safeParse(entrada({ asuntosPendientes })).success,
+        true,
+        JSON.stringify(asuntosPendientes),
+      );
+    }
+  });
+
+  it("la entrada sin asuntosPendientes sigue siendo válida", () => {
+    assert.equal(esquemaEntradaEscalamiento.safeParse(entrada()).success, true);
+  });
+
+  it("la entrada rechaza un valor fuera del catálogo, un repetido y una lista de más de tres", () => {
+    for (const asuntosPendientes of [
+      ["hipoteca"],
+      ["cuota", "cuota"],
+      ["solicitud", "documentos", "cuota", "cuota"],
+      "cuota",
+    ]) {
+      assert.equal(
+        esquemaEntradaEscalamiento.safeParse(entrada({ asuntosPendientes })).success,
+        false,
+        JSON.stringify(asuntosPendientes),
+      );
+    }
+  });
+
+  it("validarEntradaEscalamiento informa formato_invalido con el campo asuntosPendientes y no corrige", () => {
+    for (const asuntosPendientes of [["hipoteca"], ["cuota", "cuota"], "cuota"]) {
+      const validacion = validarEntradaEscalamiento(entrada({ asuntosPendientes }));
+      assert.equal(validacion.ok, false);
+      if (!validacion.ok) {
+        assert.equal(validacion.error.codigo, "formato_invalido");
+        assert.equal(validacion.error.campo, "asuntosPendientes");
+      }
+    }
+  });
+
+  it("validarEntradaEscalamiento acepta la lista válida y la devuelve tal cual", () => {
+    const validacion = validarEntradaEscalamiento(
+      entrada({ asuntosPendientes: ["documentos", "cuota"] }),
+    );
+    assert.equal(validacion.ok, true);
+    if (validacion.ok)
+      assert.deepEqual(validacion.entrada.asuntosPendientes, ["documentos", "cuota"]);
+  });
+
+  it("el resumen trae asuntosPendientes; sin el campo sale vacío", () => {
+    const sin = analiza(resumenVacio());
+    assert.equal(sin.success, true);
+    if (sin.success) assert.deepEqual(sin.data.asuntosPendientes, []);
+    const con = analiza({ ...resumenVacio(), asuntosPendientes: ["cuota"] });
+    assert.equal(con.success, true);
+    if (con.success) assert.deepEqual(con.data.asuntosPendientes, ["cuota"]);
+  });
+
+  it("el resumen rechaza un asunto fuera del catálogo o repetido", () => {
+    assert.equal(analiza({ ...resumenVacio(), asuntosPendientes: ["hipoteca"] }).success, false);
+    assert.equal(
+      analiza({ ...resumenVacio(), asuntosPendientes: ["cuota", "cuota"] }).success,
+      false,
+    );
+  });
+
+  it("la descripción de la herramienta explica que el resumen incluye los asuntos pendientes", () => {
+    assert.match(DESCRIPCION_ESCALAR_A_ANALISTA, /asuntos/);
+  });
+});

@@ -275,7 +275,7 @@ const LIMITE = "|";
  * Palabras en minúsculas y sin tildes, sin espacios repetidos. Los signos que cierran una oración o
  * una pausa se conservan como `LIMITE`: «No, quiero hablar con una persona» no niega la petición.
  */
-function palabrasDe(texto: string): string[] {
+export function palabrasDe(texto: string): string[] {
   return texto
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
@@ -302,7 +302,7 @@ function posicionesDeSustantivo(palabras: readonly string[]): number[] {
 }
 
 /** Si hay una negación en las tres palabras anteriores al verbo, sin cruzar el límite de una oración. */
-function estaNegado(palabras: readonly string[], posicion: number): boolean {
+export function estaNegado(palabras: readonly string[], posicion: number): boolean {
   for (let i = posicion - 1; i >= Math.max(0, posicion - VENTANA_DE_NEGACION); i--) {
     if (palabras[i] === LIMITE) return false;
     if (NEGACIONES.includes(palabras[i]!)) return true;

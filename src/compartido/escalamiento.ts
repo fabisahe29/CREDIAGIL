@@ -6,6 +6,7 @@
 
 import { z } from "zod";
 import { errorValidacion, type ErrorCore } from "./errores.ts";
+import { ASUNTOS } from "../politica/asuntos.ts";
 import { esquemaRegistroExtraccion, huella } from "./extraccion.ts";
 import { CODIGOS_BLOQUEO } from "./preaprobacion.ts";
 import {
@@ -29,7 +30,7 @@ import {
  * solicitud, que solo recibe la causa y que no decide el crédito. No da ningún umbral.
  */
 export const DESCRIPCION_ESCALAR_A_ANALISTA =
-  "Entrega un caso a un analista de crédito, con un resumen completo que arma el sistema. Se puede usar sin identidad verificada y sin solicitud registrada: en ese caso el resumen marca lo que falta como pendiente. Solo recibe la causa clasificada: el solicitante, la solicitud, los ingresos, los documentos y las discrepancias los toma el sistema de su propio estado. Es idempotente: repetirla devuelve el mismo resumen. Escalar no decide el crédito: no aprueba ni rechaza.";
+  "Entrega un caso a un analista de crédito, con un resumen completo que arma el sistema. Se puede usar sin identidad verificada y sin solicitud registrada: en ese caso el resumen marca lo que falta como pendiente. Solo recibe la causa clasificada: el solicitante, la solicitud, los ingresos, los documentos y las discrepancias los toma el sistema de su propio estado. Si el mensaje del solicitante trajo otros asuntos que no se atendieron, el resumen los lista como asuntos pendientes. Es idempotente: repetirla devuelve el mismo resumen. Escalar no decide el crédito: no aprueba ni rechaza.";
 
 /** Clave de idempotencia del escalamiento: una por conversación, la misma entre reintentos (R8). */
 export const claveIdempotenciaEscalamiento = (correlationId: string): string =>
@@ -42,6 +43,15 @@ export const claveIdempotenciaEscalamiento = (correlationId: string): string =>
 const causa = z.enum(CAUSAS_ESCALAMIENTO);
 const motivo = z.enum(MOTIVOS_ESCALAMIENTO);
 const codigo = z.enum(CODIGOS_BLOQUEO);
+
+/**
+ * Los asuntos del mensaje que quedaron sin atender al escalar (#16, R7): del catálogo, sin repetidos y
+ * como mucho los tres que hay. Es información para el analista: no cambia la causa ni la acción.
+ */
+const esquemaAsuntosPendientes = z
+  .array(z.enum(ASUNTOS))
+  .max(ASUNTOS.length)
+  .refine((asuntos) => new Set(asuntos).size === asuntos.length);
 
 export type ClasificacionEntrada = {
   causa: z.infer<typeof causa>;
@@ -90,6 +100,7 @@ export const esquemaEntradaEscalamiento = z
     motivo,
     codigo: codigo.optional(),
     causasAdicionales: z.array(esquemaClasificacion).max(MAX_CAUSAS_ADICIONALES).optional(),
+    asuntosPendientes: esquemaAsuntosPendientes.optional(),
     declarado: z
       .strictObject({
         monto: esquemaDeclaradoDato.optional(),
@@ -124,6 +135,7 @@ const CAMPOS_CONOCIDOS: readonly string[] = [
   "motivo",
   "codigo",
   "causasAdicionales",
+  "asuntosPendientes",
   "declarado",
 ];
 
@@ -159,6 +171,11 @@ export function validarEntradaEscalamiento(entrada: unknown): ValidacionEntradaE
       "causasAdicionales",
       z.array(esquemaClasificacion).max(MAX_CAUSAS_ADICIONALES).optional(),
       `Las causas adicionales son hasta ${MAX_CAUSAS_ADICIONALES}, cada una con causa, motivo y código opcional.`,
+    ],
+    [
+      "asuntosPendientes",
+      esquemaAsuntosPendientes.optional(),
+      "Los asuntos pendientes son una lista de asuntos del catálogo, sin repetidos.",
     ],
   ];
   for (const [campo, esquema, mensaje] of forma) {
@@ -340,6 +357,8 @@ export const esquemaResumenAnalista = z
     datosExtraidos: z.array(esquemaRegistroExtraccion),
     decision: esquemaDecisionExplicable.nullable(),
     pendientes: z.array(z.enum(PENDIENTES)),
+    // Lo que el solicitante planteó y no se atendió; vacío en los resúmenes anteriores al #16.
+    asuntosPendientes: esquemaAsuntosPendientes.default([]),
   })
   .superRefine((r, ctx) => {
     const problema = (path: string, message: string) =>

@@ -1,0 +1,9 @@
+{
+  "nombre": "mensaje-varios-asuntos-con-persona",
+  "descripcion": "Varios asuntos con la Regla 4 (#16): el solicitante pide una persona y pregunta por la cuota; se escala de inmediato, sin llamar al modelo ni calcular la cuota, y la pregunta queda pendiente para el analista",
+  "pasos": [
+    {
+      "mensaje": "Quiero hablar con una persona. Además, ¿cuánto pagaría de cuota por 4 millones a 24 meses?"
+    }
+  ]
+}

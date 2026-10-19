@@ -21,7 +21,13 @@ import {
   type MotivoEscalamiento,
 } from "../politica/escalamiento.ts";
 import { validarEvento } from "../compartido/eventos.ts";
-import { CONTENIDO_CERTIFICADO_USD, HOY_EJEMPLO } from "../compartido/extraccion-ejemplos.ts";
+import {
+  CONTENIDO_CERTIFICADO,
+  CONTENIDO_CERTIFICADO_USD,
+  HOY_EJEMPLO,
+} from "../compartido/extraccion-ejemplos.ts";
+import { ID_SOLICITANTE_UNICO } from "../mcp/datos-ejemplo.ts";
+import { calcularCuota } from "../politica/cuota.ts";
 import type { ClienteCore } from "./cliente-core.ts";
 import { dejarSenal, emitirEvento, REGLA_NO_EXTRAIBLE, REGLA_NO_VERIFICABLE } from "./adaptador.ts";
 import { REGLA_5 } from "../politica/documentos.ts";
@@ -2758,5 +2764,593 @@ describe("agente: el evento de escalamiento lleva la causa y la entrega (#15, US
         "Cuando solicites un analista, no digas qué decidirá ni cuándo responderá: solo que un analista revisará su caso.",
       ),
     );
+  });
+});
+// ── Mensajes con varios asuntos (#16) ───────────────────────────────────────────────────────
+
+/** El mensaje de ejemplo del enunciado, literal (specs/014, historia 4). */
+const MENSAJE_ENUNCIADO =
+  "Hola, quiero pedir un crédito de $4.000.000 a 24 meses. Te pego mi certificado laboral y mis extractos de los últimos tres meses. Gano más o menos $3.500.000 al mes. ¿En cuánto me quedaría la cuota?";
+
+const CERTIFICADO_ADJUNTO = {
+  adjunto: 1,
+  nombre: "certificado.md",
+  soportado: true as const,
+  contenido: CONTENIDO_CERTIFICADO,
+};
+
+/** Un core con la simulación y el escalamiento reales del core simulado y la identidad que se pida. */
+function coreMulti(opciones: { identidadVerificada?: boolean } = {}) {
+  const simulado = crearCore({ ahora: () => HOY_EJEMPLO });
+  const llamadas: string[] = [];
+  const cliente: ClienteCore = {
+    ...CORE_NO_SIMULADO,
+    async consultarSolicitud() {
+      return exito({ solicitud: null });
+    },
+    async calcularCapacidadPago(entrada, correlationId) {
+      llamadas.push("calcular_capacidad_pago");
+      return simulado.calcularCapacidadPago({ ...entrada, correlationId });
+    },
+    async consultarIdentidad(correlationId) {
+      llamadas.push("consultar_identidad");
+      return exito({
+        identidad:
+          opciones.identidadVerificada === true
+            ? {
+                correlationId,
+                verificada: true,
+                idSolicitante: ID_SOLICITANTE_UNICO,
+                verificadaEn: "2026-10-18T12:00:00.000Z",
+              }
+            : {
+                correlationId,
+                verificada: false,
+                idSolicitante: null,
+                verificadaEn: null,
+              },
+      });
+    },
+    async escalarAAnalista(entrada, correlationId) {
+      llamadas.push("escalar_a_analista");
+      return simulado.escalarAAnalista({ ...entrada, correlationId }).respuesta;
+    },
+    async consultarEscalamiento(correlationId) {
+      return simulado.consultarEscalamiento(correlationId);
+    },
+    async cerrar() {},
+  };
+  return { cliente, llamadas };
+}
+
+const ENTRADA_CUOTA = {
+  monto: 4_000_000,
+  plazoMeses: 24,
+  ingresoMensual: 3_500_000,
+};
+
+const sinClasificarDocumentos = {
+  clasificarDocumento: async () => ({
+    ok: true as const,
+    tipo: "certificado_laboral" as const,
+  }),
+};
+
+describe("agente: cada asunto del mensaje recibe atención (#16, US1)", () => {
+  it("un mensaje con solicitud, adjuntos y pregunta por la cuota devuelve el estado de los tres asuntos", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Calculé tu cuota. Necesito verificarte.")];
+      },
+    ]);
+    const r = await conversar(MENSAJE_ENUNCIADO, {
+      ejecutarConsulta: fn,
+      core: cliente,
+      documentos: [CERTIFICADO_ADJUNTO],
+      ...sinClasificarDocumentos,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado, a.motivo]),
+      [
+        ["solicitud", "pendiente", "falta_identidad"],
+        ["documentos", "pendiente", "falta_identidad"],
+        ["cuota", "resuelto", undefined],
+      ],
+    );
+    const cuota = r.asuntos.find((a) => a.asunto === "cuota");
+    assert.ok(cuota?.resultado?.includes("$206.723"), cuota?.resultado ?? "");
+  });
+
+  it("un asunto que el modelo olvida sale pendiente sin atender, no desaparece", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti({ identidadVerificada: true });
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Calculé tu cuota.")];
+      },
+    ]);
+    const r = await conversar(MENSAJE_ENUNCIADO, {
+      ejecutarConsulta: fn,
+      core: cliente,
+      documentos: [CERTIFICADO_ADJUNTO],
+      ...sinClasificarDocumentos,
+      ...sinEspera,
+    });
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado, a.motivo]),
+      [
+        ["solicitud", "pendiente", "sin_atender"],
+        ["documentos", "pendiente", "sin_atender"],
+        ["cuota", "resuelto", undefined],
+      ],
+    );
+  });
+
+  it("un asunto que el modelo atiende y la detección no reconoce aparece por sus herramientas", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const r = await conversar("Hola, ¿qué tal?", {
+      ejecutarConsulta: fn,
+      core: cliente,
+      ...sinEspera,
+    });
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado]),
+      [["cuota", "resuelto"]],
+    );
+  });
+
+  it("un mensaje de un solo asunto da la misma respuesta de siempre", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Tu cuota sería de unos 206.723.")];
+      },
+    ]);
+    const r = await conversar("¿Cuánto pagaría al mes por 4 millones a 24 meses?", {
+      ejecutarConsulta: fn,
+      core: cliente,
+      ...sinEspera,
+    });
+    assert.equal(r.respuesta, "Tu cuota sería de unos 206.723.");
+    assert.equal(r.asuntos.length, 1);
+  });
+
+  it("un mensaje sin asuntos deja asuntos vacío", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "Hola, ¿en qué te ayudo?")]]);
+    const r = await conversar("Hola", {
+      ejecutarConsulta: fn,
+      core,
+      ...sinEspera,
+    });
+    assert.deepEqual(r.asuntos, []);
+    assert.equal(r.respuesta, "Hola, ¿en qué te ayudo?");
+  });
+
+  it("un intento fallido del modelo que se reintenta no deja sus observaciones", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("error_during_execution", null)];
+      },
+      [resultado("success", "end_turn", "Perdón, ¿me repites los datos?")],
+    ]);
+    const r = await conversar("¿Cuánto pagaría de cuota?", {
+      ejecutarConsulta: fn,
+      core: cliente,
+      ...sinEspera,
+    });
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado, a.motivo]),
+      [["cuota", "pendiente", "sin_atender"]],
+    );
+  });
+
+  it("deja un log asuntos_atendidos con dos o más asuntos, sin la cuota ni el texto del mensaje", async (t) => {
+    const logs = capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Listo.")];
+      },
+    ]);
+    const r = await conversar(MENSAJE_ENUNCIADO, {
+      ejecutarConsulta: fn,
+      core: cliente,
+      documentos: [CERTIFICADO_ADJUNTO],
+      ...sinClasificarDocumentos,
+      ...sinEspera,
+    });
+    const entradas = logs().filter((l) => l["evento"] === "asuntos_atendidos");
+    assert.equal(entradas.length, 1);
+    assert.equal(entradas[0]?.["correlationId"], r.correlationId);
+    assert.deepEqual(
+      (entradas[0]?.["asuntos"] as { asunto: string; estado: string }[]).map((a) => [
+        a.asunto,
+        a.estado,
+      ]),
+      [
+        ["solicitud", "pendiente"],
+        ["documentos", "pendiente"],
+        ["cuota", "resuelto"],
+      ],
+    );
+    const texto = JSON.stringify(entradas);
+    assert.equal(texto.includes("206"), false);
+    assert.equal(texto.includes("pedir un crédito"), false);
+  });
+
+  it("no deja el log asuntos_atendidos con un solo asunto", async (t) => {
+    const logs = capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "Dime el ingreso.")]]);
+    await conversar("¿Cuánto pagaría de cuota?", {
+      ejecutarConsulta: fn,
+      core: cliente,
+      ...sinEspera,
+    });
+    assert.equal(logs().filter((l) => l["evento"] === "asuntos_atendidos").length, 0);
+  });
+});
+describe("agente: una sola respuesta con el estado de cada asunto (#16, US2)", () => {
+  const lineasDe = (texto: string) => texto.split("\n");
+
+  it("la respuesta de un mensaje con los tres asuntos termina con el bloque de estado y trae la cuota y su aviso", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Calculé tu cuota. Necesito verificarte.")];
+      },
+    ]);
+    const r = await conversar(MENSAJE_ENUNCIADO, {
+      ejecutarConsulta: fn,
+      core: cliente,
+      documentos: [CERTIFICADO_ADJUNTO],
+      ...sinClasificarDocumentos,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    const lineas = lineasDe(r.respuesta);
+    assert.equal(lineas[0], "Calculé tu cuota. Necesito verificarte.");
+    const inicio = lineas.indexOf("Estado de tus asuntos:");
+    assert.ok(inicio > 0, r.respuesta);
+    assert.deepEqual(
+      lineas.slice(inicio + 1).map((l) => l.slice(0, l.indexOf(" —"))),
+      ["- Solicitud: pendiente", "- Documentos: pendiente", "- Cuota: resuelto"],
+    );
+    assert.ok(r.respuesta.includes("cuota mensual simulada de $206.723"), r.respuesta);
+    assert.ok(r.respuesta.includes("Simulación no vinculante"), r.respuesta);
+    assert.ok(
+      r.respuesta.includes(
+        "- Solicitud: pendiente — necesito verificar tu identidad para continuar.",
+      ),
+      r.respuesta,
+    );
+  });
+
+  it("una escalada con dos asuntos conserva el aviso y la referencia como cuerpo y suma la cuota ya calculada", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Esto lo descarta el escalamiento.")];
+      },
+    ]);
+    const r = await conversar(MENSAJE_ENUNCIADO, {
+      ejecutarConsulta: fn,
+      core: cliente,
+      documentos: [
+        {
+          adjunto: 1,
+          nombre: "certificado-dolares.md",
+          soportado: true,
+          contenido: CONTENIDO_CERTIFICADO_USD,
+        },
+      ],
+      ...sinClasificarDocumentos,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(r.respuesta.includes("Esto lo descarta el escalamiento."), false);
+    assert.ok(
+      r.respuesta.startsWith(
+        "Tu caso necesita la revisión de un analista de crédito. Referencia: ",
+      ),
+      r.respuesta,
+    );
+    assert.ok(r.respuesta.includes("Estado de tus asuntos:"), r.respuesta);
+    assert.ok(
+      r.respuesta.includes("- Documentos: escalado — un analista de crédito lo revisará."),
+      r.respuesta,
+    );
+    assert.ok(
+      r.respuesta.includes("- Cuota: resuelto — cuota mensual simulada de $206.723."),
+      r.respuesta,
+    );
+  });
+
+  it("un mensaje de un solo asunto devuelve exactamente el texto del modelo, sin bloque", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Tu cuota sería de unos 206.723.")];
+      },
+    ]);
+    const r = await conversar("¿Cuánto pagaría de cuota por 4 millones a 24 meses?", {
+      ejecutarConsulta: fn,
+      core: cliente,
+      ...sinEspera,
+    });
+    assert.equal(r.respuesta, "Tu cuota sería de unos 206.723.");
+  });
+
+  it("una escalada sin otros asuntos devuelve el aviso de siempre, sin bloque", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({
+          motivo: "caso_no_cubierto",
+          causa: "moneda_extranjera",
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar("Gano en dólares", {
+      ejecutarConsulta: fn,
+      core: cliente,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.respuesta.includes("Estado de tus asuntos:"), false);
+    assert.ok(r.respuesta.startsWith("Tu caso necesita la revisión de un analista de crédito."));
+  });
+
+  it("el tipo y la señal de escalamiento no cambian con el bloque de estado", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar(MENSAJE_ENUNCIADO, {
+      ejecutarConsulta: fn,
+      core: cliente,
+      documentos: [CERTIFICADO_ADJUNTO],
+      ...sinClasificarDocumentos,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.escalamiento, null);
+    assert.equal(r.handoff, null);
+    assert.equal(r.entrega, null);
+  });
+});
+describe("agente: un asunto pendiente o escalado no bloquea a los demás (#16, US3)", () => {
+  const DOCUMENTO_USD = {
+    adjunto: 1,
+    nombre: "certificado-dolares.md",
+    soportado: true as const,
+    contenido: CONTENIDO_CERTIFICADO_USD,
+  };
+
+  it("la petición de persona con una pregunta por la cuota escala sin modelo ni herramientas y deja la cuota pendiente para el analista", async (t) => {
+    capturarLogs(t);
+    const { cliente, llamadas } = coreMulti();
+    const { fn, llamadas: usosDelModelo } = consultaFalsa([
+      [resultado("success", "end_turn", "No debería llamarse.")],
+    ]);
+    const r = await conversar(
+      "Quiero hablar con una persona. Además, ¿cuánto pagaría de cuota por 4 millones a 24 meses?",
+      { ejecutarConsulta: fn, core: cliente, ...sinEspera },
+    );
+    assert.equal(usosDelModelo.length, 0, "no se llama al modelo");
+    assert.deepEqual(llamadas, ["escalar_a_analista"], "solo se entrega el resumen");
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado, a.motivo]),
+      [["cuota", "pendiente", "lo_revisara_el_analista"]],
+    );
+    assert.ok(r.respuesta.includes("Estado de tus asuntos:"), r.respuesta);
+    assert.ok(r.respuesta.includes("- Cuota: pendiente — lo revisará el analista."), r.respuesta);
+    assert.equal(r.respuesta.includes("cuota mensual simulada"), false);
+    assert.equal(r.entrega, "entregada");
+    assert.deepEqual(r.handoff?.asuntosPendientes, ["cuota"]);
+  });
+
+  it("la petición de persona sola devuelve la respuesta del #15, sin bloque y sin asuntos pendientes", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar(
+      "Hola, quiero 4 millones a 24 meses, pero prefiero hablar con una persona",
+      {
+        ejecutarConsulta: fn,
+        core: cliente,
+        ...sinEspera,
+      },
+    );
+    assert.equal(r.tipo, "escalada");
+    assert.deepEqual(r.asuntos, []);
+    assert.equal(r.respuesta.includes("Estado de tus asuntos:"), false);
+    assert.deepEqual(r.handoff?.asuntosPendientes, []);
+  });
+
+  it("tras escalar por la Regla 5 la cuota se resuelve y sale en la misma respuesta, con la causa de siempre", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({
+          motivo: "caso_no_cubierto",
+          causa: "moneda_extranjera",
+        });
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar(
+      "Quiero pedir un crédito de 4 millones a 24 meses. Gano 1.200 dólares al mes. ¿Cuánto pagaría de cuota?",
+      { ejecutarConsulta: fn, core: cliente, ...sinEspera },
+    );
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(r.handoff?.causa, "caso_no_cubierto");
+    assert.equal(r.handoff?.regla, REGLA_5);
+    assert.ok(
+      r.respuesta.includes("- Cuota: resuelto — cuota mensual simulada de $206.723."),
+      r.respuesta,
+    );
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado]),
+      [
+        ["solicitud", "pendiente"],
+        ["cuota", "resuelto"],
+      ],
+    );
+    assert.deepEqual(r.handoff?.asuntosPendientes, ["solicitud"]);
+  });
+
+  it("una cuota sin ingreso queda pendiente por falta de un dato y el agente no lo inventa", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar({
+          monto: 4_000_000,
+          plazoMeses: 24,
+        });
+        return [resultado("success", "end_turn", "¿Cuánto ganas al mes?")];
+      },
+    ]);
+    const r = await conversar(
+      "Quiero saber la cuota de 4 millones a 24 meses y también quiero iniciar mi solicitud",
+      { ejecutarConsulta: fn, core: cliente, ...sinEspera },
+    );
+    assert.equal(r.tipo, "respuesta");
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado, a.motivo]),
+      [
+        ["solicitud", "pendiente", "falta_identidad"],
+        ["cuota", "pendiente", "falta_dato"],
+      ],
+    );
+    assert.ok(r.respuesta.startsWith("¿Cuánto ganas al mes?"), r.respuesta);
+    assert.ok(
+      r.respuesta.includes("- Cuota: pendiente — falta un dato que debes aportar."),
+      r.respuesta,
+    );
+  });
+
+  it("al escalar, el resumen lleva los asuntos pendientes y no repite los escalados", async (t) => {
+    capturarLogs(t);
+    const { cliente } = coreMulti();
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar(
+      "Quiero pedir un crédito de 4 millones a 24 meses, te pego mi certificado. ¿Cuánto pagaría de cuota?",
+      {
+        ejecutarConsulta: fn,
+        core: cliente,
+        documentos: [DOCUMENTO_USD],
+        ...sinClasificarDocumentos,
+        ...sinEspera,
+      },
+    );
+    assert.equal(r.tipo, "escalada");
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado]),
+      [
+        ["solicitud", "pendiente"],
+        ["documentos", "escalado"],
+        ["cuota", "pendiente"],
+      ],
+    );
+    assert.deepEqual(r.handoff?.asuntosPendientes, ["solicitud", "cuota"]);
+  });
+
+  it("una falla técnica sigue negando la simulación", async (t) => {
+    capturarLogs(t);
+    const { cliente, llamadas } = coreMulti();
+    let niega: boolean | undefined;
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "falla_transitoria_persistente",
+          regla: "constitución, Principio VI · reintentos agotados",
+          herramienta: "consultar_solicitud",
+        });
+        const r = await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        niega = r.isError;
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    await conversar("¿Cuánto pagaría de cuota?", {
+      ejecutarConsulta: fn,
+      core: cliente,
+      ...sinEspera,
+    });
+    assert.equal(niega, true);
+    assert.equal(llamadas.includes("calcular_capacidad_pago"), false);
+  });
+});
+
+describe("agente: el mensaje de ejemplo del enunciado (#16, US4)", () => {
+  it("responde con la cuota que calcula la política y deja la solicitud y los documentos pendientes de identidad", async (t) => {
+    capturarLogs(t);
+    const { cliente, llamadas } = coreMulti();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.calcular_capacidad_pago.manejar(ENTRADA_CUOTA);
+        return [resultado("success", "end_turn", "Calculé tu cuota.")];
+      },
+    ]);
+    const r = await conversar(MENSAJE_ENUNCIADO, {
+      ejecutarConsulta: fn,
+      core: cliente,
+      documentos: [CERTIFICADO_ADJUNTO],
+      ...sinClasificarDocumentos,
+      ...sinEspera,
+    });
+    const cuota = calcularCuota(ENTRADA_CUOTA.monto, ENTRADA_CUOTA.plazoMeses);
+    const pesos = String(cuota).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+    assert.ok(r.respuesta.includes(`cuota mensual simulada de $${pesos}`), r.respuesta);
+    assert.ok(r.respuesta.includes("Simulación no vinculante"), r.respuesta);
+    assert.deepEqual(
+      r.asuntos.map((a) => [a.asunto, a.estado, a.motivo]),
+      [
+        ["solicitud", "pendiente", "falta_identidad"],
+        ["documentos", "pendiente", "falta_identidad"],
+        ["cuota", "resuelto", undefined],
+      ],
+    );
+    assert.equal(llamadas.includes("preaprobar_credito"), false);
+    assert.equal(llamadas.includes("registrar_solicitud"), false);
   });
 });

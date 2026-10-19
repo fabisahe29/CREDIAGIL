@@ -15,9 +15,13 @@ import {
   REGLA_NO_CUBIERTO,
   REGLA_NO_EXTRAIBLE,
   REGLA_5_DOCUMENTOS,
+  admiteTrasEscalar,
+  HERRAMIENTAS_QUE_SIGUEN_TRAS_ESCALAR,
+  MOTIVOS_QUE_LO_IMPIDEN,
   type InfoHerramienta,
   type SenalEscalamiento,
 } from "./adaptador.ts";
+import { MOTIVOS_ESCALAMIENTO } from "../politica/escalamiento.ts";
 import {
   crearClienteCore,
   type ClienteCore,
@@ -3538,5 +3542,248 @@ describe("adaptador: lo que el agente puede resolver no escala (#15, US4)", () =
     for (const literal of ["5.000.000", "5_000_000", "30 %", "30%", "10 %", "10%"]) {
       assert.equal(DESCRIPCION_SOLICITAR_ANALISTA.includes(literal), false, literal);
     }
+  });
+});
+describe("adaptador: observaciones de cada llamada al core (#16, R3)", () => {
+  beforeEach(() => fijarDestino({ write: () => true }));
+  afterEach(() => fijarDestino(null));
+
+  const entradaCuota = {
+    monto: 4_000_000,
+    plazoMeses: 24,
+    ingresoMensual: 3_500_000,
+  };
+
+  it("crearEstado empieza sin observaciones", () => {
+    assert.deepEqual(crearEstado(randomUUID()).observaciones, []);
+  });
+
+  it("calcular_capacidad_pago con éxito guarda la cuota y el aviso del core, sin las entradas", async () => {
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core: coreEnMemoria().cliente, estado });
+    await adaptador.herramientas.calcular_capacidad_pago.manejar(entradaCuota);
+    assert.equal(estado.observaciones.length, 1);
+    const [observacion] = estado.observaciones;
+    assert.equal(observacion?.herramienta, "calcular_capacidad_pago");
+    assert.equal(observacion?.ok, true);
+    assert.equal(observacion?.simulacion?.cuotaMensual, 206_723);
+    assert.ok((observacion?.simulacion?.aviso ?? "").length > 0);
+    assert.equal(JSON.stringify(observacion).includes("3500000"), false);
+  });
+
+  it("un error de validación guarda ok falso y el código, sin simulación", async () => {
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core: coreEnMemoria().cliente, estado });
+    await adaptador.herramientas.calcular_capacidad_pago.manejar({
+      monto: 4_000_000,
+      plazoMeses: 24,
+    });
+    assert.deepEqual(estado.observaciones, [
+      {
+        herramienta: "calcular_capacidad_pago",
+        ok: false,
+        codigoError: "ingreso_invalido",
+      },
+    ]);
+  });
+
+  it("registrar_extraccion con éxito guarda cuántos campos faltan y no guarda el contenido", async () => {
+    const completo = prepararExtraccion(
+      [doc(1, CONTENIDO_CERTIFICADO)],
+      [valida(salidaCertificado())],
+    );
+    await completo.extraer(1);
+    const registro = completo.estado.observaciones.find(
+      (o) => o.herramienta === "registrar_extraccion",
+    );
+    assert.equal(registro?.ok, true);
+    assert.equal(registro?.faltantes, 0);
+    assert.equal(
+      JSON.stringify(completo.estado.observaciones).includes("Certificado laboral"),
+      false,
+    );
+
+    const sinSalario = prepararExtraccion(
+      [doc(2, CONTENIDO_CERTIFICADO_SIN_SALARIO)],
+      [valida(salidaCertificadoSinSalario())],
+    );
+    await sinSalario.extraer(2);
+    const incompleto = sinSalario.estado.observaciones.find(
+      (o) => o.herramienta === "registrar_extraccion",
+    );
+    assert.ok((incompleto?.faltantes ?? 0) > 0, "debía haber campos faltantes");
+  });
+
+  it("registrar_solicitud con éxito guarda el identificador de la solicitud", async () => {
+    const core: ClienteCore = {
+      ...CORE_NO_SIMULADO,
+      async consultarSolicitud() {
+        return exito({ solicitud: null });
+      },
+      async registrarSolicitud() {
+        return exito({
+          solicitud: { idSolicitud: "SOL-0002000001", estado: "en_estudio" },
+          repetida: false,
+        }) as unknown as Awaited<ReturnType<ClienteCore["registrarSolicitud"]>>;
+      },
+      async cerrar() {},
+    };
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({
+      core,
+      estado,
+      mensajesSolicitante: ["Hola, quiero 4 millones a 24 meses, por favor"],
+    });
+    await adaptador.herramientas.registrar_solicitud.manejar({
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto: 4_000_000,
+      plazoMeses: 24,
+      origen: {
+        monto: { fragmento: "quiero 4 millones" },
+        plazoMeses: { fragmento: "a 24 meses" },
+      },
+    });
+    const registro = estado.observaciones.find((o) => o.herramienta === "registrar_solicitud");
+    assert.equal(registro?.ok, true);
+    assert.equal(registro?.idSolicitud, "SOL-0002000001");
+  });
+
+  it("una llamada negada por una señal vigente no agrega observación", async () => {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "pide_persona",
+      regla: "regla de prueba",
+      herramienta: "prueba",
+    });
+    const adaptador = crearAdaptador({ core: coreEnMemoria().cliente, estado });
+    await adaptador.herramientas.calcular_capacidad_pago.manejar(entradaCuota);
+    assert.deepEqual(estado.observaciones, []);
+  });
+});
+describe("adaptador: qué sigue tras una señal de escalamiento (#16, R5)", () => {
+  beforeEach(() => fijarDestino({ write: () => true }));
+  afterEach(() => fijarDestino(null));
+
+  const entradaCuota = {
+    monto: 4_000_000,
+    plazoMeses: 24,
+    ingresoMensual: 3_500_000,
+  };
+
+  const conSenal = (motivo: SenalEscalamiento["motivo"]) => {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo,
+      regla: "regla de prueba",
+      herramienta: "prueba",
+    });
+    return estado;
+  };
+
+  it("la simulación de cuota es la única herramienta que sigue tras escalar", () => {
+    assert.deepEqual([...HERRAMIENTAS_QUE_SIGUEN_TRAS_ESCALAR], ["calcular_capacidad_pago"]);
+  });
+
+  it("sin una señal vigente admiteTrasEscalar no aplica", () => {
+    assert.equal(admiteTrasEscalar("calcular_capacidad_pago", crearEstado(randomUUID())), false);
+  });
+
+  for (const motivo of MOTIVOS_ESCALAMIENTO) {
+    const impedido = MOTIVOS_QUE_LO_IMPIDEN.some((m) => m === motivo);
+    it(`tras ${motivo} la simulación ${impedido ? "se niega" : "se admite"}`, () => {
+      assert.equal(admiteTrasEscalar("calcular_capacidad_pago", conSenal(motivo)), !impedido);
+    });
+  }
+
+  it("la petición de persona y las fallas técnicas impiden seguir", () => {
+    for (const motivo of ["pide_persona", "falla_transitoria_persistente"] as const) {
+      assert.ok(MOTIVOS_QUE_LO_IMPIDEN.includes(motivo), motivo);
+    }
+  });
+
+  it("ninguna otra herramienta sigue tras una señal, salvo el registro bajo la Regla 3", () => {
+    const otras = [
+      "buscar_solicitante",
+      "verificar_identidad",
+      "consultar_solicitud",
+      "extraer_documento",
+      "verificar_ingreso",
+      "consultar_extracciones",
+      "registrar_solicitud",
+      "preaprobar_credito",
+      "solicitar_analista",
+    ];
+    for (const motivo of MOTIVOS_ESCALAMIENTO) {
+      for (const herramienta of otras) {
+        const esperado =
+          herramienta === "registrar_solicitud" &&
+          MOTIVOS_QUE_ADMITEN_REGISTRO.some((m) => m === motivo);
+        assert.equal(
+          admiteTrasEscalar(herramienta, conSenal(motivo)),
+          esperado,
+          `${herramienta} tras ${motivo}`,
+        );
+      }
+    }
+  });
+
+  it("tras una señal de la Regla 5 la simulación llega al core y devuelve la cuota", async () => {
+    const estado = conSenal("caso_no_cubierto");
+    const adaptador = crearAdaptador({ core: coreEnMemoria().cliente, estado });
+    const resultado = await adaptador.herramientas.calcular_capacidad_pago.manejar(entradaCuota);
+    const contenido = resultado.structuredContent as {
+      ok: boolean;
+      datos: { simulacion: { cuotaMensual: number } };
+    };
+    assert.equal(contenido.ok, true);
+    assert.equal(contenido.datos.simulacion.cuotaMensual, 206_723);
+    assert.equal(estado.observaciones.at(-1)?.simulacion?.cuotaMensual, 206_723);
+  });
+
+  it("la simulación tras escalar no deja una señal nueva, ni eventos, ni cambia la causa", async () => {
+    const estado = conSenal("discrepancia_de_ingreso");
+    const antes = estado.escalamiento;
+    const adaptador = crearAdaptador({ core: coreEnMemoria().cliente, estado });
+    await adaptador.herramientas.calcular_capacidad_pago.manejar(entradaCuota);
+    assert.equal(estado.escalamiento, antes);
+    assert.equal(estado.escalamiento?.motivo, "discrepancia_de_ingreso");
+    assert.deepEqual(estado.senales, [{ motivo: "discrepancia_de_ingreso" }]);
+    assert.deepEqual(estado.eventos, []);
+  });
+
+  it("tras la petición de persona la simulación se niega sin llamar al core", async () => {
+    const estado = conSenal("pide_persona");
+    let llamadas = 0;
+    const base = coreEnMemoria().cliente;
+    const core: ClienteCore = {
+      ...base,
+      async calcularCapacidadPago(...args) {
+        llamadas++;
+        return base.calcularCapacidadPago(...args);
+      },
+    };
+    const adaptador = crearAdaptador({ core, estado });
+    const resultado = await adaptador.herramientas.calcular_capacidad_pago.manejar(entradaCuota);
+    assert.equal(resultado.isError, true);
+    assert.equal(llamadas, 0);
+  });
+
+  it("tras escalar, cualquier otra herramienta se niega sin llamar al core", async () => {
+    const estado = conSenal("caso_no_cubierto");
+    let llamadas = 0;
+    const base = coreEnMemoria().cliente;
+    const core: ClienteCore = {
+      ...base,
+      async buscarSolicitante(...args) {
+        llamadas++;
+        return base.buscarSolicitante(...args);
+      },
+    };
+    const adaptador = crearAdaptador({ core, estado });
+    const resultado = await adaptador.herramientas.buscar_solicitante.manejar({
+      documento: "0001234567",
+    });
+    assert.equal(resultado.isError, true);
+    assert.equal(llamadas, 0);
   });
 });

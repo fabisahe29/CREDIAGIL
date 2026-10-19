@@ -67,6 +67,7 @@ import {
   type MotivoEscalamiento,
 } from "../politica/escalamiento.ts";
 import type { VerificacionIngreso } from "../compartido/ingreso.ts";
+import type { ObservacionLlamada } from "../politica/asuntos.ts";
 
 export const CLAVE_SERVIDOR = "originacion";
 
@@ -146,6 +147,8 @@ export interface EstadoConversacion {
   senales: SenalObservada[];
   /** Monto y plazo que citó el modelo en `solicitar_analista` y pasaron la comprobación (#15, R4). */
   declarado: DeclaradoConversacion;
+  /** Qué pasó con cada llamada al core del turno, para deducir el estado de cada asunto (#16, R3). */
+  observaciones: ObservacionLlamada[];
 }
 
 export const crearEstado = (correlationId: string): EstadoConversacion => ({
@@ -158,7 +161,57 @@ export const crearEstado = (correlationId: string): EstadoConversacion => ({
   coincidenciasAmbiguas: 0,
   senales: [],
   declarado: {},
+  observaciones: [],
 });
+
+const esObjeto = (valor: unknown): valor is Record<string, unknown> =>
+  typeof valor === "object" && valor !== null;
+
+type DetalleDeObservacion = Partial<ObservacionLlamada>;
+
+function detalleDeSimulacion(datos: Record<string, unknown>): DetalleDeObservacion {
+  const simulacion = datos["simulacion"];
+  if (!esObjeto(simulacion)) return {};
+  const { cuotaMensual, aviso } = simulacion;
+  return typeof cuotaMensual === "number" && typeof aviso === "string"
+    ? { simulacion: { cuotaMensual, aviso } }
+    : {};
+}
+
+function detalleDeExtraccion(datos: Record<string, unknown>): DetalleDeObservacion {
+  const extraccion = datos["extraccion"];
+  if (!esObjeto(extraccion)) return {};
+  const { estado, faltantes, huella: claveDocumento } = extraccion;
+  return {
+    faltantes: estado === "extraido" && Array.isArray(faltantes) ? faltantes.length : 0,
+    ...(typeof claveDocumento === "string" ? { huella: claveDocumento } : {}),
+  };
+}
+
+function detalleDeRegistro(datos: Record<string, unknown>): DetalleDeObservacion {
+  const solicitud = datos["solicitud"];
+  if (!esObjeto(solicitud)) return {};
+  return typeof solicitud["idSolicitud"] === "string"
+    ? { idSolicitud: solicitud["idSolicitud"] }
+    : {};
+}
+
+const DETALLE_POR_LLAMADA: Readonly<
+  Record<string, (datos: Record<string, unknown>) => DetalleDeObservacion>
+> = {
+  calcular_capacidad_pago: detalleDeSimulacion,
+  registrar_extraccion: detalleDeExtraccion,
+  registrar_solicitud: detalleDeRegistro,
+};
+
+/**
+ * Lo que una llamada que salió bien aporta al estado de los asuntos: la cuota simulada, los campos que
+ * faltan en un documento y el identificador de la solicitud registrada. Nunca guarda entradas, citas ni
+ * el contenido de un documento (#16, R3); lo que no reconoce no aporta nada.
+ */
+function detalleDeObservacion(herramienta: string, datos: unknown): DetalleDeObservacion {
+  return esObjeto(datos) ? (DETALLE_POR_LLAMADA[herramienta]?.(datos) ?? {}) : {};
+}
 
 /**
  * Al cerrar el turno se decide el escalamiento por identidad ambigua (FR-006): escala si la
@@ -466,6 +519,39 @@ export const admiteRegistro = (herramienta: string, estado: EstadoConversacion):
   estado.escalamiento !== null &&
   MOTIVOS_QUE_ADMITEN_REGISTRO.includes(estado.escalamiento.motivo);
 
+/**
+ * Herramientas que siguen disponibles aunque ya haya una señal de escalamiento (#16, R5). La simulación
+ * de cuota es de solo lectura: no decide, no registra y no cambia la causa del caso, así que un asunto
+ * escalado no deja sin respuesta a otro que no depende de él.
+ */
+export const HERRAMIENTAS_QUE_SIGUEN_TRAS_ESCALAR: readonly string[] = ["calcular_capacidad_pago"];
+
+/**
+ * Señales que sí lo impiden: la petición de una persona (Regla 4, sin investigar ni calcular nada antes) y
+ * las fallas técnicas, porque con el core o el agente fallando no hay un resultado que dar.
+ */
+export const MOTIVOS_QUE_LO_IMPIDEN: readonly SenalEscalamiento["motivo"][] = [
+  "pide_persona",
+  "falla_transitoria_persistente",
+  "falla_del_agente",
+  "limite_de_turnos",
+  "respuesta_incompleta",
+];
+
+/**
+ * Si la herramienta puede ejecutarse con una señal vigente: el registro bajo la Regla 3 (#13, R5) o la
+ * simulación de cuota salvo con la Regla 4 o una falla técnica (#16, R5). Sin señal no aplica. Es la única
+ * definición: la usan `llamarConReintentos` y el hook de identidad, para que no puedan discrepar.
+ */
+export function admiteTrasEscalar(herramienta: string, estado: EstadoConversacion): boolean {
+  if (estado.escalamiento === null) return false;
+  if (admiteRegistro(herramienta, estado)) return true;
+  return (
+    HERRAMIENTAS_QUE_SIGUEN_TRAS_ESCALAR.includes(herramienta) &&
+    !MOTIVOS_QUE_LO_IMPIDEN.includes(estado.escalamiento.motivo)
+  );
+}
+
 /** Orden de evaluación obligatorio (constitución, Principio I). */
 const ORDEN_EVALUACION = [4, 5, 1, 3, 2];
 
@@ -559,7 +645,8 @@ export function crearAdaptador({
   ): Promise<Respuesta<T>> {
     // Con la conversación ya escalada, insistir solo gasta esperas: el resultado final es la escalada.
     // Una señal de la Regla 3 no impide registrar la solicitud para el analista (#13, R5).
-    if (estado.escalamiento !== null && !admiteRegistro(herramienta, estado)) {
+    // La simulación de cuota también sigue, salvo con la Regla 4 o una falla técnica (#16, R5).
+    if (estado.escalamiento !== null && !admiteTrasEscalar(herramienta, estado)) {
       return fallo(transitorioAgotado());
     }
     const resultado = await conReintentos(operacion, {
@@ -593,6 +680,12 @@ export function crearAdaptador({
         ultimoError: resultado.ultimoError ?? "desconocido",
       });
     }
+    // El resultado final de la llamada, para el estado de cada asunto del mensaje (#16, R3).
+    estado.observaciones.push(
+      resultado.respuesta.ok
+        ? { herramienta, ok: true, ...detalleDeObservacion(herramienta, resultado.respuesta.datos) }
+        : { herramienta, ok: false, codigoError: resultado.respuesta.error.codigo },
+    );
     return resultado.respuesta;
   }
 

@@ -68,6 +68,7 @@ const resultado = (
   eventos: [],
   busquedasAmbiguas: 0,
   desambiguada: false,
+  asuntos: [],
   ...extra,
 });
 

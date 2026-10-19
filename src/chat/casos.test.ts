@@ -398,3 +398,121 @@ describe("casos: escalamiento (#15)", () => {
     assert.equal(detectarPeticionPersona(CASOS["escalamiento-moneda-extranjera"]!.mensaje), false);
   });
 });
+describe("casos: mensajes con varios asuntos (#16)", () => {
+  /** El mensaje de ejemplo del enunciado, literal (specs/014, historia 4). */
+  const MENSAJE_ENUNCIADO =
+    "Hola, quiero pedir un crédito de $4.000.000 a 24 meses. Te pego mi certificado laboral y mis extractos de los últimos tres meses. Gano más o menos $3.500.000 al mes. ¿En cuánto me quedaría la cuota?";
+  const MENSAJE_CON_PERSONA =
+    "Quiero hablar con una persona. Además, ¿cuánto pagaría de cuota por 4 millones a 24 meses?";
+  const MENSAJE_ESCALADO =
+    "Quiero pedir un crédito de 4 millones a 24 meses. Mi sueldo me lo pagan en dólares, pero igual dime en cuánto me quedaría la cuota si cuento con 5 millones de pesos al mes.";
+
+  const NOMBRES = [
+    "mensaje-varios-asuntos",
+    "mensaje-varios-asuntos-con-persona",
+    "mensaje-varios-asuntos-escalado",
+  ];
+
+  for (const nombre of NOMBRES) {
+    it(`el caso versionado casos/${nombre} carga sin errores`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.equal(r.ok, true, r.ok ? "" : r.problema);
+    });
+
+    it(`los archivos de casos/${nombre} cumplen la convención de datos ficticios`, () => {
+      const carpeta = resolve("casos", nombre);
+      for (const archivo of readdirSync(carpeta)) {
+        const texto = readFileSync(join(carpeta, archivo), "utf8");
+        const bloqueos = datosReales({
+          herramienta: "Write",
+          rutas: [`casos/${nombre}/${archivo}`],
+          textos: [{ origen: `casos/${nombre}/${archivo}`, texto }],
+        });
+        assert.deepEqual(
+          bloqueos.map((b) => b.detectado),
+          [],
+          archivo,
+        );
+      }
+    });
+  }
+
+  it("el caso del enunciado adjunta el certificado y los tres extractos y luego envía el mensaje literal", async () => {
+    const carpeta = resolve("casos", "mensaje-varios-asuntos");
+    const r = await cargarCaso(carpeta, process.cwd());
+    assert.ok(r.ok);
+    if (!r.ok) return;
+    assert.deepEqual(r.caso.pasos, [
+      {
+        adjuntar: "certificado-completo.md",
+        ruta: join(carpeta, "certificado-completo.md"),
+      },
+      {
+        adjuntar: "extracto-2026-07.md",
+        ruta: join(carpeta, "extracto-2026-07.md"),
+      },
+      {
+        adjuntar: "extracto-2026-08.md",
+        ruta: join(carpeta, "extracto-2026-08.md"),
+      },
+      {
+        adjuntar: "extracto-2026-09.md",
+        ruta: join(carpeta, "extracto-2026-09.md"),
+      },
+      { mensaje: MENSAJE_ENUNCIADO },
+    ]);
+  });
+
+  it("los documentos del caso del enunciado son idénticos a los del #10", () => {
+    const origenes: Record<string, string> = {
+      "certificado-completo.md": "extraccion-certificado",
+      "extracto-2026-07.md": "extraccion-extractos",
+      "extracto-2026-08.md": "extraccion-extractos",
+      "extracto-2026-09.md": "extraccion-extractos",
+    };
+    for (const [archivo, origen] of Object.entries(origenes)) {
+      assert.equal(
+        readFileSync(resolve("casos", "mensaje-varios-asuntos", archivo), "utf8"),
+        readFileSync(resolve("casos", origen, archivo), "utf8"),
+        archivo,
+      );
+    }
+  });
+
+  it("el mensaje del enunciado plantea los tres asuntos y no pide una persona", async () => {
+    const { detectarAsuntos } = await import("../politica/asuntos.ts");
+    const { detectarPeticionPersona } = await import("../politica/escalamiento.ts");
+    assert.deepEqual(detectarAsuntos(MENSAJE_ENUNCIADO, true), [
+      "solicitud",
+      "documentos",
+      "cuota",
+    ]);
+    assert.equal(detectarPeticionPersona(MENSAJE_ENUNCIADO), false);
+  });
+
+  it("el caso con persona es un solo mensaje que la Regla 4 detecta y que además pregunta por la cuota", async () => {
+    const r = await cargarCaso(
+      resolve("casos", "mensaje-varios-asuntos-con-persona"),
+      process.cwd(),
+    );
+    assert.ok(r.ok);
+    if (!r.ok) return;
+    assert.deepEqual(r.caso.pasos, [{ mensaje: MENSAJE_CON_PERSONA }]);
+    assert.match(r.caso.descripcion, /Regla 4/);
+    const { detectarAsuntos } = await import("../politica/asuntos.ts");
+    const { detectarPeticionPersona } = await import("../politica/escalamiento.ts");
+    assert.equal(detectarPeticionPersona(MENSAJE_CON_PERSONA), true);
+    assert.deepEqual(detectarAsuntos(MENSAJE_CON_PERSONA, false), ["cuota"]);
+  });
+
+  it("el caso escalado es un solo mensaje con el sueldo en dólares y la pregunta por la cuota en pesos", async () => {
+    const r = await cargarCaso(resolve("casos", "mensaje-varios-asuntos-escalado"), process.cwd());
+    assert.ok(r.ok);
+    if (!r.ok) return;
+    assert.deepEqual(r.caso.pasos, [{ mensaje: MENSAJE_ESCALADO }]);
+    const { detectarAsuntos } = await import("../politica/asuntos.ts");
+    const { detectarPeticionPersona } = await import("../politica/escalamiento.ts");
+    assert.deepEqual(detectarAsuntos(MENSAJE_ESCALADO, false), ["solicitud", "cuota"]);
+    assert.equal(detectarPeticionPersona(MENSAJE_ESCALADO), false);
+  });
+});
