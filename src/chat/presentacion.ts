@@ -4,6 +4,7 @@
 import { styleText } from "node:util";
 import type { InfoHerramienta } from "../agente/adaptador.ts";
 import type { EventoNegocio } from "../compartido/eventos.ts";
+import type { ResumenAnalista } from "../compartido/escalamiento.ts";
 import type { EstadoSolicitud, EventoMostrado } from "./sesion.ts";
 
 type Formato = Parameters<typeof styleText>[0];
@@ -116,3 +117,67 @@ export function formatearHerramienta(info: InfoHerramienta, color: boolean): str
     color,
   );
 }
+// ── Resumen para el analista, solo en el modo de demostración (#15, R10) ───────────────────
+
+const pesos = (valor: number | null): string =>
+  valor === null ? "pendiente" : miles.format(valor);
+
+function describirDiscrepancia(discrepancia: ResumenAnalista["discrepancias"][number]): string {
+  if (discrepancia.tipo === "ingreso") {
+    return `ingreso declarado ${miles.format(discrepancia.declarado)} contra verificado ${miles.format(discrepancia.verificado)} (${String(discrepancia.diferenciaPorcentaje).replace(".", ",")} %)`;
+  }
+  const { adjuntos } = discrepancia;
+  const donde =
+    adjuntos.length === 0
+      ? "sin adjuntos"
+      : adjuntos.length === 1
+        ? `en el adjunto ${adjuntos[0]}`
+        : `en los adjuntos ${adjuntos.join(", ")}`;
+  return `${discrepancia.regla} ${donde}`;
+}
+
+/**
+ * El resumen que recibe el analista, en texto fijo (sin depender del color). Muestra lo que el core
+ * guardó, nunca el texto de los archivos ni los fragmentos de procedencia. Solo se imprime con `--demo`:
+ * es para el analista, no para el solicitante.
+ */
+export function formatearHandoff(handoff: ResumenAnalista, color: boolean): string {
+  const { solicitante, solicitud, causasAdicionales, discrepancias, datosExtraidos } = handoff;
+  const codigo = handoff.codigo === undefined ? "" : ` (${handoff.codigo})`;
+  const documentos =
+    datosExtraidos.length === 0
+      ? "ninguno"
+      : `${datosExtraidos.length} ${datosExtraidos.length === 1 ? "documento" : "documentos"}`;
+  const lineas = [
+    pintar("bold", `══ Resumen para el analista · ${handoff.idEscalamiento} ══`, color),
+    `Causa: ${handoff.causa} · Motivo: ${handoff.motivo}${codigo} · Regla: ${handoff.regla}`,
+    `Acción recomendada: ${handoff.accionRecomendada}`,
+    ...(causasAdicionales.length > 0
+      ? [
+          `Causas adicionales: ${causasAdicionales
+            .map((c) => `${c.causa} (${c.motivo}${c.codigo === undefined ? "" : ` · ${c.codigo}`})`)
+            .join(", ")}`,
+        ]
+      : []),
+    solicitante.identificado
+      ? `Solicitante: ${solicitante.nombre} · documento ${solicitante.documentoEnmascarado}`
+      : "Solicitante: sin identificar",
+    `Solicitud: ${solicitud === null ? "sin registrar" : `${solicitud.idSolicitud} (${solicitud.estado})`} · ${
+      handoff.monto === null ? "monto pendiente" : `monto ${pesos(handoff.monto.valor)}`
+    } · ${handoff.plazoMeses === null ? "plazo pendiente" : `plazo ${handoff.plazoMeses.valor} meses`}`,
+    `Ingreso: declarado ${pesos(handoff.ingresoDeclarado?.valor ?? null)} · verificado ${pesos(
+      handoff.verificacionIngreso?.ingresoVerificado?.monto ?? null,
+    )}`,
+    `Discrepancias: ${discrepancias.length === 0 ? "ninguna" : discrepancias.map(describirDiscrepancia).join("; ")}`,
+    `Datos extraídos: ${documentos}`,
+    ...(handoff.decision === null
+      ? []
+      : [`Decisión: ${handoff.decision.motivo} · ${formatearValores(handoff.decision.valores)}`]),
+    `Pendientes: ${handoff.pendientes.length === 0 ? "ninguno" : handoff.pendientes.join(", ")}`,
+  ];
+  return lineas.join("\n");
+}
+
+/** Cuando el resumen no llegó al analista, en lugar del resumen (#15, R7). */
+export const formatearEntregaPendiente = (color: boolean): string =>
+  pintar(["bold", "yellow"], "Entrega al analista: pendiente", color);

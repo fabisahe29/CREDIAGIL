@@ -4,7 +4,7 @@
 // de monto y cuota con el #14.
 
 /** Versión de la política; acompaña cada decisión para poder auditarla. */
-export const VERSION_POLITICA = "2026-10-18.3";
+export const VERSION_POLITICA = "2026-10-18.4";
 
 /**
  * Tasa de interés fija ficticia, en puntos base: 180 es el 1,8% mensual (constitución, Principio I;

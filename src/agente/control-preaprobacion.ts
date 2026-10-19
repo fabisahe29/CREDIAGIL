@@ -167,7 +167,7 @@ export function crearControlPreaprobacion({
       motivo: codigo,
       regla: REGLA_2,
       valores: decision.valores,
-      siguientePaso: "Tu caso pasa a un analista, que te contactará.",
+      siguientePaso: "Un analista de crédito revisará tu caso.",
     });
     registrar("control_preaprobacion", {
       correlationId: estado.correlationId,

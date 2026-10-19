@@ -1,9 +1,31 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { conversar, MODELO_POR_DEFECTO, type ContextoConsulta, type QueryFn } from "./agente.ts";
-import { errorNegocio, errorTransitorio, exito, fallo } from "../compartido/errores.ts";
+import {
+  errorNegocio,
+  errorTransitorio,
+  errorValidacion,
+  exito,
+  fallo,
+  type Respuesta,
+} from "../compartido/errores.ts";
+import {
+  claveIdempotenciaEscalamiento,
+  esquemaResumenAnalista,
+  type ResultadoEscalamiento,
+} from "../compartido/escalamiento.ts";
+import {
+  MOTIVOS_ESCALAMIENTO,
+  REGLA_4,
+  reglaDeEscalamiento,
+  type MotivoEscalamiento,
+} from "../politica/escalamiento.ts";
+import { validarEvento } from "../compartido/eventos.ts";
+import { CONTENIDO_CERTIFICADO_USD, HOY_EJEMPLO } from "../compartido/extraccion-ejemplos.ts";
 import type { ClienteCore } from "./cliente-core.ts";
-import { dejarSenal, emitirEvento, REGLA_NO_EXTRAIBLE } from "./adaptador.ts";
+import { dejarSenal, emitirEvento, REGLA_NO_EXTRAIBLE, REGLA_NO_VERIFICABLE } from "./adaptador.ts";
+import { REGLA_5 } from "../politica/documentos.ts";
+import { crearCore } from "../mcp/core-simulado.ts";
 import { REGLA_3 } from "../politica/ingreso.ts";
 import { REGLA_2 } from "../politica/preaprobacion.ts";
 import { CORE_NO_SIMULADO } from "./core-no-simulado.ts";
@@ -461,8 +483,11 @@ describe("agente: eventos de negocio en el resultado (chat, US2)", () => {
       assert.equal(evento.regla, r.escalamiento?.regla);
       assert.ok(r.respuesta.startsWith(evento.descripcion));
       assert.equal(JSON.stringify(evento).includes("ultimoError"), false);
-      if (motivo === "falla_del_agente") assert.deepEqual(evento.valores, { intentos: 2 });
-      else assert.equal(evento.valores, undefined);
+      const comunes = { causaEscalamiento: "caso_no_cubierto", entrega: "pendiente" };
+      assert.deepEqual(
+        evento.valores,
+        motivo === "falla_del_agente" ? { intentos: 2, ...comunes } : comunes,
+      );
       const registrados = logs().filter((l) => l["evento"] === "evento_negocio");
       assert.equal(registrados.length, 1);
       assert.equal(registrados[0]!["tipo"], "escalamiento");
@@ -489,7 +514,12 @@ describe("agente: eventos de negocio en el resultado (chat, US2)", () => {
     const r = await conversar("¿Estado?", { ejecutarConsulta: fn, core: coreCaido, ...sinEspera });
     assert.equal(r.eventos.length, 1);
     assert.equal(r.eventos[0]!.motivo, "falla_transitoria_persistente");
-    assert.deepEqual(r.eventos[0]!.valores, { herramienta: "consultar_solicitud", intentos: 3 });
+    assert.deepEqual(r.eventos[0]!.valores, {
+      herramienta: "consultar_solicitud",
+      intentos: 3,
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "pendiente",
+    });
   });
 
   it("descarta los eventos del intento fallido cuando el modelo se reintenta", async (t) => {
@@ -718,13 +748,18 @@ describe("agente: desambiguación de homónimos (#9, US2)", () => {
     assert.equal(r.busquedasAmbiguas, 2);
     assert.match(
       r.respuesta,
-      /^No pude identificarte con certeza\. Tu caso pasa a un analista, que te contactará\./,
+      /^No pude identificarte con certeza\. Un analista de crédito revisará tu caso\./,
     );
     assert.equal(r.escalamiento?.motivo, "identidad_ambigua");
     const escalamiento = r.eventos.find((e) => e.tipo === "escalamiento");
     assert.ok(escalamiento, "falta el evento de escalamiento");
     assert.equal(escalamiento.regla, "Regla 1 · coincidencias sin desambiguar");
-    assert.deepEqual(escalamiento.valores, { herramienta: "buscar_solicitante", coincidencias: 2 });
+    assert.deepEqual(escalamiento.valores, {
+      herramienta: "buscar_solicitante",
+      coincidencias: 2,
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "pendiente",
+    });
   });
 
   it("un intento del modelo que falla y se reintenta no suma búsquedas ambiguas", async (t) => {
@@ -805,12 +840,16 @@ describe("agente: identidad no verificable (#9, US3)", () => {
     assert.equal(r.tipo, "escalada");
     assert.match(
       r.respuesta,
-      /^No pude verificar tu identidad\. Tu caso pasa a un analista, que te contactará\./,
+      /^No pude verificar tu identidad\. Un analista de crédito revisará tu caso\./,
     );
     assert.equal(r.escalamiento?.motivo, "identidad_no_verificable");
     const escalamiento = r.eventos.find((e) => e.tipo === "escalamiento");
     assert.equal(escalamiento?.regla, "Regla 1 · 3 intentos fallidos de verificación");
-    assert.deepEqual(escalamiento?.valores, { herramienta: "verificar_identidad" });
+    assert.deepEqual(escalamiento?.valores, {
+      herramienta: "verificar_identidad",
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "pendiente",
+    });
     assert.equal(JSON.stringify(r).includes("2001-01-03"), false);
   });
 
@@ -944,7 +983,12 @@ describe("agente: extracción de documentos (#10)", () => {
     const escalamiento = r.eventos.at(-1);
     assert.equal(escalamiento?.tipo, "escalamiento");
     assert.equal(escalamiento?.regla, REGLA_NO_EXTRAIBLE);
-    assert.deepEqual(escalamiento?.valores, { herramienta: "extraer_documento", adjunto: 2 });
+    assert.deepEqual(escalamiento?.valores, {
+      herramienta: "extraer_documento",
+      adjunto: 2,
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "pendiente",
+    });
   });
 });
 
@@ -1080,17 +1124,22 @@ describe("agente: escalamiento real de las reglas 4 y 5 (#9, revisión de cumpli
         return [resultado("success", "end_turn", "Te comunico con un analista.")];
       },
     ]);
-    const r = await conversar("Quiero hablar con una persona", {
+    // Una paráfrasis que la detección por código no reconoce: la clasifica el modelo (#15, R5).
+    const r = await conversar("¿Alguien puede revisar esto conmigo?", {
       ejecutarConsulta: fn,
       core,
       ...sinEspera,
     });
     assert.equal(r.tipo, "escalada");
-    assert.match(r.respuesta, /^Te comunico con un analista de crédito, que te contactará\./);
+    assert.match(r.respuesta, /^Un analista de crédito revisará tu caso\./);
     assert.equal(r.escalamiento?.motivo, "pide_persona");
     const evento = r.eventos.find((e) => e.tipo === "escalamiento");
     assert.equal(evento?.regla, "Regla 4 · el solicitante pide hablar con una persona");
-    assert.deepEqual(evento?.valores, { herramienta: "solicitar_analista" });
+    assert.deepEqual(evento?.valores, {
+      herramienta: "solicitar_analista",
+      causaEscalamiento: "peticion_de_persona",
+      entrega: "pendiente",
+    });
     assert.ok(logs().some((l) => l["evento"] === "escalamiento" && l["motivo"] === "pide_persona"));
   });
 
@@ -1107,12 +1156,14 @@ describe("agente: escalamiento real de las reglas 4 y 5 (#9, revisión de cumpli
     ]);
     const r = await conversar("Gano en dólares", { ejecutarConsulta: fn, core, ...sinEspera });
     assert.equal(r.tipo, "escalada");
-    assert.match(r.respuesta, /^Tu caso necesita la revisión de un analista, que te contactará\./);
+    assert.match(r.respuesta, /^Tu caso necesita la revisión de un analista de crédito\./);
     const evento = r.eventos.find((e) => e.tipo === "escalamiento");
     assert.equal(evento?.regla, "Regla 5 · caso no cubierto por la política");
     assert.deepEqual(evento?.valores, {
       herramienta: "solicitar_analista",
       causa: "moneda_extranjera",
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "pendiente",
     });
   });
 });
@@ -1354,7 +1405,7 @@ describe("agente: ingreso verificado (#11)", () => {
     assert.equal(r.tipo, "escalada");
     assert.match(
       r.respuesta,
-      /^Los ingresos de tus documentos no coinciden con lo que declaraste\. Tu caso pasa a un analista, que te contactará\./,
+      /^Los ingresos de tus documentos no coinciden con lo que declaraste\. Un analista de crédito revisará tu caso\./,
     );
     const escalamiento = r.eventos.at(-1);
     assert.equal(escalamiento?.tipo, "escalamiento");
@@ -1364,6 +1415,8 @@ describe("agente: ingreso verificado (#11)", () => {
       ingresoDeclarado: 4_300_000,
       ingresoVerificado: 3_800_000,
       umbralPorcentaje: 10,
+      causaEscalamiento: "discrepancia_de_ingreso",
+      entrega: "pendiente",
     });
   });
 
@@ -1388,6 +1441,8 @@ describe("agente: ingreso verificado (#11)", () => {
     assert.deepEqual(escalamiento?.valores, {
       herramienta: "extraer_documento",
       reglas: "titular_vs_solicitante, empleador_vs_pagador",
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "pendiente",
     });
   });
 });
@@ -1591,7 +1646,7 @@ describe("agente: preaprobación (#14, US1, US2 y US3)", () => {
     assert.equal(r.tipo, "escalada");
     assert.match(
       r.respuesta,
-      /^Tu solicitud no cumple las condiciones para una preaprobación automática\. Pasa a un analista, que te contactará\./,
+      /^Tu solicitud no cumple las condiciones para una preaprobación automática\. Un analista de crédito revisará tu caso\./,
     );
     assert.equal(r.escalamiento?.motivo, "preaprobacion_fuera_de_politica");
     assert.equal(r.escalamiento?.codigo, "monto_sobre_tope");
@@ -1650,5 +1705,1058 @@ describe("agente: preaprobación (#14, US1, US2 y US3)", () => {
     });
     assert.equal(r.escalamiento?.motivo, "caso_no_cubierto");
     assert.equal(r.escalamiento?.causa, "moneda_extranjera");
+  });
+});
+// ── Entrega del resumen al analista (#15, US1) ─────────────────────────────────────────────
+
+const CORRELACION_HANDOFF = "6f1c2e4a-8d3b-4a57-9c10-2b7e5a9d4f31";
+
+/** Un resumen válido, como lo devolvería el core, con los cambios dados. */
+const resumenFalso = (cambios: Record<string, unknown> = {}) =>
+  esquemaResumenAnalista.parse({
+    idEscalamiento: "ESC-0003000001",
+    correlationId: CORRELACION_HANDOFF,
+    claveIdempotencia: claveIdempotenciaEscalamiento(CORRELACION_HANDOFF),
+    escaladoEn: "2026-10-18T12:00:00.000Z",
+    versionPolitica: "2026-10-18.4",
+    causa: "peticion_de_persona",
+    motivo: "pide_persona",
+    regla: REGLA_4,
+    accionRecomendada: "contactar_al_solicitante",
+    causasAdicionales: [],
+    solicitante: { identificado: false },
+    solicitud: null,
+    monto: null,
+    plazoMeses: null,
+    ingresoDeclarado: null,
+    verificacionIngreso: null,
+    discrepancias: [],
+    datosExtraidos: [],
+    decision: null,
+    pendientes: ["identidad", "monto", "plazo", "ingreso_verificado", "documentos"],
+    ...cambios,
+  });
+
+type RespuestaEscalamiento = Respuesta<ResultadoEscalamiento>;
+
+/** Core falso: cada llamada a `escalarAAnalista` devuelve la respuesta dada, en orden, o lanza el error. */
+function coreEscalable(respuestas: (RespuestaEscalamiento | Error)[]) {
+  const llamadas: {
+    entrada: Record<string, unknown>;
+    correlationId: string;
+  }[] = [];
+  const falso: ClienteCore = {
+    ...CORE_NO_SIMULADO,
+    async consultarSolicitud() {
+      return exito({ solicitud: null });
+    },
+    async escalarAAnalista(entrada, correlationId) {
+      llamadas.push({
+        entrada: entrada as Record<string, unknown>,
+        correlationId,
+      });
+      const respuesta = respuestas[Math.min(llamadas.length - 1, respuestas.length - 1)]!;
+      if (respuesta instanceof Error) throw respuesta;
+      return respuesta;
+    },
+    async cerrar() {},
+  };
+  return { core: falso, llamadas };
+}
+
+const entregaOk = () => exito({ escalamiento: resumenFalso(), repetida: false });
+
+/** El modelo pide un analista por una petición de persona, con la señal por el adaptador. */
+const pidePersona = (extra: (contexto: ContextoConsulta) => Promise<void> = async () => {}) =>
+  consultaFalsa([
+    async (contexto) => {
+      await contexto.herramientas.solicitar_analista.manejar({
+        motivo: "pide_persona",
+      });
+      await extra(contexto);
+      return [resultado("success", "end_turn", "Te comunico con un analista.")];
+    },
+  ]);
+
+const MENSAJE_HANDOFF = "Necesito ayuda con mi caso";
+
+describe("agente: entrega del resumen al analista (#15, US1)", () => {
+  it("con el core que responde, la entrega queda entregada y el resultado trae el resumen", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamadas } = coreEscalable([entregaOk()]);
+    const { fn } = pidePersona();
+    const r = await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.entrega, "entregada");
+    assert.deepEqual(r.handoff, resumenFalso());
+    assert.equal(llamadas.length, 1);
+    assert.equal(llamadas[0]?.correlationId, CORRELACION_HANDOFF);
+  });
+
+  it("la entrada trae la clave de la conversación y la clasificación, sin ningún dato del solicitante", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamadas } = coreEscalable([entregaOk()]);
+    const { fn } = pidePersona();
+    await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.deepEqual(llamadas[0]?.entrada, {
+      claveIdempotencia: claveIdempotenciaEscalamiento(CORRELACION_HANDOFF),
+      causa: "peticion_de_persona",
+      motivo: "pide_persona",
+    });
+  });
+
+  it("la señal de la Regla 2 viaja con su código y su causa", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamadas } = coreEscalable([entregaOk()]);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo: "preaprobacion_fuera_de_politica",
+          regla: REGLA_2,
+          herramienta: "preaprobar_credito",
+          codigo: "monto_sobre_tope",
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.deepEqual(llamadas[0]?.entrada, {
+      claveIdempotencia: claveIdempotenciaEscalamiento(CORRELACION_HANDOFF),
+      causa: "monto_sobre_umbral",
+      motivo: "preaprobacion_fuera_de_politica",
+      codigo: "monto_sobre_tope",
+    });
+  });
+
+  it("las demás señales del turno viajan como causas adicionales", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamadas } = coreEscalable([entregaOk()]);
+    const { fn } = pidePersona(async (contexto) => {
+      await contexto.herramientas.solicitar_analista.manejar({
+        motivo: "caso_no_cubierto",
+        causa: "moneda_extranjera",
+      });
+    });
+    await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(llamadas[0]?.entrada["motivo"], "pide_persona");
+    assert.deepEqual(llamadas[0]?.entrada["causasAdicionales"], [
+      { causa: "caso_no_cubierto", motivo: "caso_no_cubierto" },
+    ]);
+  });
+
+  it("el monto y el plazo que citó el solicitante viajan como declarado con su procedencia", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamadas } = coreEscalable([entregaOk()]);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({
+          motivo: "caso_no_cubierto",
+          causa: "moneda_extranjera",
+          monto: 4_000_000,
+          plazoMeses: 24,
+          origen: {
+            monto: { fragmento: "4 millones" },
+            plazoMeses: { fragmento: "24 meses" },
+          },
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    await conversar("Quiero 4 millones a 24 meses y mi sueldo me lo pagan en dólares", {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.deepEqual(llamadas[0]?.entrada["declarado"], {
+      monto: {
+        valor: 4_000_000,
+        procedencia: { tipo: "afirmacion", fragmento: "4 millones" },
+      },
+      plazoMeses: {
+        valor: 24,
+        procedencia: { tipo: "afirmacion", fragmento: "24 meses" },
+      },
+    });
+  });
+
+  it("con los reintentos agotados, la entrega queda pendiente, hay un log de error y se escala igual", async (t) => {
+    const logs = capturarLogs(t);
+    const caida = fallo<ResultadoEscalamiento>(errorTransitorio("core_no_disponible", "Caído."));
+    const { core: falso, llamadas } = coreEscalable([caida]);
+    const { fn } = pidePersona();
+    const r = await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.entrega, "pendiente");
+    assert.equal(r.handoff, null);
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.equal(llamadas.length, 3, "tres intentos acotados");
+    const error = logs().find((l) => l["evento"] === "error_entrega_escalamiento");
+    assert.ok(error, "falta el log de error de la entrega");
+    assert.equal(error["nivel"], "error");
+    assert.equal(error["correlationId"], CORRELACION_HANDOFF);
+    assert.equal(typeof error["causa"], "string");
+  });
+
+  it("un error que no es transitorio no se reintenta y la entrega queda pendiente", async (t) => {
+    const logs = capturarLogs(t);
+    for (const error of [
+      errorValidacion("causa_incoherente", "No coincide.", "causa"),
+      errorValidacion("formato_invalido", "Mal formado.", "claveIdempotencia"),
+      errorNegocio("resumen_invalido", "El resumen no pasa su esquema."),
+    ]) {
+      const { core: falso, llamadas } = coreEscalable([fallo<ResultadoEscalamiento>(error)]);
+      const { fn } = pidePersona();
+      const r = await conversar(MENSAJE_HANDOFF, {
+        ejecutarConsulta: fn,
+        core: falso,
+        correlationId: CORRELACION_HANDOFF,
+        ...sinEspera,
+      });
+      assert.equal(r.tipo, "escalada", error.codigo);
+      assert.equal(r.entrega, "pendiente", error.codigo);
+      assert.equal(llamadas.length, 1, error.codigo);
+    }
+    assert.ok(logs().some((l) => l["evento"] === "error_entrega_escalamiento"));
+  });
+
+  it("una excepción del cliente no se propaga: la entrega queda pendiente y se escala igual", async (t) => {
+    const logs = capturarLogs(t);
+    const { core: falso } = coreEscalable([new Error("conexión rota")]);
+    const { fn } = pidePersona();
+    const r = await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.entrega, "pendiente");
+    const error = logs().find((l) => l["evento"] === "error_entrega_escalamiento");
+    assert.match(String(error?.["causa"]), /conexión rota/);
+  });
+
+  it("una conversación sin escalamiento no entrega nada: entrega y handoff son null", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamadas } = coreEscalable([entregaOk()]);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    const r = await conversar("Hola", {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.entrega, null);
+    assert.equal(r.handoff, null);
+    assert.equal(llamadas.length, 0);
+  });
+
+  it("la entrega no pasa por el adaptador: con la señal vigente igual llega al core", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamadas } = coreEscalable([entregaOk()]);
+    const { fn } = pidePersona(async (contexto) => {
+      // Con la señal vigente, el adaptador no llama al core.
+      const r = await contexto.herramientas.consultar_solicitud.manejar({
+        idSolicitud: "SOL-0001000001",
+      });
+      assert.equal(r.isError, true);
+    });
+    const r = await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(r.entrega, "entregada");
+    assert.equal(llamadas.length, 1);
+  });
+
+  it("el core que no arranca escala sin entrega y sin llamar al core", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar(MENSAJE_HANDOFF, {
+      ejecutarConsulta: fn,
+      conectarCore: async () => {
+        throw new Error("no arrancó");
+      },
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.entrega, "pendiente");
+    assert.equal(r.handoff, null);
+  });
+});
+// ── Regla 4 por código, antes del modelo (#15, US2) ────────────────────────────────────────
+
+/** Core falso que anota cada método que se llama, para probar que no se llamó ningún otro. */
+function coreEspia(respuestas: (RespuestaEscalamiento | Error)[] = [entregaOk()]) {
+  const llamados: string[] = [];
+  const entradas: Record<string, unknown>[] = [];
+  const espiados = Object.fromEntries(
+    Object.entries(CORE_NO_SIMULADO).map(([nombre, metodo]) => [
+      nombre,
+      (...argumentos: unknown[]) => {
+        llamados.push(nombre);
+        return (metodo as (...a: unknown[]) => unknown)(...argumentos);
+      },
+    ]),
+  ) as typeof CORE_NO_SIMULADO;
+  const falso: ClienteCore = {
+    ...espiados,
+    async consultarSolicitud() {
+      llamados.push("consultarSolicitud");
+      return exito({ solicitud: null });
+    },
+    async escalarAAnalista(entrada) {
+      llamados.push("escalarAAnalista");
+      entradas.push(entrada as Record<string, unknown>);
+      const respuesta = respuestas[Math.min(entradas.length - 1, respuestas.length - 1)]!;
+      if (respuesta instanceof Error) throw respuesta;
+      return respuesta;
+    },
+    async cerrar() {},
+  };
+  return { core: falso, llamados, entradas };
+}
+
+describe("agente: la Regla 4 se decide antes de llamar al modelo (#15, US2)", () => {
+  it("«Quiero hablar con una persona» escala sin invocar el modelo ni más herramientas que la entrega", async (t) => {
+    const logs = capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "no se debe usar")]]);
+    const r = await conversar("Quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 0, "el modelo no se invoca");
+    assert.deepEqual(llamados, ["escalarAAnalista"]);
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.equal(r.escalamiento?.regla, REGLA_4);
+    assert.equal(r.escalamiento?.herramienta, "deteccion_previa");
+    assert.equal(r.entrega, "entregada");
+    assert.equal(r.turnos, 0);
+    assert.match(r.respuesta, /analista/);
+    assert.equal(r.respuesta.includes("no se debe usar"), false);
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.equal(evento?.regla, REGLA_4);
+    assert.ok(logs().some((l) => l["evento"] === "escalamiento" && l["motivo"] === "pide_persona"));
+  });
+
+  it("la entrega lleva solo la petición de persona, sin monto ni plazo aunque el mensaje los traiga", async (t) => {
+    capturarLogs(t);
+    const { core: falso, entradas } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar(
+      "Hola, quiero 4 millones a 24 meses, pero prefiero hablar con una persona",
+      {
+        ejecutarConsulta: fn,
+        core: falso,
+        correlationId: CORRELACION_HANDOFF,
+        ...sinEspera,
+      },
+    );
+    assert.equal(llamadas.length, 0);
+    assert.equal(r.tipo, "escalada");
+    assert.deepEqual(entradas, [
+      {
+        claveIdempotencia: claveIdempotenciaEscalamiento(CORRELACION_HANDOFF),
+        causa: "peticion_de_persona",
+        motivo: "pide_persona",
+      },
+    ]);
+  });
+
+  it("con el core que no arranca, la causa sigue siendo la petición de persona y la entrega queda pendiente", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar("Quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      conectarCore: async () => {
+        throw new Error("no arrancó");
+      },
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 0);
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.equal(r.entrega, "pendiente");
+    assert.equal(r.handoff, null);
+  });
+
+  it("con el core caído al entregar, igual escala por la petición y la entrega queda pendiente", async (t) => {
+    capturarLogs(t);
+    const caida = fallo<ResultadoEscalamiento>(errorTransitorio("core_no_disponible", "Caído."));
+    const { core: falso } = coreEspia([caida]);
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar("Necesito un asesor humano, por favor", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.equal(r.entrega, "pendiente");
+  });
+
+  it("no revisa la Regla 5 de los archivos ni llama al clasificador: la Regla 4 no investiga", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados, entradas } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    let clasificaciones = 0;
+    const r = await conversar("Pásame con un analista", {
+      ejecutarConsulta: fn,
+      core: falso,
+      documentos: [
+        {
+          adjunto: 1,
+          nombre: "certificado.md",
+          soportado: true,
+          contenido: CONTENIDO_CERTIFICADO_USD,
+        },
+        { adjunto: 2, nombre: "foto.png", soportado: false },
+      ],
+      documentosRevisados: 0,
+      clasificarDocumento: async () => {
+        clasificaciones++;
+        return { ok: true, tipo: "certificado_laboral" };
+      },
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 0);
+    assert.equal(clasificaciones, 0);
+    assert.deepEqual(llamados, ["escalarAAnalista"]);
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.equal(r.documentosRevisados, 0, "ningún archivo quedó revisado");
+    assert.equal(entradas[0]?.["causasAdicionales"], undefined);
+  });
+
+  it("conserva los contadores de la conversación que recibió", async (t) => {
+    capturarLogs(t);
+    const { core: falso } = coreEspia();
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar("Quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      core: falso,
+      busquedasAmbiguas: 1,
+      desambiguada: true,
+      documentosRevisados: 2,
+      ...sinEspera,
+    });
+    assert.equal(r.busquedasAmbiguas, 1);
+    assert.equal(r.desambiguada, true);
+    assert.equal(r.documentosRevisados, 2);
+  });
+
+  it("una negación no se detecta por código: el mensaje llega al modelo, que decide", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Sigo contigo.")]]);
+    const r = await conversar("No quiero hablar con una persona, sigue tú", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 1);
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.respuesta, "Sigo contigo.");
+    assert.deepEqual(llamados, []);
+  });
+
+  it("una solicitud normal que dice «soy una persona natural» no escala por código: llega al modelo", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Claro, sigamos.")]]);
+    const r = await conversar("Quiero un crédito de 3 millones, soy una persona natural", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 1, "el mensaje llega al modelo");
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.escalamiento, null);
+    assert.equal(r.entrega, null);
+    assert.deepEqual(llamados, []);
+  });
+
+  it("«No, quiero hablar con una persona» escala por código, sin el modelo", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "no se usa")]]);
+    const r = await conversar("No, quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 0);
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.deepEqual(llamados, ["escalarAAnalista"]);
+  });
+
+  it("la petición que el modelo detecta sigue funcionando con solicitar_analista", async (t) => {
+    capturarLogs(t);
+    const { core: falso, entradas } = coreEspia();
+    const { fn, llamadas } = pidePersona();
+    const r = await conversar("¿Alguien puede revisar esto conmigo?", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 1);
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.herramienta, "solicitar_analista");
+    assert.equal(entradas[0]?.["motivo"], "pide_persona");
+  });
+});
+
+describe("agente: la Regla 4 prevalece sobre la 5 en el mismo turno del modelo (#15, US2)", () => {
+  const pideYNoCubierto = (primero: "pide_persona" | "caso_no_cubierto") =>
+    consultaFalsa([
+      async (contexto) => {
+        const otra: "pide_persona" | "caso_no_cubierto" =
+          primero === "pide_persona" ? "caso_no_cubierto" : "pide_persona";
+        for (const motivo of [primero, otra]) {
+          await contexto.herramientas.solicitar_analista.manejar({
+            motivo,
+            ...(motivo === "caso_no_cubierto" ? { causa: "moneda_extranjera" as const } : {}),
+          });
+        }
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+
+  for (const primero of ["pide_persona", "caso_no_cubierto"] as const) {
+    it(`con ${primero} primero, la principal es la Regla 4 y la 5 va como causa adicional`, async (t) => {
+      capturarLogs(t);
+      const { core: falso, entradas } = coreEspia();
+      const { fn } = pideYNoCubierto(primero);
+      const r = await conversar("Necesito ayuda con mi caso", {
+        ejecutarConsulta: fn,
+        core: falso,
+        ...sinEspera,
+      });
+      assert.equal(r.escalamiento?.motivo, "pide_persona");
+      assert.equal(entradas[0]?.["motivo"], "pide_persona");
+      assert.deepEqual(entradas[0]?.["causasAdicionales"], [
+        { causa: "caso_no_cubierto", motivo: "caso_no_cubierto" },
+      ]);
+    });
+  }
+});
+// ── Escalamiento por cada umbral, discrepancia y caso no cubierto (#15, US3) ───────────────
+
+/** Un cliente del core con el escalamiento real del core simulado: el resumen que llega es el verdadero. */
+function coreConEscalamientoReal() {
+  const simulado = crearCore({ ahora: () => HOY_EJEMPLO });
+  const falso: ClienteCore = {
+    ...CORE_NO_SIMULADO,
+    async consultarSolicitud() {
+      return exito({ solicitud: null });
+    },
+    async escalarAAnalista(entrada, correlationId) {
+      return simulado.escalarAAnalista({ ...entrada, correlationId }).respuesta;
+    },
+    async consultarEscalamiento(correlationId) {
+      return simulado.consultarEscalamiento(correlationId);
+    },
+    async cerrar() {},
+  };
+  return falso;
+}
+
+describe("agente: la causa y la acción de cada escalamiento llegan en el resumen (#15, US3)", () => {
+  const MENSAJE = "Necesito ayuda con mi caso";
+
+  /** Escala con las señales dadas, como las dejarían los hooks y el adaptador. */
+  async function escalarCon(
+    t: Parameters<typeof capturarLogs>[0],
+    senales: Parameters<typeof dejarSenal>[1][],
+    opciones: {
+      documentos?: NonNullable<Parameters<typeof conversar>[1]>["documentos"];
+    } = {},
+  ) {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        for (const senal of senales) dejarSenal(contexto.estado, senal);
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    return conversar(MENSAJE, {
+      ejecutarConsulta: fn,
+      core: coreConEscalamientoReal(),
+      ...(opciones.documentos !== undefined ? { documentos: opciones.documentos } : {}),
+      ...sinEspera,
+    });
+  }
+
+  const regla2 = (codigo: string) => ({
+    motivo: "preaprobacion_fuera_de_politica" as const,
+    regla: REGLA_2,
+    herramienta: "preaprobar_credito",
+    codigo,
+  });
+
+  it("un monto por encima del tope da monto_sobre_umbral y la simulación de cuota", async (t) => {
+    const r = await escalarCon(t, [regla2("monto_sobre_tope")]);
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.entrega, "entregada");
+    assert.equal(r.handoff?.causa, "monto_sobre_umbral");
+    assert.equal(r.handoff?.codigo, "monto_sobre_tope");
+    assert.equal(r.handoff?.accionRecomendada, "revisar_con_simulacion_de_cuota");
+    assert.equal(r.handoff?.regla, REGLA_2);
+  });
+
+  it("una cuota por encima del porcentaje da cuota_sobre_porcentaje", async (t) => {
+    const r = await escalarCon(t, [regla2("cuota_sobre_porcentaje")]);
+    assert.equal(r.handoff?.causa, "cuota_sobre_porcentaje");
+    assert.equal(r.handoff?.accionRecomendada, "revisar_con_simulacion_de_cuota");
+  });
+
+  it("una discrepancia de ingresos da discrepancia_de_ingreso y verificar los ingresos con soporte", async (t) => {
+    const r = await escalarCon(t, [
+      {
+        motivo: "discrepancia_de_ingreso",
+        regla: REGLA_3,
+        herramienta: "verificar_ingreso",
+      },
+    ]);
+    assert.equal(r.handoff?.causa, "discrepancia_de_ingreso");
+    assert.equal(r.handoff?.accionRecomendada, "verificar_ingresos_con_soporte");
+    assert.equal(r.handoff?.regla, REGLA_3);
+  });
+
+  it("la moneda extranjera dicha al modelo da caso_no_cubierto y revisar el tipo de documento o la moneda", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({
+          motivo: "caso_no_cubierto",
+          causa: "moneda_extranjera",
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    const r = await conversar("Gano en dólares", {
+      ejecutarConsulta: fn,
+      core: coreConEscalamientoReal(),
+      ...sinEspera,
+    });
+    assert.equal(r.handoff?.causa, "caso_no_cubierto");
+    assert.equal(r.handoff?.motivo, "caso_no_cubierto");
+    assert.equal(r.handoff?.accionRecomendada, "revisar_tipo_de_documento_o_moneda");
+    assert.equal(r.handoff?.regla, REGLA_5);
+  });
+
+  it("un archivo de un tipo no soportado da caso_no_cubierto al cerrar el turno", async (t) => {
+    const r = await escalarCon(t, [], {
+      documentos: [{ adjunto: 1, nombre: "foto.png", soportado: false }],
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.handoff?.causa, "caso_no_cubierto");
+    assert.equal(r.handoff?.accionRecomendada, "revisar_tipo_de_documento_o_moneda");
+  });
+
+  it("una inconsistencia entre archivos da caso_no_cubierto y revisar los documentos", async (t) => {
+    const r = await escalarCon(t, [
+      {
+        motivo: "inconsistencia_documental",
+        regla: REGLA_3,
+        herramienta: "verificar_ingreso",
+      },
+    ]);
+    assert.equal(r.handoff?.causa, "caso_no_cubierto");
+    assert.equal(r.handoff?.motivo, "inconsistencia_documental");
+    assert.equal(r.handoff?.accionRecomendada, "revisar_documentos_manualmente");
+  });
+
+  it("una identidad que no se puede verificar da caso_no_cubierto y verificarla a mano", async (t) => {
+    const r = await escalarCon(t, [
+      {
+        motivo: "identidad_no_verificable",
+        regla: REGLA_NO_VERIFICABLE,
+        herramienta: "verificar_identidad",
+      },
+    ]);
+    assert.equal(r.handoff?.causa, "caso_no_cubierto");
+    assert.equal(r.handoff?.motivo, "identidad_no_verificable");
+    assert.equal(r.handoff?.accionRecomendada, "verificar_identidad_manualmente");
+  });
+
+  it("una falla transitoria persistente da caso_no_cubierto y atender la falla técnica", async (t) => {
+    const r = await escalarCon(t, [
+      {
+        motivo: "falla_transitoria_persistente",
+        regla: "constitución, Principio VI · reintentos agotados",
+        herramienta: "consultar_solicitud",
+      },
+    ]);
+    assert.equal(r.handoff?.causa, "caso_no_cubierto");
+    assert.equal(r.handoff?.accionRecomendada, "atender_falla_tecnica");
+  });
+
+  it("una falla del agente sin señal también entrega el resumen", async (t) => {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([new Error("falló"), new Error("falló otra vez")]);
+    const r = await conversar(MENSAJE, {
+      ejecutarConsulta: fn,
+      core: coreConEscalamientoReal(),
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "falla_del_agente");
+    assert.equal(r.entrega, "entregada");
+    assert.equal(r.handoff?.motivo, "falla_del_agente");
+    assert.equal(r.handoff?.accionRecomendada, "atender_falla_tecnica");
+  });
+
+  it("dos señales en el mismo turno, la Regla 2 y la Regla 3, dejan una principal por el orden y la otra adicional", async (t) => {
+    const r = await escalarCon(t, [
+      regla2("monto_sobre_tope"),
+      {
+        motivo: "discrepancia_de_ingreso",
+        regla: REGLA_3,
+        herramienta: "verificar_ingreso",
+      },
+    ]);
+    assert.equal(r.escalamiento?.motivo, "discrepancia_de_ingreso");
+    assert.equal(r.handoff?.causa, "discrepancia_de_ingreso");
+    assert.deepEqual(r.handoff?.causasAdicionales, [
+      {
+        causa: "monto_sobre_umbral",
+        motivo: "preaprobacion_fuera_de_politica",
+        codigo: "monto_sobre_tope",
+        accionRecomendada: "revisar_con_simulacion_de_cuota",
+      },
+    ]);
+  });
+
+  it("la Regla 5 por archivos reemplaza a la Regla 2 y esta queda como causa adicional", async (t) => {
+    const r = await escalarCon(t, [regla2("monto_sobre_tope")], {
+      documentos: [
+        {
+          adjunto: 1,
+          nombre: "certificado.md",
+          soportado: true,
+          contenido: "Certificado ficticio\nSalario mensual: USD 1.200",
+        },
+      ],
+    });
+    assert.equal(r.handoff?.motivo, "caso_no_cubierto");
+    assert.equal(r.handoff?.causasAdicionales.length, 1);
+    assert.equal(r.handoff?.causasAdicionales[0]?.causa, "monto_sobre_umbral");
+  });
+});
+// ── Lo que el agente puede resolver no escala, y el prompt lo dice (#15, US4) ──────────────
+
+describe("agente: lo que se puede pedir o desambiguar no escala (#15, US4)", () => {
+  it("un dato que falta se pide con un evento y la conversación sigue, sin entrega al analista", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        emitirEvento(contexto.estado, {
+          tipo: "solicitud_de_dato",
+          descripcion: "Al documento que enviaste le falta el salario.",
+          motivo: "dato_faltante_en_documento",
+          dato: "salario",
+        });
+        return [resultado("success", "end_turn", "Envíame un documento con el salario.")];
+      },
+    ]);
+    const r = await conversar("Adjunto mi certificado", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.escalamiento, null);
+    assert.equal(r.entrega, null);
+    assert.equal(r.handoff, null);
+    assert.equal(r.eventos[0]?.tipo, "solicitud_de_dato");
+    assert.equal(llamados.includes("escalarAAnalista"), false);
+  });
+
+  it("la primera búsqueda con varias coincidencias pide el documento y no entrega nada al analista", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        emitirEvento(contexto.estado, {
+          tipo: "solicitud_de_dato",
+          descripcion: "Encontré varias personas con ese nombre.",
+          motivo: "varias_coincidencias",
+          dato: "número de documento de identidad",
+        });
+        contexto.estado.busquedasAmbiguas = 1;
+        contexto.estado.ambiguaEnTurno = true;
+        return [resultado("success", "end_turn", "¿Cuál es tu número de documento?")];
+      },
+    ]);
+    const r = await conversar("Soy Elena Martínez", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.entrega, null);
+    assert.equal(llamados.includes("escalarAAnalista"), false);
+  });
+
+  it("el systemPrompt dice que no se escala por un dato que se puede pedir ni por coincidencias que se pueden desambiguar", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.ok(
+      prompt.includes(
+        "No escales por un dato que puedes pedir al solicitante ni por varias coincidencias que puedes desambiguar: pídelo y sigue.",
+      ),
+    );
+  });
+
+  it("ni el systemPrompt ni los avisos dan ningún literal de umbral al modelo", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    for (const literal of ["5.000.000", "5_000_000", "30 %", "30%", "10 %", "10%"]) {
+      assert.equal(prompt.includes(literal), false, literal);
+    }
+  });
+});
+// ── Avisos y evento del escalamiento (#15, US5) ────────────────────────────────────────────
+
+const EXPLICACION_DE_CADA_MOTIVO = " Un analista de crédito revisará tu caso.";
+
+/** Los textos de la tabla de avisos de contracts/agente.md, uno por motivo. */
+const AVISOS_ESPERADOS: Record<string, string> = {
+  pide_persona: "Un analista de crédito revisará tu caso.",
+  caso_no_cubierto: "Tu caso necesita la revisión de un analista de crédito.",
+  preaprobacion_fuera_de_politica:
+    "Tu solicitud no cumple las condiciones para una preaprobación automática." +
+    EXPLICACION_DE_CADA_MOTIVO,
+  discrepancia_de_ingreso:
+    "Los ingresos de tus documentos no coinciden con lo que declaraste." +
+    EXPLICACION_DE_CADA_MOTIVO,
+  falla_transitoria_persistente:
+    "No pude consultar el sistema de originación en este momento." + EXPLICACION_DE_CADA_MOTIVO,
+  respuesta_incompleta: "No pude completar tu respuesta." + EXPLICACION_DE_CADA_MOTIVO,
+  limite_de_turnos: "No pude completar tu consulta." + EXPLICACION_DE_CADA_MOTIVO,
+  falla_del_agente: "Tuve un problema al atender tu consulta." + EXPLICACION_DE_CADA_MOTIVO,
+  identidad_ambigua: "No pude identificarte con certeza." + EXPLICACION_DE_CADA_MOTIVO,
+  identidad_no_verificable: "No pude verificar tu identidad." + EXPLICACION_DE_CADA_MOTIVO,
+  documento_no_extraible:
+    "No pude leer con certeza los datos de tu documento." + EXPLICACION_DE_CADA_MOTIVO,
+  inconsistencia_documental:
+    "Encontré datos que no coinciden entre tus documentos." + EXPLICACION_DE_CADA_MOTIVO,
+};
+
+describe("agente: los avisos del escalamiento no prometen contacto ni resultado (#15, US5)", () => {
+  async function escalarPor(t: Parameters<typeof capturarLogs>[0], motivo: MotivoEscalamiento) {
+    capturarLogs(t);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        dejarSenal(contexto.estado, {
+          motivo,
+          regla: reglaDeEscalamiento(motivo),
+          herramienta: "x",
+          ...(motivo === "preaprobacion_fuera_de_politica" ? { codigo: "monto_sobre_tope" } : {}),
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    return conversar("Necesito ayuda con mi caso", {
+      ejecutarConsulta: fn,
+      core: coreEspia().core,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+  }
+
+  it("los avisos de la tabla cubren los doce motivos", () => {
+    assert.deepEqual(Object.keys(AVISOS_ESPERADOS).sort(), [...MOTIVOS_ESCALAMIENTO].sort());
+  });
+
+  for (const motivo of MOTIVOS_ESCALAMIENTO) {
+    it(`el aviso de ${motivo} es el de la tabla`, async (t) => {
+      const r = await escalarPor(t, motivo);
+      assert.equal(r.tipo, "escalada");
+      const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+      assert.equal(evento?.descripcion, AVISOS_ESPERADOS[motivo]);
+      assert.ok(r.respuesta.startsWith(AVISOS_ESPERADOS[motivo]!), motivo);
+    });
+
+    it(`el aviso de ${motivo} no promete contacto, aprobación ni rechazo y no lleva cifras`, async (t) => {
+      const r = await escalarPor(t, motivo);
+      const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+      const texto = evento?.descripcion ?? "";
+      for (const prohibida of ["te contactará", "aprobada", "rechazada"]) {
+        assert.equal(texto.includes(prohibida), false, `${motivo}: «${prohibida}»`);
+      }
+      assert.equal(/\d/.test(texto), false, `${motivo}: lleva una cifra`);
+    });
+  }
+
+  it("la respuesta termina con la referencia de los 8 primeros caracteres del correlationId", async (t) => {
+    const r = await escalarPor(t, "pide_persona");
+    assert.ok(
+      r.respuesta.endsWith(` Referencia: ${CORRELACION_HANDOFF.slice(0, 8)}.`),
+      r.respuesta,
+    );
+  });
+});
+
+describe("agente: el evento de escalamiento lleva la causa y la entrega (#15, US5)", () => {
+  async function escalarPorNoCubierto(
+    t: Parameters<typeof capturarLogs>[0],
+    respuestas?: (RespuestaEscalamiento | Error)[],
+  ) {
+    capturarLogs(t);
+    const { core: falso } = coreEspia(respuestas);
+    const { fn } = consultaFalsa([
+      async (contexto) => {
+        await contexto.herramientas.solicitar_analista.manejar({
+          motivo: "caso_no_cubierto",
+          causa: "moneda_extranjera",
+        });
+        return [resultado("success", "end_turn", "…")];
+      },
+    ]);
+    return conversar("Gano en dólares", {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+  }
+
+  it("entregada: suma causaEscalamiento, entrega e idEscalamiento y conserva las claves de antes", async (t) => {
+    const r = await escalarPorNoCubierto(t, [
+      exito({
+        escalamiento: resumenFalso({
+          causa: "caso_no_cubierto",
+          motivo: "caso_no_cubierto",
+          accionRecomendada: "revisar_tipo_de_documento_o_moneda",
+          regla: REGLA_5,
+        }),
+        repetida: false,
+      }),
+    ]);
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.deepEqual(evento?.valores, {
+      herramienta: "solicitar_analista",
+      causa: "moneda_extranjera",
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "entregada",
+      idEscalamiento: "ESC-0003000001",
+    });
+  });
+
+  it("pendiente: suma causaEscalamiento y entrega, sin idEscalamiento", async (t) => {
+    const caida = fallo<ResultadoEscalamiento>(errorTransitorio("core_no_disponible", "Caído."));
+    const r = await escalarPorNoCubierto(t, [caida]);
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.deepEqual(evento?.valores, {
+      herramienta: "solicitar_analista",
+      causa: "moneda_extranjera",
+      causaEscalamiento: "caso_no_cubierto",
+      entrega: "pendiente",
+    });
+  });
+
+  it("la causa del evento sale de la política: una petición de persona da peticion_de_persona", async (t) => {
+    capturarLogs(t);
+    const { core: falso } = coreEspia();
+    const { fn } = pidePersona();
+    const r = await conversar("Necesito ayuda con mi caso", {
+      ejecutarConsulta: fn,
+      core: falso,
+      correlationId: CORRELACION_HANDOFF,
+      ...sinEspera,
+    });
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.equal(evento?.valores?.["causaEscalamiento"], "peticion_de_persona");
+  });
+
+  it("una escalada técnica, sin señal del adaptador, también lleva la causa y la entrega", async (t) => {
+    capturarLogs(t);
+    const { core: falso } = coreEspia();
+    const { fn } = consultaFalsa([new Error("falló"), new Error("falló otra vez")]);
+    const r = await conversar("Necesito ayuda con mi caso", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.equal(evento?.valores?.["causaEscalamiento"], "caso_no_cubierto");
+    assert.equal(evento?.valores?.["entrega"], "entregada");
+  });
+
+  it("la Regla 4 por código también lleva la causa y la entrega en el evento", async (t) => {
+    capturarLogs(t);
+    const { core: falso } = coreEspia();
+    const { fn } = consultaFalsa([[resultado("success", "end_turn", "…")]]);
+    const r = await conversar("Quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.deepEqual(evento?.valores, {
+      herramienta: "deteccion_previa",
+      causaEscalamiento: "peticion_de_persona",
+      entrega: "entregada",
+      idEscalamiento: "ESC-0003000001",
+    });
+  });
+
+  it("el evento valida con el catálogo de eventos de negocio", async (t) => {
+    const r = await escalarPorNoCubierto(t);
+    const evento = r.eventos.find((e) => e.tipo === "escalamiento");
+    assert.equal(validarEvento(evento).ok, true);
+  });
+
+  it("el systemPrompt dice que al solicitar un analista no se anticipa su decisión ni su plazo", async (t) => {
+    capturarLogs(t);
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Hola")]]);
+    await conversar("Hola", { ejecutarConsulta: fn, core, ...sinEspera });
+    const prompt = String(llamadas[0]!.options["systemPrompt"]);
+    assert.ok(
+      prompt.includes(
+        "Cuando solicites un analista, no digas qué decidirá ni cuándo responderá: solo que un analista revisará su caso.",
+      ),
+    );
   });
 });

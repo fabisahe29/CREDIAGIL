@@ -1,0 +1,5 @@
+{
+  "nombre": "escalamiento-moneda-extranjera",
+  "descripcion": "Caso de prueba 7 (#15): el solicitante dice que su sueldo se lo pagan en dólares antes de identificarse; la Regla 5 escala y el resumen lleva el monto y el plazo que citó, con su procedencia, y la identidad pendiente",
+  "pasos": [{ "mensaje": "Quiero 4 millones a 24 meses y mi sueldo me lo pagan en dólares" }]
+}

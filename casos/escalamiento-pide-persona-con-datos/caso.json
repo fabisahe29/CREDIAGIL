@@ -1,0 +1,7 @@
+{
+  "nombre": "escalamiento-pide-persona-con-datos",
+  "descripcion": "Escalamiento (#15): el solicitante da un monto y un plazo y pide hablar con una persona antes de identificarse; la Regla 4 escala sin extraer datos y el resumen deja el monto, el plazo y la identidad como pendientes",
+  "pasos": [
+    { "mensaje": "Hola, quiero 4 millones a 24 meses, pero prefiero hablar con una persona" }
+  ]
+}

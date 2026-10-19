@@ -24,8 +24,10 @@ import {
   formatearAdjunto,
   formatearAgente,
   formatearCabecera,
+  formatearEntregaPendiente,
   formatearEstado,
   formatearEvento,
+  formatearHandoff,
   formatearHerramienta,
   formatearSolicitante,
   textoEstado,
@@ -209,6 +211,16 @@ export function iniciarChat({
     for (const mostrado of mostrados) {
       escribir("");
       escribir(formatearEvento(mostrado, color));
+    }
+    // El resumen es para el analista: solo se muestra en el modo de demostración (#15, R10).
+    if (demo) {
+      if (resultado.handoff !== null) {
+        escribir("");
+        escribir(formatearHandoff(resultado.handoff, color));
+      } else if (resultado.entrega === "pendiente") {
+        escribir("");
+        escribir(formatearEntregaPendiente(color));
+      }
     }
     const aplicado = aplicarEventos(conv, mostrados);
     conv = aplicado.conversacion;

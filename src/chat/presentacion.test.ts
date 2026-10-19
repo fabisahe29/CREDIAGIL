@@ -6,13 +6,21 @@ import {
   formatearAdjunto,
   formatearAgente,
   formatearCabecera,
+  formatearEntregaPendiente,
   formatearEstado,
   formatearEvento,
+  formatearHandoff,
   formatearHerramienta,
   formatearSolicitante,
   textoEstado,
 } from "./presentacion.ts";
 import type { EventoNegocio } from "../compartido/eventos.ts";
+import {
+  claveIdempotenciaEscalamiento,
+  esquemaResumenAnalista,
+  type ResumenAnalista,
+} from "../compartido/escalamiento.ts";
+import { aRegistro, ejemploCertificado } from "../compartido/ingreso-ejemplos.ts";
 
 const base = {
   descripcion: "Tu caso pasa a un analista",
@@ -217,5 +225,202 @@ describe("presentación: evento no reconocido (US3)", () => {
       false,
     );
     assert.match(texto, /\[EVENTO NO RECONOCIDO\] tipo: sin tipo/);
+  });
+});
+// ── Resumen para el analista en el modo de demostración (#15, US5) ─────────────────────────
+
+const CORRELACION_HANDOFF_PRESENTACION = "6f1c2e4a-8d3b-4a57-9c10-2b7e5a9d4f31";
+
+const afirmacion = (fragmento: string) => ({ tipo: "afirmacion", fragmento });
+
+/** Un resumen completo como lo entregaría el core, con los cambios dados. */
+const resumen = (cambios: Record<string, unknown> = {}): ResumenAnalista =>
+  esquemaResumenAnalista.parse({
+    idEscalamiento: "ESC-0003000001",
+    correlationId: CORRELACION_HANDOFF_PRESENTACION,
+    claveIdempotencia: claveIdempotenciaEscalamiento(CORRELACION_HANDOFF_PRESENTACION),
+    escaladoEn: "2026-10-18T12:00:00.000Z",
+    versionPolitica: "2026-10-18.4",
+    causa: "monto_sobre_umbral",
+    motivo: "preaprobacion_fuera_de_politica",
+    codigo: "monto_sobre_tope",
+    regla: "Regla 2 · preaprobación dentro de la política",
+    accionRecomendada: "revisar_con_simulacion_de_cuota",
+    causasAdicionales: [],
+    solicitante: {
+      identificado: true,
+      idSolicitante: "CLI-0001000001",
+      nombre: "Ana Pérez Ficticia",
+      documentoEnmascarado: "******4567",
+    },
+    solicitud: { idSolicitud: "SOL-0001000010", estado: "en_estudio" },
+    monto: { valor: 6_000_000, procedencia: afirmacion("quiero 6 millones") },
+    plazoMeses: { valor: 24, procedencia: afirmacion("a 24 meses") },
+    ingresoDeclarado: {
+      valor: 3_800_000,
+      procedencia: afirmacion("gano 3.800.000"),
+    },
+    verificacionIngreso: {
+      estado: "verificado",
+      ingresoVerificado: {
+        monto: 3_800_000,
+        origen: "certificado",
+        montoCertificado: 3_800_000,
+        montoExtractos: null,
+        extractosContados: 0,
+        usos: [],
+        noUsados: [],
+      },
+      discrepancia: null,
+      inconsistencias: [],
+      sinContrastar: [],
+      calculadaEn: "2026-10-18T12:00:00.000Z",
+    },
+    discrepancias: [],
+    datosExtraidos: [aRegistro(ejemploCertificado())],
+    decision: {
+      regla: "Regla 2 · preaprobación dentro de la política",
+      motivo: "El monto supera el tope de preaprobación.",
+      valores: { monto: 6_000_000, plazoMeses: 24 },
+      versionPolitica: "2026-10-18.4",
+    },
+    pendientes: [],
+    ...cambios,
+  });
+
+describe("presentación: formatearHandoff (#15, US5)", () => {
+  it("imprime el título, la causa con su motivo y su regla, y la acción", () => {
+    const lineas = formatearHandoff(resumen(), false).split("\n");
+    assert.equal(lineas[0], "══ Resumen para el analista · ESC-0003000001 ══");
+    assert.equal(
+      lineas[1],
+      "Causa: monto_sobre_umbral · Motivo: preaprobacion_fuera_de_politica (monto_sobre_tope) · Regla: Regla 2 · preaprobación dentro de la política",
+    );
+    assert.equal(lineas[2], "Acción recomendada: revisar_con_simulacion_de_cuota");
+  });
+
+  it("imprime el solicitante con el documento enmascarado, y la solicitud con su monto y su plazo", () => {
+    const texto = formatearHandoff(resumen(), false);
+    assert.match(texto, /^Solicitante: Ana Pérez Ficticia · documento \*{6}4567$/m);
+    assert.match(
+      texto,
+      /^Solicitud: SOL-0001000010 \(en_estudio\) · monto 6\.000\.000 · plazo 24 meses$/m,
+    );
+  });
+
+  it("imprime el ingreso declarado y el verificado", () => {
+    assert.match(
+      formatearHandoff(resumen(), false),
+      /^Ingreso: declarado 3\.800\.000 · verificado 3\.800\.000$/m,
+    );
+  });
+
+  it("sin discrepancias dice ninguna; con ellas, una línea por cada una", () => {
+    assert.match(formatearHandoff(resumen(), false), /^Discrepancias: ninguna$/m);
+    const con = resumen({
+      discrepancias: [
+        {
+          tipo: "ingreso",
+          declarado: 4_300_000,
+          verificado: 3_800_000,
+          diferenciaPorcentaje: 13.16,
+          umbralPorcentaje: 10,
+        },
+        {
+          tipo: "documental",
+          regla: "titular_vs_solicitante",
+          adjuntos: [2, 3],
+        },
+      ],
+    });
+    const texto = formatearHandoff(con, false);
+    assert.match(
+      texto,
+      /^Discrepancias: ingreso declarado 4\.300\.000 contra verificado 3\.800\.000/m,
+    );
+    assert.match(texto, /titular_vs_solicitante en los adjuntos 2, 3/);
+  });
+
+  it("imprime cuántos documentos se extrajeron y la decisión con sus valores", () => {
+    const texto = formatearHandoff(resumen(), false);
+    assert.match(texto, /^Datos extraídos: 1 documento$/m);
+    assert.match(
+      texto,
+      /^Decisión: El monto supera el tope de preaprobación\. · monto = 6\.000\.000 · plazoMeses = 24$/m,
+    );
+  });
+
+  it("sin decisión no imprime la línea de decisión", () => {
+    assert.doesNotMatch(formatearHandoff(resumen({ decision: null }), false), /^Decisión:/m);
+  });
+
+  it("sin pendientes dice ninguno; con ellos, los enumera", () => {
+    assert.match(formatearHandoff(resumen(), false), /^Pendientes: ninguno$/m);
+    const vacio = resumen({
+      solicitante: { identificado: false },
+      solicitud: null,
+      monto: null,
+      plazoMeses: null,
+      ingresoDeclarado: null,
+      verificacionIngreso: null,
+      datosExtraidos: [],
+      decision: null,
+      causa: "peticion_de_persona",
+      motivo: "pide_persona",
+      codigo: undefined,
+      accionRecomendada: "contactar_al_solicitante",
+      regla: "Regla 4 · el solicitante pide hablar con una persona",
+      pendientes: ["identidad", "monto", "plazo", "ingreso_verificado", "documentos"],
+    });
+    const texto = formatearHandoff(vacio, false);
+    assert.match(texto, /^Pendientes: identidad, monto, plazo, ingreso_verificado, documentos$/m);
+    assert.match(texto, /^Solicitante: sin identificar$/m);
+    assert.match(texto, /^Solicitud: sin registrar · monto pendiente · plazo pendiente$/m);
+    assert.match(texto, /^Ingreso: declarado pendiente · verificado pendiente$/m);
+    assert.match(texto, /^Datos extraídos: ninguno$/m);
+  });
+
+  it("imprime las causas adicionales con su motivo", () => {
+    const con = resumen({
+      causasAdicionales: [
+        {
+          causa: "caso_no_cubierto",
+          motivo: "caso_no_cubierto",
+          accionRecomendada: "revisar_tipo_de_documento_o_moneda",
+        },
+      ],
+    });
+    assert.match(
+      formatearHandoff(con, false),
+      /^Causas adicionales: caso_no_cubierto \(caso_no_cubierto\)$/m,
+    );
+    assert.doesNotMatch(formatearHandoff(resumen(), false), /Causas adicionales/);
+  });
+
+  it("con y sin color el texto es el mismo", () => {
+    assert.equal(
+      stripVTControlCharacters(formatearHandoff(resumen(), true)),
+      formatearHandoff(resumen(), false),
+    );
+  });
+
+  it("no imprime el texto de los archivos ni fragmentos de procedencia", () => {
+    const texto = formatearHandoff(resumen(), false);
+    for (const dato of [
+      "quiero 6 millones",
+      "a 24 meses",
+      "gano 3.800.000",
+      "Industrias Imaginarias",
+    ]) {
+      assert.equal(texto.includes(dato), false, dato);
+    }
+  });
+
+  it("formatearEntregaPendiente dice que la entrega al analista quedó pendiente", () => {
+    assert.equal(formatearEntregaPendiente(false), "Entrega al analista: pendiente");
+    assert.equal(
+      stripVTControlCharacters(formatearEntregaPendiente(true)),
+      "Entrega al analista: pendiente",
+    );
   });
 });

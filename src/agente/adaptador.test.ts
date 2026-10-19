@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
   cerrarTurnoDocumentos,
+  DESCRIPCION_SOLICITAR_ANALISTA,
   dejarSenal,
   cerrarTurnoIdentidad,
   crearAdaptador,
@@ -759,7 +760,7 @@ describe("adaptador: consultar_identidad no se expone al modelo (#9, US4)", () =
   });
 });
 describe("adaptador: solicitar_analista, reglas 4 y 5 por código (#9, revisión de cumplimiento)", () => {
-  it("expone solicitar_analista con motivo y causa, sin datos del solicitante", () => {
+  it("expone solicitar_analista con motivo y causa, y monto y plazo solo con su cita (#15)", () => {
     const { core } = coreIdentidad();
     const adaptador = crearAdaptador({
       core,
@@ -768,6 +769,9 @@ describe("adaptador: solicitar_analista, reglas 4 y 5 por código (#9, revisión
     assert.deepEqual(Object.keys(adaptador.herramientas.solicitar_analista.esquema), [
       "motivo",
       "causa",
+      "monto",
+      "plazoMeses",
+      "origen",
     ]);
   });
 
@@ -3178,5 +3182,361 @@ describe("adaptador: preaprobar_credito (#14, US1 y US2)", () => {
       });
       assert.equal(estado.escalamiento?.motivo, "preaprobacion_fuera_de_politica");
     });
+  });
+});
+// ── Escalamiento: señales acumuladas y datos declarados (#15, US1) ─────────────────────────
+
+describe("adaptador: dejarSenal acumula todas las señales observadas (#15, R6)", () => {
+  it("un estado nuevo no trae señales ni datos declarados", () => {
+    const estado = crearEstado(randomUUID());
+    assert.deepEqual(estado.senales, []);
+    assert.deepEqual(estado.declarado, {});
+  });
+
+  it("la señal que no prevalece queda en senales y la principal sigue siendo la primera", (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "pide_persona",
+      regla: "Regla 4",
+      herramienta: "x",
+    });
+    dejarSenal(estado, {
+      motivo: "caso_no_cubierto",
+      regla: "Regla 5",
+      herramienta: "y",
+    });
+    assert.equal(estado.escalamiento?.motivo, "pide_persona");
+    assert.deepEqual(estado.senales, [{ motivo: "pide_persona" }, { motivo: "caso_no_cubierto" }]);
+  });
+
+  it("una señal de una regla anterior reemplaza a la principal y las dos quedan en senales", (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "identidad_ambigua",
+      regla: "Regla 1",
+      herramienta: "x",
+    });
+    dejarSenal(estado, {
+      motivo: "caso_no_cubierto",
+      regla: "Regla 5",
+      herramienta: "y",
+    });
+    dejarSenal(estado, {
+      motivo: "pide_persona",
+      regla: "Regla 4",
+      herramienta: "z",
+    });
+    assert.equal(estado.escalamiento?.motivo, "pide_persona");
+    assert.deepEqual(
+      estado.senales.map((s) => s.motivo),
+      ["identidad_ambigua", "caso_no_cubierto", "pide_persona"],
+    );
+  });
+
+  it("una señal técnica no reemplaza a la principal pero se registra", (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo: "pide_persona",
+      regla: "Regla 4",
+      herramienta: "x",
+    });
+    dejarSenal(estado, {
+      motivo: "falla_transitoria_persistente",
+      regla: "Principio VI",
+      herramienta: "y",
+    });
+    assert.equal(estado.escalamiento?.motivo, "pide_persona");
+    assert.deepEqual(
+      estado.senales.map((s) => s.motivo),
+      ["pide_persona", "falla_transitoria_persistente"],
+    );
+  });
+
+  it("no repite el mismo motivo y código, pero distingue los códigos de la Regla 2", (t) => {
+    capturarStderr(t);
+    const estado = crearEstado(randomUUID());
+    const senal = (codigo: string) =>
+      dejarSenal(estado, {
+        motivo: "preaprobacion_fuera_de_politica",
+        regla: REGLA_2,
+        herramienta: "preaprobar_credito",
+        codigo,
+      });
+    senal("monto_sobre_tope");
+    senal("monto_sobre_tope");
+    senal("cuota_sobre_porcentaje");
+    assert.deepEqual(estado.senales, [
+      { motivo: "preaprobacion_fuera_de_politica", codigo: "monto_sobre_tope" },
+      {
+        motivo: "preaprobacion_fuera_de_politica",
+        codigo: "cuota_sobre_porcentaje",
+      },
+    ]);
+    assert.equal(estado.escalamiento?.codigo, "monto_sobre_tope");
+  });
+});
+
+describe("adaptador: solicitar_analista con monto y plazo citados (#15, R4)", () => {
+  const MENSAJE = "Quiero 4 millones a 24 meses y mi sueldo me lo pagan en dólares";
+
+  function preparar(opciones: { documentos?: readonly DocumentoConversacion[] } = {}) {
+    const { core, llamadas } = coreIdentidad();
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({
+      core,
+      estado,
+      mensajesSolicitante: [MENSAJE],
+      ...(opciones.documentos !== undefined ? { documentos: opciones.documentos } : {}),
+    });
+    return { adaptador, estado, llamadas };
+  }
+
+  const cita = (fragmento: string, adjunto?: number) => ({
+    fragmento,
+    ...(adjunto !== undefined ? { adjunto } : {}),
+  });
+
+  it("anuncia monto, plazoMeses y origen además del motivo y la causa", () => {
+    const { adaptador } = preparar();
+    assert.deepEqual(Object.keys(adaptador.herramientas.solicitar_analista.esquema), [
+      "motivo",
+      "causa",
+      "monto",
+      "plazoMeses",
+      "origen",
+    ]);
+  });
+
+  it("guarda el monto y el plazo con su procedencia si la cita está en lo que dijo el solicitante", async (t) => {
+    capturarStderr(t);
+    const { adaptador, estado, llamadas } = preparar();
+    const resultado = await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "caso_no_cubierto",
+      causa: "moneda_extranjera",
+      monto: 4_000_000,
+      plazoMeses: 24,
+      origen: { monto: cita("4 millones"), plazoMeses: cita("24 meses") },
+    });
+    assert.deepEqual(resultado.structuredContent, {
+      ok: true,
+      datos: { escalada: true },
+    });
+    assert.deepEqual(estado.declarado.monto, {
+      valor: 4_000_000,
+      procedencia: { tipo: "afirmacion", fragmento: "4 millones" },
+    });
+    assert.deepEqual(estado.declarado.plazoMeses, {
+      valor: 24,
+      procedencia: { tipo: "afirmacion", fragmento: "24 meses" },
+    });
+    assert.equal(estado.escalamiento?.motivo, "caso_no_cubierto");
+    assert.equal(llamadas.length, 0, "no llama al core");
+  });
+
+  it("una cita con otras tildes y mayúsculas también está en lo que dijo el solicitante", async (t) => {
+    capturarStderr(t);
+    const { adaptador, estado } = preparar();
+    await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "caso_no_cubierto",
+      plazoMeses: 24,
+      origen: { plazoMeses: cita("24 MESES") },
+    });
+    assert.equal(estado.declarado.plazoMeses?.valor, 24);
+  });
+
+  it("una cita que el solicitante no dijo deja el dato pendiente y escala igual", async (t) => {
+    capturarStderr(t);
+    const { adaptador, estado } = preparar();
+    const resultado = await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "caso_no_cubierto",
+      causa: "moneda_extranjera",
+      monto: 4_000_000,
+      origen: { monto: cita("quiero diez millones") },
+    });
+    assert.equal(resultado.isError, false);
+    assert.equal(estado.declarado.monto, undefined);
+    assert.equal(estado.escalamiento?.motivo, "caso_no_cubierto");
+  });
+
+  it("un dato sin cita queda pendiente, y una cita sin dato se ignora", async (t) => {
+    capturarStderr(t);
+    const { adaptador, estado } = preparar();
+    await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "caso_no_cubierto",
+      monto: 4_000_000,
+      origen: { plazoMeses: cita("24 meses") },
+    });
+    assert.equal(estado.declarado.monto, undefined);
+    assert.equal(estado.declarado.plazoMeses, undefined);
+  });
+
+  it("un valor que no es un entero positivo queda pendiente, sin error", async (t) => {
+    capturarStderr(t);
+    for (const valor of [0, -1, 4.5]) {
+      const { adaptador, estado } = preparar();
+      const resultado = await adaptador.herramientas.solicitar_analista.manejar({
+        motivo: "caso_no_cubierto",
+        monto: valor,
+        origen: { monto: cita("4 millones") },
+      });
+      assert.equal(resultado.isError, false, String(valor));
+      assert.equal(estado.declarado.monto, undefined, String(valor));
+      assert.ok(estado.escalamiento, String(valor));
+    }
+  });
+
+  it("una cita de un documento soportado guarda la procedencia del documento", async (t) => {
+    capturarStderr(t);
+    const { adaptador, estado } = preparar({
+      documentos: [
+        {
+          adjunto: 1,
+          nombre: "certificado.md",
+          soportado: true,
+          contenido: CONTENIDO_CERTIFICADO,
+        },
+      ],
+    });
+    await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "caso_no_cubierto",
+      monto: 3_800_000,
+      origen: { monto: cita("Salario básico mensual", 1) },
+    });
+    assert.deepEqual(estado.declarado.monto, {
+      valor: 3_800_000,
+      procedencia: {
+        tipo: "documento",
+        adjunto: 1,
+        nombre: "certificado.md",
+        fragmento: "Salario básico mensual",
+      },
+    });
+  });
+
+  it("un adjunto que no existe o no es soportado deja el dato pendiente", async (t) => {
+    capturarStderr(t);
+    const { adaptador, estado } = preparar({
+      documentos: [{ adjunto: 1, nombre: "foto.png", soportado: false }],
+    });
+    for (const adjunto of [1, 9]) {
+      await adaptador.herramientas.solicitar_analista.manejar({
+        motivo: "caso_no_cubierto",
+        monto: 3_800_000,
+        origen: { monto: cita("Salario", adjunto) },
+      });
+      assert.equal(estado.declarado.monto, undefined, `adjunto ${adjunto}`);
+    }
+    assert.ok(estado.escalamiento);
+  });
+
+  it("sin esos campos funciona como antes: no guarda nada declarado", async (t) => {
+    capturarStderr(t);
+    const { adaptador, estado } = preparar();
+    await adaptador.herramientas.solicitar_analista.manejar({
+      motivo: "pide_persona",
+    });
+    assert.deepEqual(estado.declarado, {});
+    assert.equal(estado.escalamiento?.motivo, "pide_persona");
+  });
+});
+// ── Lo que el agente puede resolver no escala (#15, US4 · SC-003) ──────────────────────────
+
+describe("adaptador: lo que el agente puede resolver no escala (#15, US4)", () => {
+  beforeEach(() => fijarDestino({ write: () => true }));
+  afterEach(() => fijarDestino(null));
+
+  const sinEscalar = (estado: ReturnType<typeof crearEstado>) => {
+    assert.equal(estado.escalamiento, null);
+    assert.deepEqual(estado.senales, []);
+  };
+
+  it("un archivo al que le falta un dato pide el documento y no deja ninguna señal", async () => {
+    const p = prepararExtraccion(
+      [doc(2, CONTENIDO_CERTIFICADO_SIN_SALARIO)],
+      [valida(salidaCertificadoSinSalario())],
+    );
+    await p.extraer(2);
+    assert.equal(p.estado.eventos[0]?.tipo, "solicitud_de_dato");
+    sinEscalar(p.estado);
+  });
+
+  it("falta_declarado pide el ingreso y no deja ninguna señal", async () => {
+    const p = prepararExtraccion([], []);
+    await registrarEjemplos(p, documentosDeIngreso());
+    await verificarIngreso(p);
+    assert.equal(p.estado.eventos[0]?.tipo, "solicitud_de_dato");
+    sinEscalar(p.estado);
+  });
+
+  it("sin_ingreso pide documentos y no deja ninguna señal", async () => {
+    const p = prepararExtraccion([], []);
+    await verificarIngreso(p, 3_800_000);
+    assert.equal(p.estado.eventos[0]?.tipo, "solicitud_de_dato");
+    sinEscalar(p.estado);
+  });
+
+  it("la primera búsqueda con varias coincidencias pide el documento y no deja ninguna señal", async () => {
+    const { core } = coreIdentidad({ busquedas: [HOMONIMOS] });
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.buscar_solicitante.manejar({
+      nombre: "Elena Martínez Inventada",
+    });
+    assert.equal(estado.eventos[0]?.tipo, "solicitud_de_dato");
+    cerrarTurnoIdentidad(estado);
+    sinEscalar(estado);
+  });
+
+  it("una búsqueda ambigua repetida en el mismo turno cuenta una sola y no escala", async () => {
+    const { core } = coreIdentidad({ busquedas: [HOMONIMOS] });
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.buscar_solicitante.manejar({
+      nombre: "Elena Martínez Inventada",
+    });
+    await adaptador.herramientas.buscar_solicitante.manejar({
+      nombre: "Elena Martínez Inventada",
+    });
+    assert.equal(estado.busquedasAmbiguas, 1);
+    cerrarTurnoIdentidad(estado);
+    sinEscalar(estado);
+  });
+
+  it("después de desambiguar, una búsqueda ambigua posterior no escala ni pide otra vez", async () => {
+    const { core } = coreIdentidad({ busquedas: [UNA, HOMONIMOS] });
+    const estado = crearEstado(randomUUID());
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.buscar_solicitante.manejar({
+      documento: "0001234567",
+    });
+    await adaptador.herramientas.buscar_solicitante.manejar({
+      nombre: "Elena Martínez Inventada",
+    });
+    assert.equal(estado.busquedasAmbiguas, 0);
+    assert.deepEqual(estado.eventos, []);
+    cerrarTurnoIdentidad(estado);
+    sinEscalar(estado);
+  });
+
+  it("en contraste, la ambigüedad que sigue en un turno posterior sí escala", async () => {
+    const { core } = coreIdentidad({ busquedas: [HOMONIMOS] });
+    const estado = crearEstado(randomUUID());
+    estado.busquedasAmbiguas = 1;
+    const adaptador = crearAdaptador({ core, estado });
+    await adaptador.herramientas.buscar_solicitante.manejar({
+      nombre: "Elena Martínez Inventada",
+    });
+    cerrarTurnoIdentidad(estado);
+    assert.equal(estado.escalamiento?.motivo, "identidad_ambigua");
+    assert.deepEqual(estado.senales, [{ motivo: "identidad_ambigua" }]);
+  });
+
+  it("la descripción de solicitar_analista no da ningún literal de umbral al modelo", () => {
+    for (const literal of ["5.000.000", "5_000_000", "30 %", "30%", "10 %", "10%"]) {
+      assert.equal(DESCRIPCION_SOLICITAR_ANALISTA.includes(literal), false, literal);
+    }
   });
 });

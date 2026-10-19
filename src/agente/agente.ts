@@ -13,20 +13,30 @@ import {
   cerrarTurnoIdentidad,
   crearAdaptador,
   crearEstado,
+  dejarSenal,
   emitirEvento,
-  REGLA_AMBIGUA,
-  REGLA_NO_CUBIERTO,
-  REGLA_NO_EXTRAIBLE,
-  REGLA_NO_VERIFICABLE,
-  REGLA_PIDE_PERSONA,
+  type EstadoConversacion,
   type InfoHerramienta,
   type SenalEscalamiento,
 } from "./adaptador.ts";
-import { REGLA_3 } from "../politica/ingreso.ts";
-import { REGLA_2 } from "../politica/preaprobacion.ts";
+import { CODIGOS_BLOQUEO } from "../compartido/preaprobacion.ts";
+import {
+  claveIdempotenciaEscalamiento,
+  type EntradaEscalamiento,
+  type ResumenAnalista,
+} from "../compartido/escalamiento.ts";
+import {
+  REGLA_4,
+  causaDeEscalamiento,
+  detectarPeticionPersona,
+  reglaDeEscalamiento,
+  type CausaEscalamiento,
+  type MotivoEscalamiento,
+} from "../politica/escalamiento.ts";
 import { crearClienteCore, type ClienteCore } from "./cliente-core.ts";
 import { crearControlIdentidad } from "./control-identidad.ts";
 import { crearControlPreaprobacion } from "./control-preaprobacion.ts";
+import { conReintentos } from "./reintentos.ts";
 import {
   crearClasificador,
   crearSubagente,
@@ -53,6 +63,9 @@ const SYSTEM_PROMPT = [
   // después ninguna otra herramienta se ejecuta (control de identidad).
   "Si el solicitante pide hablar con una persona, no lo busques ni le pidas datos: llama de inmediato a solicitar_analista con motivo pide_persona.",
   "Si el caso no está cubierto por la política, por ejemplo ingresos en moneda extranjera o un documento no soportado, tampoco lo identifiques: llama a solicitar_analista con motivo caso_no_cubierto y la causa.",
+  // Lo que se puede resolver no se escala (#15, R12): pedir el dato o desambiguar antes de pasar el caso.
+  "No escales por un dato que puedes pedir al solicitante ni por varias coincidencias que puedes desambiguar: pídelo y sigue.",
+  "Cuando solicites un analista, no digas qué decidirá ni cuándo responderá: solo que un analista revisará su caso.",
   // Identificación del solicitante (#9, R8): el modelo guía; lo obligatorio lo aplica el código.
   "En cualquier otro caso, cuando el solicitante quiera iniciar una solicitud, pídele primero su número de documento o su nombre completo y búscalo con buscar_solicitante. Las preguntas generales se responden sin identificar.",
   "Si hay varias coincidencias, no elijas: pide el número de documento.",
@@ -140,6 +153,10 @@ export interface ResultadoConversacion {
   desambiguada: boolean;
   /** Documentos que ya pasaron por la Regla 5 al cerrar un turno; el chat lo pasa en el siguiente (#10). */
   documentosRevisados: number;
+  /** El resumen que recibió el analista; `null` si no hubo escalamiento o su entrega quedó pendiente (#15). */
+  handoff: ResumenAnalista | null;
+  /** Si el resumen llegó al analista; `null` si la conversación no escaló (#15, R7). */
+  entrega: "entregada" | "pendiente" | null;
 }
 
 export interface OpcionesConversar {
@@ -174,41 +191,22 @@ const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeou
 
 type Motivo = SenalEscalamiento["motivo"];
 
-const AVISOS: Readonly<Record<Motivo, string>> = {
-  falla_transitoria_persistente:
-    "No pude consultar el sistema de originación en este momento. Tu caso pasa a un analista, que te contactará.",
-  respuesta_incompleta: "No pude completar tu respuesta. Tu caso pasa a un analista.",
-  limite_de_turnos: "No pude completar tu consulta. Tu caso pasa a un analista.",
-  falla_del_agente: "Tuve un problema al atender tu consulta. Tu caso pasa a un analista.",
-  identidad_ambigua:
-    "No pude identificarte con certeza. Tu caso pasa a un analista, que te contactará.",
-  identidad_no_verificable:
-    "No pude verificar tu identidad. Tu caso pasa a un analista, que te contactará.",
-  pide_persona: "Te comunico con un analista de crédito, que te contactará.",
-  caso_no_cubierto: "Tu caso necesita la revisión de un analista, que te contactará.",
-  documento_no_extraible:
-    "No pude leer con certeza los datos de tu documento. Tu caso pasa a un analista, que te contactará.",
-  discrepancia_de_ingreso:
-    "Los ingresos de tus documentos no coinciden con lo que declaraste. Tu caso pasa a un analista, que te contactará.",
-  inconsistencia_documental:
-    "Encontré datos que no coinciden entre tus documentos. Tu caso pasa a un analista, que te contactará.",
-  preaprobacion_fuera_de_politica:
-    "Tu solicitud no cumple las condiciones para una preaprobación automática. Pasa a un analista, que te contactará.",
-};
+/** Cierra cada aviso: dice qué pasa con el caso sin prometer un contacto ni un resultado (#15, FR-009). */
+const REVISARA = "Un analista de crédito revisará tu caso.";
 
-const REGLAS: Readonly<Record<Motivo, string>> = {
-  falla_transitoria_persistente: "constitución, Principio VI · reintentos agotados",
-  respuesta_incompleta: "FR-004 · razón de parada inesperada",
-  limite_de_turnos: "FR-003 · límite de seguridad del ciclo",
-  falla_del_agente: "constitución, Principio VI · reintento del modelo agotado",
-  identidad_ambigua: REGLA_AMBIGUA,
-  identidad_no_verificable: REGLA_NO_VERIFICABLE,
-  pide_persona: REGLA_PIDE_PERSONA,
-  caso_no_cubierto: REGLA_NO_CUBIERTO,
-  documento_no_extraible: REGLA_NO_EXTRAIBLE,
-  discrepancia_de_ingreso: REGLA_3,
-  inconsistencia_documental: REGLA_3,
-  preaprobacion_fuera_de_politica: REGLA_2,
+const AVISOS: Readonly<Record<Motivo, string>> = {
+  falla_transitoria_persistente: `No pude consultar el sistema de originación en este momento. ${REVISARA}`,
+  respuesta_incompleta: `No pude completar tu respuesta. ${REVISARA}`,
+  limite_de_turnos: `No pude completar tu consulta. ${REVISARA}`,
+  falla_del_agente: `Tuve un problema al atender tu consulta. ${REVISARA}`,
+  identidad_ambigua: `No pude identificarte con certeza. ${REVISARA}`,
+  identidad_no_verificable: `No pude verificar tu identidad. ${REVISARA}`,
+  pide_persona: REVISARA,
+  caso_no_cubierto: "Tu caso necesita la revisión de un analista de crédito.",
+  documento_no_extraible: `No pude leer con certeza los datos de tu documento. ${REVISARA}`,
+  discrepancia_de_ingreso: `Los ingresos de tus documentos no coinciden con lo que declaraste. ${REVISARA}`,
+  inconsistencia_documental: `Encontré datos que no coinciden entre tus documentos. ${REVISARA}`,
+  preaprobacion_fuera_de_politica: `Tu solicitud no cumple las condiciones para una preaprobación automática. ${REVISARA}`,
 };
 
 const REGLA_CORE_NO_ARRANCO = "constitución, Principio VI · el core no arrancó";
@@ -239,6 +237,117 @@ function clasificar(intento: Intento): Clasificacion {
   return { tipo: "reintentar", ultimoError: r.subtype };
 }
 
+interface ResultadoEntrega {
+  entrega: "entregada" | "pendiente";
+  handoff: ResumenAnalista | null;
+}
+
+/** Cuántas causas adicionales admite la entrada del core; las demás no caben en el resumen. */
+const MAX_CAUSAS_ADICIONALES = 8;
+
+/**
+ * La causa de una señal, deducida por la política. Un código de la Regla 2 desconocido es un error de
+ * programación: no se adivina una causa.
+ */
+function clasificarSenal(motivo: MotivoEscalamiento, codigo: string | undefined) {
+  if (motivo !== "preaprobacion_fuera_de_politica") {
+    return { causa: causaDeEscalamiento({ motivo }), motivo };
+  }
+  const bloqueo = CODIGOS_BLOQUEO.find((c) => c === codigo);
+  if (bloqueo === undefined) {
+    throw new Error(`código de bloqueo desconocido: ${codigo ?? "ausente"}`);
+  }
+  return { causa: causaDeEscalamiento({ motivo, codigo: bloqueo }), motivo, codigo: bloqueo };
+}
+
+/**
+ * La causa de la señal para el evento. Si la señal trae un código de la Regla 2 desconocido, que no
+ * debería pasar, el evento no falla: cualquier caso fuera de las causas conocidas es «no cubierto».
+ */
+function causaDeSenal(senal: SenalEscalamiento): CausaEscalamiento {
+  try {
+    return clasificarSenal(senal.motivo, senal.codigo).causa;
+  } catch {
+    return "caso_no_cubierto";
+  }
+}
+
+/**
+ * Lo que se envía al core (#15, R3): la clasificación de la señal principal, las demás causas del turno
+ * y, solo si el modelo las citó, el monto y el plazo que dijo el solicitante. Ningún dato del solicitante.
+ */
+function armarEntradaHandoff(
+  estado: EstadoConversacion,
+  principal: SenalEscalamiento,
+): Omit<EntradaEscalamiento, "correlationId"> {
+  const adicionales = estado.senales
+    .filter((o) => !(o.motivo === principal.motivo && o.codigo === principal.codigo))
+    .slice(0, MAX_CAUSAS_ADICIONALES)
+    .map((o) => clasificarSenal(o.motivo, o.codigo));
+  const { monto, plazoMeses } = estado.declarado;
+  return {
+    claveIdempotencia: claveIdempotenciaEscalamiento(estado.correlationId),
+    ...clasificarSenal(principal.motivo, principal.codigo),
+    ...(adicionales.length > 0 ? { causasAdicionales: adicionales } : {}),
+    ...(monto !== undefined || plazoMeses !== undefined
+      ? {
+          declarado: {
+            ...(monto !== undefined ? { monto } : {}),
+            ...(plazoMeses !== undefined ? { plazoMeses } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+/**
+ * Entrega el caso al analista por el core, con reintentos acotados (#15, R7). Nunca lanza: si el core no
+ * responde, o rechaza la entrada, la entrega queda pendiente con un log de error y la conversación se
+ * escala igual (Principios V y VI). Usa el cliente del core y no el adaptador, que con una señal vigente
+ * niega toda llamada.
+ */
+async function entregarHandoff({
+  core,
+  estado,
+  senal,
+  dormir,
+  azar,
+}: {
+  core: ClienteCore | null;
+  estado: EstadoConversacion;
+  senal: SenalEscalamiento;
+  dormir: (ms: number) => Promise<void>;
+  azar: () => number;
+}): Promise<ResultadoEntrega> {
+  const pendiente = (causa: string, extra: Record<string, unknown> = {}): ResultadoEntrega => {
+    registrar(
+      "error_entrega_escalamiento",
+      { correlationId: estado.correlationId, causa, ...extra },
+      { nivel: "error" },
+    );
+    return { entrega: "pendiente", handoff: null };
+  };
+  if (core === null) return pendiente("core no disponible: no arrancó");
+  try {
+    const entrada = armarEntradaHandoff(estado, senal);
+    const resultado = await conReintentos(
+      () => core.escalarAAnalista(entrada, estado.correlationId),
+      { dormir, azar },
+    );
+    if (resultado.respuesta.ok) {
+      return { entrega: "entregada", handoff: resultado.respuesta.datos.escalamiento };
+    }
+    return pendiente(
+      resultado.agotado
+        ? `reintentos agotados: ${resultado.ultimoError ?? "desconocido"}`
+        : `${resultado.respuesta.error.codigo}: ${resultado.respuesta.error.mensaje}`,
+      { intentos: resultado.intentos },
+    );
+  } catch (error) {
+    return pendiente(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+  }
+}
+
 export async function conversar(
   mensaje: string,
   {
@@ -266,12 +375,15 @@ export async function conversar(
   let turnos = 0;
   let revisados = documentosRevisados;
 
-  function escalar(
+  /** El core de la conversación; `null` mientras no arrancó, y entonces no hay a quién entregar. */
+  let coreEnUso: ClienteCore | null = null;
+
+  async function escalar(
     motivo: Motivo,
     ultimoError: string,
     intentos?: number,
-    regla: string = REGLAS[motivo],
-  ): ResultadoConversacion {
+    regla: string = reglaDeEscalamiento(motivo),
+  ): Promise<ResultadoConversacion> {
     const senal: SenalEscalamiento = estado.escalamiento ?? {
       motivo,
       regla,
@@ -282,6 +394,19 @@ export async function conversar(
       ...(intentos !== undefined ? { intentos } : {}),
     };
     if (estado.escalamiento === null) registrar("escalamiento", { ...senal });
+    // El resumen llega al analista por el core; si no llega, se escala igual con la entrega pendiente (#15).
+    const { entrega, handoff } = await entregarHandoff({
+      core: coreEnUso,
+      estado,
+      senal,
+      dormir,
+      azar,
+    });
+    registrar("entrega_escalamiento", {
+      correlationId,
+      entrega,
+      ...(handoff !== null ? { idEscalamiento: handoff.idEscalamiento } : {}),
+    });
     // La señal se muestra en el chat como evento del catálogo, sin el detalle técnico (#8).
     const valores = {
       ...(senal.herramienta !== undefined ? { herramienta: senal.herramienta } : {}),
@@ -295,6 +420,10 @@ export async function conversar(
         : {}),
       ...(senal.umbralPorcentaje !== undefined ? { umbralPorcentaje: senal.umbralPorcentaje } : {}),
       ...(senal.reglas !== undefined ? { reglas: senal.reglas } : {}),
+      // Qué pasó con el caso: su causa, y si el resumen llegó al analista (#15, R10).
+      causaEscalamiento: causaDeSenal(senal),
+      entrega,
+      ...(handoff !== null ? { idEscalamiento: handoff.idEscalamiento } : {}),
     };
     // Los eventos del intento clasificado se conservan (reflejan lo que el código ya hizo) y el
     // escalamiento va al final; el chat fija el primer estado final (spec, casos borde).
@@ -324,6 +453,8 @@ export async function conversar(
       busquedasAmbiguas: estado.busquedasAmbiguas,
       desambiguada: estado.desambiguada,
       documentosRevisados: revisados,
+      handoff,
+      entrega,
     };
   }
 
@@ -338,14 +469,25 @@ export async function conversar(
     return r;
   }
 
+  // Regla 4 antes que cualquier otra cosa (#15, R5): si el mensaje pide explícitamente una persona, se
+  // escala por código, sin llamar al modelo ni investigar nada; el core solo se usa para entregar el
+  // resumen, y si no arranca la causa sigue siendo la petición.
+  const pidePersonaPorCodigo = detectarPeticionPersona(mensaje);
+  if (pidePersonaPorCodigo) {
+    dejarSenal(estado, {
+      motivo: "pide_persona",
+      regla: REGLA_4,
+      herramienta: "deteccion_previa",
+    });
+  }
+
   // Sin core no hay respuesta posible: se escala en lugar de lanzar (FR-012; Principio VI).
-  let coreEnUso: ClienteCore;
   try {
     coreEnUso = core ?? (await conectarCore());
   } catch (error) {
     const causa = error instanceof Error ? error.message : String(error);
     return cerrarCon(
-      escalar(
+      await escalar(
         "falla_transitoria_persistente",
         `core_no_arranco: ${causa}`,
         undefined,
@@ -354,8 +496,9 @@ export async function conversar(
       {},
     );
   }
+  const coreConectado: ClienteCore = coreEnUso;
   const adaptador = crearAdaptador({
-    core: coreEnUso,
+    core: coreConectado,
     estado,
     dormir,
     azar,
@@ -371,7 +514,7 @@ export async function conversar(
   });
   // Regla 1 antes de las herramientas que exigen identidad, consultando el core (#9, R7).
   const controlIdentidad = crearControlIdentidad({
-    core: coreEnUso,
+    core: coreConectado,
     estado,
     dormir,
     azar,
@@ -384,7 +527,12 @@ export async function conversar(
         : Promise.resolve(false),
   });
   // Regla 2 antes de preaprobar: recalcula con la solicitud registrada del core (#14, R4).
-  const controlPreaprobacion = crearControlPreaprobacion({ core: coreEnUso, estado, dormir, azar });
+  const controlPreaprobacion = crearControlPreaprobacion({
+    core: coreConectado,
+    estado,
+    dormir,
+    azar,
+  });
   const prompt = componerPrompt(mensaje, historial);
 
   async function intentar(): Promise<Intento> {
@@ -446,6 +594,8 @@ export async function conversar(
   }
 
   try {
+    // La Regla 4 ya decidió: no se llama al modelo ni se revisan los documentos (R5).
+    if (pidePersonaPorCodigo) return cerrarCon(await escalar("pide_persona", ""), {});
     let intento = await intentar();
     let clase = clasificar(intento);
     if (estado.escalamiento === null && clase.tipo === "reintentar") {
@@ -459,7 +609,7 @@ export async function conversar(
     cerrarTurnoIdentidad(estado);
     // La señal del adaptador prevalece sobre cualquier result (contracts/agente.md).
     if (estado.escalamiento !== null) {
-      return cerrarCon(escalar(estado.escalamiento.motivo, ""), intento);
+      return cerrarCon(await escalar(estado.escalamiento.motivo, ""), intento);
     }
     switch (clase.tipo) {
       case "respuesta":
@@ -474,16 +624,18 @@ export async function conversar(
             busquedasAmbiguas: estado.busquedasAmbiguas,
             desambiguada: estado.desambiguada,
             documentosRevisados: revisados,
+            handoff: null,
+            entrega: null,
           },
           intento,
         );
       case "escalar":
-        return cerrarCon(escalar(clase.motivo, clase.ultimoError), intento);
+        return cerrarCon(await escalar(clase.motivo, clase.ultimoError), intento);
       default:
         // "reintentar" tras el reintento: el primer "reintentar" sin señal siempre reintenta.
-        return cerrarCon(escalar("falla_del_agente", clase.ultimoError, 2), intento);
+        return cerrarCon(await escalar("falla_del_agente", clase.ultimoError, 2), intento);
     }
   } finally {
-    if (core === undefined) await coreEnUso.cerrar();
+    if (core === undefined) await coreConectado.cerrar();
   }
 }

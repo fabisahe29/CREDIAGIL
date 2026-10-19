@@ -21,6 +21,10 @@ import { esquemaRegistroExtraccion } from "../compartido/extraccion.ts";
 import { esquemaVerificacionIngreso } from "../compartido/ingreso.ts";
 import { DESCRIPCION_PREAPROBAR_CREDITO } from "../compartido/preaprobacion.ts";
 import {
+  DESCRIPCION_ESCALAR_A_ANALISTA,
+  esquemaResumenAnalista,
+} from "../compartido/escalamiento.ts";
+import {
   DESCRIPCION_REGISTRAR_SOLICITUD,
   esquemaSolicitudRegistrada,
 } from "../compartido/solicitud.ts";
@@ -91,6 +95,21 @@ const ENTRADAS = {
   consultar_solicitud_registrada: z.object({ correlationId }).strict(),
   // #14: sin campos del modelo: monto, cuota e ingreso salen de la solicitud registrada (R3).
   preaprobar_credito: z.object({ correlationId }).strict(),
+  // #15: el solicitante, la solicitud, los ingresos, los documentos y las discrepancias no son campos
+  // de entrada: el resumen lo arma el core con su estado (R3). Los valores los valida el core.
+  escalar_a_analista: z
+    .object({
+      // Primero: si falta, es el campo que se informa (la trazabilidad lo necesita).
+      correlationId,
+      claveIdempotencia: z.unknown(),
+      causa: z.unknown(),
+      motivo: z.unknown(),
+      codigo: z.unknown().optional(),
+      causasAdicionales: z.unknown().optional(),
+      declarado: z.unknown().optional(),
+    })
+    .strict(),
+  consultar_escalamiento: z.object({ correlationId }).strict(),
 } as const;
 
 type NombreHerramienta = keyof typeof ENTRADAS;
@@ -536,6 +555,81 @@ export function crearServidor(core: Core): McpServer {
           ...auditoria,
         });
       }
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "escalar_a_analista",
+    {
+      title: "Escalar a analista",
+      description: DESCRIPCION_ESCALAR_A_ANALISTA,
+      inputSchema: z.looseObject({
+        claveIdempotencia: anunciado(
+          "Obligatorio. Clave del escalamiento (1 a 64 caracteres); repetirla no crea otro.",
+        ),
+        causa: anunciado(
+          "Obligatorio. Una de peticion_de_persona, monto_sobre_umbral, cuota_sobre_porcentaje, discrepancia_de_ingreso o caso_no_cubierto.",
+        ),
+        motivo: anunciado("Obligatorio. El motivo de la señal de escalamiento."),
+        codigo: anunciado(
+          "Opcional. Solo con el motivo preaprobacion_fuera_de_politica, y obligatorio entonces: el código del bloqueo.",
+        ),
+        causasAdicionales: anunciado(
+          "Opcional. Hasta 8 causas más del mismo caso, cada una con causa, motivo y código opcional.",
+        ),
+        declarado: anunciado(
+          "Opcional. Monto y plazo que dijo el solicitante, cada uno con valor entero positivo y procedencia; solo se usa si no hay solicitud registrada.",
+        ),
+        correlationId: CORRELATION_ID_ANUNCIADO,
+      }),
+      outputSchema: salida({
+        escalamiento: esquemaResumenAnalista,
+        repetida: z.boolean(),
+      }),
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("escalar_a_analista", argumentos);
+      if (!validacion.ok) {
+        registrarHerramienta("escalar_a_analista", argumentos, validacion.respuesta);
+        return aResultadoMcp(validacion.respuesta);
+      }
+      const { respuesta, auditoria } = core.escalarAAnalista(validacion.entrada);
+      // Solo el resultado y el identificador: nunca nombres, montos, documentos ni citas (R11).
+      registrarHerramienta(
+        "escalar_a_analista",
+        argumentos,
+        respuesta,
+        respuesta.ok ? { idEscalamiento: respuesta.datos.escalamiento.idEscalamiento } : {},
+      );
+      if (auditoria !== null) {
+        registrar("auditoria_escalamiento", {
+          correlationId: validacion.entrada.correlationId,
+          ...auditoria,
+        });
+      }
+      return aResultadoMcp(respuesta);
+    },
+  );
+
+  servidor.registerTool(
+    "consultar_escalamiento",
+    {
+      title: "Consultar escalamiento",
+      description:
+        "Devuelve el escalamiento de la conversación, con el resumen completo para el analista, o null si no se escaló. Solo lectura.",
+      inputSchema: z.looseObject({ correlationId: CORRELATION_ID_ANUNCIADO }),
+      outputSchema: salida({ escalamiento: esquemaResumenAnalista.nullable() }),
+      annotations: { readOnlyHint: true },
+    },
+    (argumentos: unknown) => {
+      const validacion = validarEntrada("consultar_escalamiento", argumentos);
+      const respuesta = validacion.ok
+        ? core.consultarEscalamiento(validacion.entrada.correlationId)
+        : validacion.respuesta;
+      registrarHerramienta("consultar_escalamiento", argumentos, respuesta, {
+        escalamiento: respuesta.ok ? respuesta.datos.escalamiento !== null : null,
+      });
       return aResultadoMcp(respuesta);
     },
   );

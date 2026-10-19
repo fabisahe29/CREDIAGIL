@@ -36,6 +36,13 @@ import {
   type SimulacionCapacidadPago,
 } from "../compartido/capacidad-pago.ts";
 import {
+  esquemaResultadoEscalamiento,
+  esquemaResumenAnalista,
+  type EntradaEscalamiento,
+  type ResultadoEscalamiento,
+  type ResumenAnalista,
+} from "../compartido/escalamiento.ts";
+import {
   esquemaResultadoRegistro,
   esquemaSolicitudRegistrada,
   type EntradaRegistroSolicitud,
@@ -79,10 +86,18 @@ const esquemaSolicitudConsultada = esquemaRespuesta(
   z.object({ solicitud: esquemaSolicitudRegistrada.nullable() }).strict(),
 );
 
+const esquemaEscalamiento = esquemaRespuesta(esquemaResultadoEscalamiento);
+const esquemaEscalamientoConsultado = esquemaRespuesta(
+  z.object({ escalamiento: esquemaResumenAnalista.nullable() }).strict(),
+);
+
 export type RespuestaCapacidadPago = Respuesta<{ simulacion: SimulacionCapacidadPago }>;
 export type RespuestaRegistroSolicitud = Respuesta<ResultadoRegistro>;
 /** La preaprobación devuelve la misma forma que el registro: la solicitud y si fue una repetición. */
 export type RespuestaPreaprobacion = Respuesta<ResultadoRegistro>;
+/** El escalamiento devuelve el resumen para el analista y si fue una repetición (#15). */
+export type RespuestaEscalamiento = Respuesta<ResultadoEscalamiento>;
+export type RespuestaEscalamientoConsultado = Respuesta<{ escalamiento: ResumenAnalista | null }>;
 export type RespuestaSolicitudRegistrada = Respuesta<{ solicitud: SolicitudRegistrada | null }>;
 export type RespuestaVerificacionIngreso = Respuesta<{ verificacion: VerificacionIngreso }>;
 export type RespuestaVerificacionConsultada = Respuesta<{
@@ -148,6 +163,16 @@ export interface ClienteCore {
    * core decide con la solicitud, la identidad y la política.
    */
   preaprobarSolicitud(correlationId: string): Promise<RespuestaPreaprobacion>;
+  /**
+   * Entrega el caso a un analista (#15). Lleva solo la clasificación y, si no hay solicitud, lo que dijo
+   * el solicitante: el core arma el resumen con su propio estado. No exige identidad ni solicitud.
+   */
+  escalarAAnalista(
+    entrada: Omit<EntradaEscalamiento, "correlationId">,
+    correlationId: string,
+  ): Promise<RespuestaEscalamiento>;
+  /** Solo lectura (#15): el escalamiento de la conversación, o `null`. */
+  consultarEscalamiento(correlationId: string): Promise<RespuestaEscalamientoConsultado>;
   cerrar(): Promise<void>;
 }
 
@@ -296,6 +321,12 @@ export async function crearClienteCore({
     },
     preaprobarSolicitud(correlationId) {
       return llamar("preaprobar_credito", { correlationId }, esquemaRegistroSolicitud);
+    },
+    escalarAAnalista(entrada, correlationId) {
+      return llamar("escalar_a_analista", { ...entrada, correlationId }, esquemaEscalamiento);
+    },
+    consultarEscalamiento(correlationId) {
+      return llamar("consultar_escalamiento", { correlationId }, esquemaEscalamientoConsultado);
     },
     async cerrar() {
       if (cerrado) return;
