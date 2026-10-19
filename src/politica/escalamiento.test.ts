@@ -280,6 +280,11 @@ describe("política: detectarPeticionPersona, las frases que coinciden (#15, US2
     "Quisiera, mejor dicho, necesito hablar con un humano",
     "Exijo que me atienda una persona de carne y hueso",
     "  quiero   hablar   con   una   asesora  ",
+    "No, quiero hablar con una persona",
+    "No quiero seguir con el bot. Quiero hablar con un analista",
+    "¿Puedo hablar con una persona o solo con el bot?",
+    "Quiero que me pasen con una persona",
+    "Necesito una persona real que me atienda",
   ];
   for (const frase of coinciden) {
     it(`reconoce «${frase.trim()}»`, () => {
@@ -294,9 +299,22 @@ describe("política: detectarPeticionPersona, las frases que coinciden (#15, US2
     );
   });
 
-  it("el sustantivo a menos de ocho palabras del verbo coincide; a ocho o más, no", () => {
-    assert.equal(detectarPeticionPersona("Hablar a b c d e f una persona"), true);
-    assert.equal(detectarPeticionPersona("Hablar a b c d e f g una persona"), false);
+  it("con un verbo de contacto, el sustantivo a cuatro palabras o menos coincide; a más, no", () => {
+    assert.equal(detectarPeticionPersona("Hablar a b c una persona"), true);
+    assert.equal(detectarPeticionPersona("Hablar a b c d una persona"), false);
+  });
+
+  it("con un verbo de deseo, el sustantivo debe ir justo después", () => {
+    assert.equal(detectarPeticionPersona("Necesito un asesor"), true);
+    assert.equal(detectarPeticionPersona("Necesito algo y un asesor"), false);
+  });
+
+  it("una negación de otra oración no anula la petición", () => {
+    assert.equal(
+      detectarPeticionPersona("No quiero hablar con una persona. Quiero hablar con un analista"),
+      true,
+    );
+    assert.equal(detectarPeticionPersona("No; necesito hablar con una persona"), true);
   });
 });
 
@@ -310,6 +328,12 @@ describe("política: detectarPeticionPersona, lo que no coincide (#15, US2)", ()
     "Quiero un crédito de 4 millones",
     "Necesito saber el estado de mi solicitud",
     "Una persona real me atendió ayer",
+    "Quiero un crédito de 3 millones, soy una persona natural",
+    "Soy una persona natural y quiero un crédito",
+    "Quiero saber si una persona con deudas puede pedir un crédito",
+    "Necesito una persona natural como codeudor",
+    "Quiero registrarme como una persona jurídica",
+    "Pido un crédito para una persona de mi familia",
     "",
     "     ",
   ];

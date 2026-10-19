@@ -2193,6 +2193,37 @@ describe("agente: la Regla 4 se decide antes de llamar al modelo (#15, US2)", ()
     assert.deepEqual(llamados, []);
   });
 
+  it("una solicitud normal que dice «soy una persona natural» no escala por código: llega al modelo", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "Claro, sigamos.")]]);
+    const r = await conversar("Quiero un crédito de 3 millones, soy una persona natural", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 1, "el mensaje llega al modelo");
+    assert.equal(r.tipo, "respuesta");
+    assert.equal(r.escalamiento, null);
+    assert.equal(r.entrega, null);
+    assert.deepEqual(llamados, []);
+  });
+
+  it("«No, quiero hablar con una persona» escala por código, sin el modelo", async (t) => {
+    capturarLogs(t);
+    const { core: falso, llamados } = coreEspia();
+    const { fn, llamadas } = consultaFalsa([[resultado("success", "end_turn", "no se usa")]]);
+    const r = await conversar("No, quiero hablar con una persona", {
+      ejecutarConsulta: fn,
+      core: falso,
+      ...sinEspera,
+    });
+    assert.equal(llamadas.length, 0);
+    assert.equal(r.tipo, "escalada");
+    assert.equal(r.escalamiento?.motivo, "pide_persona");
+    assert.deepEqual(llamados, ["escalarAAnalista"]);
+  });
+
   it("la petición que el modelo detecta sigue funcionando con solicitar_analista", async (t) => {
     capturarLogs(t);
     const { core: falso, entradas } = coreEspia();

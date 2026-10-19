@@ -25,10 +25,12 @@ Una combinación imposible (un `codigo` con otro motivo que `preaprobacion_fuera
 
 **Normalización**: minúsculas, sin tildes (NFD sin marcas), signos de puntuación como espacios y espacios colapsados.
 
-**Coincide** si hay, en el texto normalizado:
-1. un **verbo de petición** de una lista cerrada (`hablar`, `conversar`, `comunicar`, `contactar`, `pasar`, `transferir`, `atender`, `quiero`, `necesito`, `prefiero`, `exijo`, `pido`), y
-2. a menos de ocho palabras después, un **sustantivo de persona** de una lista cerrada (`una persona`, `una persona real`, `un humano`, `un asesor`, `una asesora`, `un analista`, `un ejecutivo`, `un representante`, `alguien real`, `alguien de carne y hueso`), y
-3. **ninguna negación** (`no`, `ni`, `sin`, `nunca`, `tampoco`) en las tres palabras anteriores al verbo.
+**Coincide** si hay, en el texto normalizado, un verbo **ligado a la persona**:
+1. un **verbo de contacto** (`hablar`, `conversar`, `comunicar`, `contactar`, `pasar`, `transferir`, `atender` y sus formas de pedir, como `pásame` o `pasen`) con el **sustantivo de persona** a cuatro palabras o menos después; o
+2. un **verbo de deseo** (`quiero`, `quisiera`, `necesito`, `prefiero`, `deseo`, `solicito`, `exijo`, `pido`) con el sustantivo de persona **justo después** («necesito un asesor»). Un verbo de deseo solo no basta: «quiero un crédito» no pide una persona; y
+3. **ninguna negación** (`no`, `ni`, `sin`, `nunca`, `tampoco`, `jamás`) en las tres palabras anteriores al verbo **dentro de la misma oración**: una coma, un punto u otro signo de pausa corta la negación («No, quiero hablar con una persona» sí coincide).
+
+Los sustantivos de persona son una lista cerrada (`una persona`, `un humano`, `un asesor`, `una asesora`, `un analista`, `un ejecutivo`, `un representante`, `alguien real`, `alguien de carne y hueso`, `un agente humano`). **«Una persona natural»** y **«jurídica»** no cuentan: son una clase de solicitante, no alguien con quien hablar («soy una persona natural» no pide nada).
 
 Las listas son parte de la Regla 4 y viven en el módulo, no en el prompt. Una petición que no cumple las tres condiciones no se detecta por código: decide el modelo, que sigue con `solicitar_analista` (R5).
 
@@ -42,6 +44,8 @@ En `escalamiento.test.ts`, además de los de las tablas de [R1](../research.md#r
 | «Necesito un asesor humano, por favor» | `true` |
 | «Pásame con un analista» | `true` |
 | «Prefiero hablar con alguien real» | `true` |
+| «No, quiero hablar con una persona» (la coma corta la negación) | `true` |
+| «¿Puedo hablar con una persona o solo con el bot?» | `true` |
 | «QUIERO HABLAR CON UNA PERSONA.» (mayúsculas y punto) | `true` |
 | «Quiero 4 millones a 24 meses, pero prefiero hablar con una persona» (con datos) | `true` |
 | «No quiero hablar con una persona, sigue tú» | `false` |
@@ -49,6 +53,9 @@ En `escalamiento.test.ts`, además de los de las tablas de [R1](../research.md#r
 | «Mi asesor del banco me dijo que pidiera un crédito» (sin verbo de petición) | `false` |
 | «¿Qué hace un analista de crédito?» (sin verbo de petición) | `false` |
 | «Quiero un crédito de 4 millones» | `false` |
+| «Quiero un crédito de 3 millones, soy una persona natural» | `false` |
+| «Quiero saber si una persona con deudas puede pedir un crédito» | `false` |
+| «Necesito una persona natural como codeudor» | `false` |
 | «» y un texto de solo espacios | `false` |
 
 ## Las combinaciones

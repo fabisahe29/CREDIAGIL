@@ -189,11 +189,14 @@ export const accionRecomendada = (clasificacion: Clasificacion): AccionRecomenda
 // Regla 4: la petición explícita de una persona, detectada por código antes del modelo
 // ---------------------------------------------------------------------------------------------
 
-/** Palabras que anulan un verbo de petición si están justo antes de él. */
+/** Palabras que anulan un verbo si están justo antes de él, en la misma oración. */
 const NEGACIONES: readonly string[] = ["no", "ni", "sin", "nunca", "tampoco", "jamas"];
 
-/** Verbos con los que se pide algo, normalizados: minúsculas y sin tildes. */
-const VERBOS_DE_PETICION: readonly string[] = [
+/**
+ * Verbos que por sí solos piden hablar con alguien, normalizados: minúsculas y sin tildes. Con uno de
+ * estos, el nombre de la persona puede ir a pocas palabras («hablar con una persona»).
+ */
+const VERBOS_DE_CONTACTO: readonly string[] = [
   "hablar",
   "hablarme",
   "hablarle",
@@ -201,18 +204,34 @@ const VERBOS_DE_PETICION: readonly string[] = [
   "comunicar",
   "comunicarme",
   "comunicame",
+  "comunique",
+  "comuniquen",
   "contactar",
   "contactarme",
   "contactame",
+  "contacte",
+  "contacten",
   "pasar",
   "pasame",
   "pasarme",
+  "pase",
+  "pasen",
   "transferir",
   "transferirme",
   "transfiereme",
+  "transfiera",
+  "transfieran",
   "atender",
   "atienda",
+  "atiendan",
   "atiendame",
+];
+
+/**
+ * Verbos de deseo. Solos no piden una persona («quiero un crédito»): cuentan solo si el nombre de la
+ * persona va justo después («necesito un asesor»).
+ */
+const VERBOS_DE_DESEO: readonly string[] = [
   "quiero",
   "quisiera",
   "necesito",
@@ -240,51 +259,78 @@ const SUSTANTIVOS_DE_PERSONA: readonly (readonly string[])[] = [
   ["alguien", "de", "carne", "y", "hueso"],
 ];
 
-/** El sustantivo debe estar a menos de estas palabras después del verbo. */
-const DISTANCIA_MAXIMA_AL_SUSTANTIVO = 8;
+/** «Una persona natural» o «jurídica» es una clase de solicitante, no alguien con quien hablar. */
+const CLASES_DE_PERSONA: readonly string[] = ["natural", "juridica", "juridico", "moral"];
+
+/** Con un verbo de contacto, el nombre de la persona debe empezar a esta distancia o menos. */
+const DISTANCIA_MAXIMA_CON_VERBO_DE_CONTACTO = 4;
 
 /** Cuántas palabras antes del verbo se miran en busca de una negación. */
 const VENTANA_DE_NEGACION = 3;
 
-/** Palabras en minúsculas y sin tildes, sin puntuación ni espacios repetidos. */
+/** Marca el límite entre oraciones: una negación no lo cruza. */
+const LIMITE = "|";
+
+/**
+ * Palabras en minúsculas y sin tildes, sin espacios repetidos. Los signos que cierran una oración o
+ * una pausa se conservan como `LIMITE`: «No, quiero hablar con una persona» no niega la petición.
+ */
 function palabrasDe(texto: string): string[] {
   return texto
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/[,.;:!?¿¡()]/gu, ` ${LIMITE} `)
+    .replace(/[^\p{L}\p{N}\s|]/gu, " ")
     .split(/\s+/)
     .filter((palabra) => palabra !== "");
 }
 
-/** Posiciones donde empieza alguna de las maneras de nombrar a una persona. */
+/** Posiciones donde empieza una manera de nombrar a una persona, sin las clases de solicitante. */
 function posicionesDeSustantivo(palabras: readonly string[]): number[] {
   const posiciones: number[] = [];
   for (let inicio = 0; inicio < palabras.length; inicio++) {
-    const coincide = SUSTANTIVOS_DE_PERSONA.some((frase) =>
-      frase.every((palabra, desplazamiento) => palabras[inicio + desplazamiento] === palabra),
+    const frase = SUSTANTIVOS_DE_PERSONA.find((candidata) =>
+      candidata.every((palabra, desplazamiento) => palabras[inicio + desplazamiento] === palabra),
     );
-    if (coincide) posiciones.push(inicio);
+    if (frase === undefined) continue;
+    const siguiente = palabras[inicio + frase.length];
+    if (siguiente !== undefined && CLASES_DE_PERSONA.includes(siguiente)) continue;
+    posiciones.push(inicio);
   }
   return posiciones;
 }
 
+/** Si hay una negación en las tres palabras anteriores al verbo, sin cruzar el límite de una oración. */
+function estaNegado(palabras: readonly string[], posicion: number): boolean {
+  for (let i = posicion - 1; i >= Math.max(0, posicion - VENTANA_DE_NEGACION); i--) {
+    if (palabras[i] === LIMITE) return false;
+    if (NEGACIONES.includes(palabras[i]!)) return true;
+  }
+  return false;
+}
+
 /**
- * Regla 4: si el mensaje pide explícitamente hablar con una persona (un verbo de petición y, a menos de
- * ocho palabras después, el nombre de una persona, sin una negación en las tres palabras anteriores al
- * verbo). Pura y conservadora: lo que no reconoce, lo decide el modelo con `solicitar_analista`; lo
- * que reconoce de más escala de más, que es el lado seguro (Principio V).
+ * Regla 4: si el mensaje pide explícitamente hablar con una persona. Hace falta un verbo ligado a la
+ * persona: uno de contacto («hablar», «pasar», «atender») con el nombre de la persona a cuatro palabras
+ * o menos, o uno de deseo («necesito») con el nombre justo después; y sin una negación en las tres
+ * palabras anteriores, dentro de la misma oración. «Una persona natural» no cuenta. Pura y
+ * conservadora: lo que no reconoce lo decide el modelo con `solicitar_analista`.
  */
 export function detectarPeticionPersona(texto: string): boolean {
   const palabras = palabrasDe(texto);
   const sustantivos = posicionesDeSustantivo(palabras);
   if (sustantivos.length === 0) return false;
   return palabras.some((palabra, posicion) => {
-    if (!VERBOS_DE_PETICION.includes(palabra)) return false;
-    const antes = palabras.slice(Math.max(0, posicion - VENTANA_DE_NEGACION), posicion);
-    if (antes.some((previa) => NEGACIONES.includes(previa))) return false;
-    return sustantivos.some(
-      (destino) => destino > posicion && destino - posicion < DISTANCIA_MAXIMA_AL_SUSTANTIVO,
-    );
+    const contacto = VERBOS_DE_CONTACTO.includes(palabra);
+    const deseo = VERBOS_DE_DESEO.includes(palabra);
+    if (!contacto && !deseo) return false;
+    if (estaNegado(palabras, posicion)) return false;
+    return sustantivos.some((destino) => {
+      const distancia = destino - posicion;
+      return contacto
+        ? distancia > 0 && distancia <= DISTANCIA_MAXIMA_CON_VERBO_DE_CONTACTO
+        : distancia === 1;
+    });
   });
 }
