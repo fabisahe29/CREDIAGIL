@@ -4,6 +4,38 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-19 · Casos de prueba obligatorios de extremo a extremo
+
+**Issue**: [#17 — Casos de prueba obligatorios de extremo a extremo](https://github.com/fabisahe29/CREDIAGIL/issues/17)
+
+**Detalle**: [specs/015-casos-prueba-extremo-a-extremo/research.md](specs/015-casos-prueba-extremo-a-extremo/research.md), decisiones R1 a R13
+
+### Decisión 1: dos modos de ejecución con los mismos casos, guionado por defecto
+
+`npm run casos` corre con el modelo guionado; `--modelo-real` corre los mismos casos con el modelo real. Solo se sustituyen la consulta al modelo, el subagente de extracción y el clasificador de documentos; el core, los hooks, la política y el adaptador son los reales.
+
+**Motivo**: la variabilidad del modelo solo afecta a qué herramientas llama y a cómo redacta. Guionar esa capa deja repetible todo lo que las reglas no negociables exigen probar, y permite correr en cada commit sin credenciales.
+
+**Alternativas descartadas**: solo modelo real con temperatura baja, porque el SDK no garantiza determinismo; reintentar hasta que pase, porque oculta defectos reales; solo guionado, porque nunca probaría al modelo real.
+
+### Decisión 2: el veredicto sale de decisiones, llamadas y estado del core, nunca del texto
+
+El resultado observado se arma con el resultado de la conversación (decisión, causa, eventos), las llamadas a herramientas y las lecturas del core. El esquema del resultado esperado no tiene un campo para frases de la respuesta.
+
+**Motivo**: una redacción distinta no debe romper un caso, y una decisión equivocada no debe pasar porque la respuesta suene bien. Leer el core prueba el efecto real.
+
+**Alternativas descartadas**: buscar palabras clave en la respuesta; leer los logs JSON, que acopla la prueba a su formato.
+
+### Decisión 3: un core nuevo por caso y «incompleto» distinto de «éxito»
+
+Cada caso arranca y cierra su propio core. Un caso que no puede correr es «no ejecutable» y el comando sale con código 3, no con 0.
+
+**Motivo**: un caso que no corrió no puede contar como pasado, y un estado compartido exigiría una herramienta de reinicio en el core.
+
+**Alternativas descartadas**: un core compartido con reinicio de estado; salir con éxito cuando hay casos sin ejecutar.
+
+---
+
 ## 2026-10-18 · Atención de mensajes con varias preocupaciones
 
 **Issue**: [#16 — Atención de mensajes con varias preocupaciones](https://github.com/fabisahe29/CREDIAGIL/issues/16)

@@ -1,0 +1,15 @@
+{
+  "clasificacion": {},
+  "extracciones": {},
+  "pasos": [
+    {
+      "llamadas": [
+        {
+          "herramienta": "preaprobar_credito",
+          "entrada": {}
+        }
+      ],
+      "respuesta": "Antes de preaprobar necesito verificar tu identidad. ¿Cuál es tu número de documento?"
+    }
+  ]
+}

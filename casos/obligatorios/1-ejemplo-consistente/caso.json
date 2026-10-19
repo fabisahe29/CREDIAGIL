@@ -1,0 +1,52 @@
+{
+  "numero": 1,
+  "nombre": "ejemplo-consistente",
+  "descripcion": "Caso 1: mensaje de ejemplo con documentos consistentes; el ingreso se verifica, la solicitud de 4 millones a 24 meses se registra y se preaprueba",
+  "pasos": [
+    {
+      "mensaje": "Hola, quiero pedir un crédito"
+    },
+    {
+      "mensaje": "Mi número de documento es 0001234567"
+    },
+    {
+      "mensaje": "La fecha de expedición de mi documento es 2012-05-14"
+    },
+    {
+      "adjuntar": "certificado-completo.md"
+    },
+    {
+      "adjuntar": "extracto-2026-07.md"
+    },
+    {
+      "adjuntar": "extracto-2026-08.md"
+    },
+    {
+      "adjuntar": "extracto-2026-09.md"
+    },
+    {
+      "mensaje": "Gano 3.800.000 al mes. ¿Puedes verificar mi ingreso?"
+    },
+    {
+      "mensaje": "Quiero registrar mi solicitud de 4 millones a 24 meses y que me la preapruebes"
+    }
+  ],
+  "esperado": {
+    "decision": "preaprobada",
+    "llamadasRequeridas": [
+      "buscar_solicitante",
+      "verificar_identidad",
+      "registrar_extraccion",
+      "verificar_ingreso",
+      "registrar_solicitud",
+      "preaprobar_credito"
+    ],
+    "eventosRequeridos": ["preaprobacion"],
+    "estadoCore": {
+      "solicitudRegistrada": true,
+      "preaprobada": true,
+      "ingresoVerificado": 3800000,
+      "escalamientoRegistrado": false
+    }
+  }
+}

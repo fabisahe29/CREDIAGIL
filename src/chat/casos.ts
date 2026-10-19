@@ -4,6 +4,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
+import { esquemaEsperado, esquemaVariante, type Esperado, type Variante } from "../e2e/esperado.ts";
 
 const textoNoVacio = z.string().min(1);
 
@@ -18,6 +19,10 @@ const esquemaCaso = z.strictObject({
       ]),
     )
     .min(1),
+  // Solo los casos obligatorios (#17) los traen: el ejecutor los exige y el chat los ignora.
+  numero: z.int().min(1).max(7).optional(),
+  esperado: esquemaEsperado.optional(),
+  variantes: z.array(esquemaVariante).min(1).optional(),
 });
 
 export type PasoCaso = { mensaje: string } | { adjuntar: string; ruta: string };
@@ -28,6 +33,12 @@ export interface CasoPrueba {
   /** Carpeta del caso; los adjuntos se resuelven desde aquí. */
   directorio: string;
   pasos: PasoCaso[];
+  /** Número del caso obligatorio, de 1 a 7 (#17); el chat no lo usa. */
+  numero?: number;
+  /** Resultado esperado del caso obligatorio (#17); el chat no lo usa. */
+  esperado?: Esperado;
+  /** Variantes del caso 7 (#17), cada una con su falla y su esperado; el chat no las usa. */
+  variantes?: Variante[];
 }
 
 export type CargaCaso = { ok: true; caso: CasoPrueba } | { ok: false; problema: string };
@@ -85,6 +96,9 @@ export async function cargarCaso(ruta: string, directorioBase: string): Promise<
       descripcion: validado.data.descripcion,
       directorio,
       pasos,
+      ...(validado.data.numero !== undefined ? { numero: validado.data.numero } : {}),
+      ...(validado.data.esperado !== undefined ? { esperado: validado.data.esperado } : {}),
+      ...(validado.data.variantes !== undefined ? { variantes: validado.data.variantes } : {}),
     },
   };
 }

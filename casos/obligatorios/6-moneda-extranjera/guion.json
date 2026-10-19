@@ -1,0 +1,77 @@
+{
+  "clasificacion": {
+    "certificado-dolares.md": "certificado_laboral"
+  },
+  "extracciones": {
+    "certificado-dolares.md": {
+      "tipo": "certificado_laboral",
+      "certificado": {
+        "empleador": {
+          "valor": "Industrias Imaginarias del Valle S.A.S.",
+          "fragmento": "Industrias Imaginarias del Valle S.A.S."
+        },
+        "cargo": {
+          "valor": "analista de operaciones",
+          "fragmento": "en el cargo de analista de operaciones"
+        },
+        "fechaIngreso": {
+          "valor": "2022-02-01",
+          "fragmento": "desde el 1 de febrero de 2022"
+        },
+        "salario": {
+          "valor": 1200,
+          "fragmento": "Salario básico mensual: USD 1.200 mensuales (dólares estadounidenses)"
+        },
+        "moneda": {
+          "fragmento": "USD 1.200 mensuales (dólares estadounidenses)"
+        }
+      },
+      "extracto": null,
+      "conflictos": []
+    }
+  },
+  "pasos": [
+    {
+      "llamadas": [],
+      "respuesta": "Hola, con gusto te ayudo. ¿Cuál es tu número de documento?"
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "buscar_solicitante",
+          "entrada": {
+            "documento": "0001234567"
+          }
+        }
+      ],
+      "respuesta": "Te encontré. ¿Cuál es la fecha de expedición de tu documento?"
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "verificar_identidad",
+          "entrada": {
+            "idSolicitante": "CLI-0001000001",
+            "fechaExpedicion": "2012-05-14"
+          }
+        }
+      ],
+      "respuesta": "Verifiqué tu identidad. Puedes adjuntar tus documentos de ingreso."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "extraer_documento",
+          "entrada": {
+            "adjunto": 1
+          }
+        }
+      ],
+      "respuesta": "Recibí y revisé el documento."
+    },
+    {
+      "llamadas": [],
+      "respuesta": "Tu caso necesita la revisión de un analista."
+    }
+  ]
+}

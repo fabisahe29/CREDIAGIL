@@ -1,0 +1,50 @@
+{
+  "numero": 4,
+  "nombre": "monto-8-millones",
+  "descripcion": "Caso 4: solicitud de 8.000.000 a 36 meses; supera el tope de 5.000.000, se registra, no se preaprueba y pasa a un analista",
+  "pasos": [
+    {
+      "mensaje": "Hola, quiero pedir un crédito"
+    },
+    {
+      "mensaje": "Mi número de documento es 0001234567"
+    },
+    {
+      "mensaje": "La fecha de expedición de mi documento es 2012-05-14"
+    },
+    {
+      "adjuntar": "certificado-completo.md"
+    },
+    {
+      "adjuntar": "extracto-2026-07.md"
+    },
+    {
+      "adjuntar": "extracto-2026-08.md"
+    },
+    {
+      "adjuntar": "extracto-2026-09.md"
+    },
+    {
+      "mensaje": "Gano 3.800.000 al mes. ¿Puedes verificar mi ingreso?"
+    },
+    {
+      "mensaje": "Quiero registrar mi solicitud de 8 millones a 36 meses y que me la preapruebes"
+    }
+  ],
+  "esperado": {
+    "decision": "escalada",
+    "causa": "monto_sobre_umbral",
+    "motivo": "preaprobacion_fuera_de_politica",
+    "codigoBloqueo": "monto_sobre_tope",
+    "llamadasRequeridas": ["verificar_identidad", "verificar_ingreso", "registrar_solicitud"],
+    "llamadasProhibidas": ["preaprobar_credito"],
+    "eventosRequeridos": ["escalamiento"],
+    "estadoCore": {
+      "solicitudRegistrada": true,
+      "preaprobada": false,
+      "ingresoVerificado": 3800000,
+      "escalamientoRegistrado": true,
+      "entrega": "entregada"
+    }
+  }
+}

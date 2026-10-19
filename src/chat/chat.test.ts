@@ -1,8 +1,9 @@
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cargarCaso } from "./casos.ts";
 import { iniciarChat, type FnConversar, type Terminal } from "./chat.ts";
 import {
   conversar,
@@ -905,4 +906,53 @@ describe("chat: el resumen para el analista solo se imprime con --demo (#15, US5
     assert.equal(texto.includes("Resumen para el analista"), false);
     assert.equal(texto.includes("Entrega al analista"), false);
   });
+});
+
+// ── Casos obligatorios (#17, US5) ─────────────────────────────────────────────────────────
+
+describe("chat: reproduce los casos obligatorios con los mismos pasos que el ejecutor (#17, US5)", () => {
+  const CARPETA_OBLIGATORIOS = join("casos", "obligatorios");
+  const carpetas = readdirSync(CARPETA_OBLIGATORIOS, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
+
+  it("hay siete casos que reproducir", () => {
+    assert.equal(carpetas.length, 7);
+  });
+
+  for (const nombre of carpetas) {
+    it(`/caso ${nombre} envía todos los pasos y adjuntos en orden y termina el caso`, async () => {
+      const carga = await cargarCaso(join(CARPETA_OBLIGATORIOS, nombre), process.cwd());
+      assert.ok(carga.ok, carga.ok ? "" : carga.problema);
+      const t = terminalFalsa();
+      const c = conversarFalso();
+      const fin = iniciarChat({
+        terminal: t.terminal,
+        conversar: c.fn,
+        core: coreFalso().core,
+        rutaLog: "logs/chat-prueba.jsonl",
+        directorioBase: process.cwd(),
+        casoInicial: join(CARPETA_OBLIGATORIOS, nombre),
+        nuevoId: () => ID_1,
+      });
+      await hasta(() => t.salida.includes("▶ Caso terminado."));
+      assert.equal(c.llamadas.length, carga.caso.pasos.length);
+      let adjuntos = 0;
+      for (const [indice, paso] of carga.caso.pasos.entries()) {
+        const enviado = c.llamadas[indice]!.mensaje;
+        if ("mensaje" in paso) {
+          assert.equal(enviado, paso.mensaje);
+        } else {
+          adjuntos++;
+          assert.match(
+            enviado,
+            new RegExp(`<documento adjunto="${adjuntos}" nombre="${paso.adjuntar}">`),
+          );
+        }
+      }
+      t.cerrar();
+      await fin;
+    });
+  }
 });

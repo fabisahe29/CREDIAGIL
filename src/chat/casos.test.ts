@@ -516,3 +516,83 @@ describe("casos: mensajes con varios asuntos (#16)", () => {
     assert.equal(detectarPeticionPersona(MENSAJE_ESCALADO), false);
   });
 });
+
+describe("casos: casos obligatorios con resultado esperado (#17)", () => {
+  const conEsperado = {
+    ...valido,
+    numero: 4,
+    esperado: {
+      decision: "escalada",
+      causa: "monto_sobre_umbral",
+      llamadasProhibidas: ["preaprobar_credito"],
+    },
+  };
+
+  it("carga el número y el esperado, con sus listas vacías por defecto", async () => {
+    const carpeta = caso("con-esperado", conEsperado, { "certificado.md": "Ficticio" });
+    const r = await cargarCaso(carpeta, raiz);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.caso.numero, 4);
+      assert.equal(r.caso.esperado?.decision, "escalada");
+      assert.deepEqual(r.caso.esperado?.llamadasRequeridas, []);
+      assert.equal(r.caso.variantes, undefined);
+    }
+  });
+
+  it("carga las variantes del caso 7", async () => {
+    const carpeta = caso(
+      "con-variantes",
+      {
+        ...valido,
+        numero: 7,
+        variantes: [
+          { nombre: "una-vez", esperado: { decision: "preaprobada" } },
+          {
+            nombre: "siempre",
+            esperado: { decision: "escalada", causa: "caso_no_cubierto" },
+          },
+        ],
+      },
+      { "certificado.md": "Ficticio" },
+    );
+    const r = await cargarCaso(carpeta, raiz);
+    assert.equal(r.ok, true);
+    if (r.ok)
+      assert.deepEqual(
+        r.caso.variantes?.map((v) => v.nombre),
+        ["una-vez", "siempre"],
+      );
+  });
+
+  it("rechaza un campo desconocido en el esperado, con un problema legible", async () => {
+    const carpeta = caso(
+      "esperado-invalido",
+      { ...conEsperado, esperado: { ...conEsperado.esperado, respuesta: "Hola" } },
+      { "certificado.md": "Ficticio" },
+    );
+    const r = await cargarCaso(carpeta, raiz);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.problema, /esperado/);
+  });
+
+  it("rechaza un número de caso fuera de 1 a 7", async () => {
+    const carpeta = caso(
+      "numero-8",
+      { ...conEsperado, numero: 8 },
+      { "certificado.md": "Ficticio" },
+    );
+    const r = await cargarCaso(carpeta, raiz);
+    assert.equal(r.ok, false);
+  });
+
+  it("un caso sin esperado sigue cargando y no trae esos campos", async () => {
+    const carpeta = caso("sin-esperado", valido, { "certificado.md": "Ficticio" });
+    const r = await cargarCaso(carpeta, raiz);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal("numero" in r.caso, false);
+      assert.equal("esperado" in r.caso, false);
+    }
+  });
+});
