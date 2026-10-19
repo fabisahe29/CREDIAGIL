@@ -1,0 +1,308 @@
+{
+  "clasificacion": {
+    "certificado-completo.md": "certificado_laboral",
+    "extracto-2026-07.md": "extracto_bancario",
+    "extracto-2026-08.md": "extracto_bancario",
+    "extracto-2026-09.md": "extracto_bancario"
+  },
+  "extracciones": {
+    "certificado-completo.md": {
+      "tipo": "certificado_laboral",
+      "certificado": {
+        "empleador": {
+          "valor": "Industrias Imaginarias del Valle S.A.S.",
+          "fragmento": "Industrias Imaginarias del Valle S.A.S."
+        },
+        "cargo": {
+          "valor": "analista de operaciones",
+          "fragmento": "en el cargo de analista de operaciones"
+        },
+        "fechaIngreso": {
+          "valor": "2022-02-01",
+          "fragmento": "desde el 1 de febrero de 2022"
+        },
+        "salario": {
+          "valor": 3800000,
+          "fragmento": "Salario básico mensual: $3.800.000 COP"
+        },
+        "moneda": {
+          "fragmento": "$3.800.000 COP"
+        }
+      },
+      "extracto": null,
+      "conflictos": []
+    },
+    "extracto-2026-07.md": {
+      "tipo": "extracto_bancario",
+      "certificado": null,
+      "extracto": {
+        "titular": {
+          "valor": "Ana Pérez Ficticia",
+          "fragmento": "Titular: Ana Pérez Ficticia"
+        },
+        "periodo": {
+          "valor": {
+            "desde": "2026-07-01",
+            "hasta": "2026-07-31"
+          },
+          "fragmento": "Periodo: 2026-07-01 a 2026-07-31"
+        },
+        "moneda": {
+          "fragmento": "Moneda: pesos colombianos (COP)"
+        },
+        "movimientos": [
+          {
+            "fecha": "2026-07-03",
+            "descripcion": "Nómina Industrias Imaginarias",
+            "valor": 3800000,
+            "sentido": "abono",
+            "fragmento": "| 2026-07-03 | Nómina Industrias Imaginarias | Abono | $3.800.000 |"
+          },
+          {
+            "fecha": "2026-07-08",
+            "descripcion": "Pago de servicios públicos",
+            "valor": 185000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-07-08 | Pago de servicios públicos | Cargo | $185.000 |"
+          },
+          {
+            "fecha": "2026-07-15",
+            "descripcion": "Mercado del barrio",
+            "valor": 420000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-07-15 | Mercado del barrio | Cargo | $420.000 |"
+          },
+          {
+            "fecha": "2026-07-22",
+            "descripcion": "Transferencia a ahorro programado",
+            "valor": 300000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-07-22 | Transferencia a ahorro programado | Cargo | $300.000 |"
+          }
+        ]
+      },
+      "conflictos": []
+    },
+    "extracto-2026-08.md": {
+      "tipo": "extracto_bancario",
+      "certificado": null,
+      "extracto": {
+        "titular": {
+          "valor": "Ana Pérez Ficticia",
+          "fragmento": "Titular: Ana Pérez Ficticia"
+        },
+        "periodo": {
+          "valor": {
+            "desde": "2026-08-01",
+            "hasta": "2026-08-31"
+          },
+          "fragmento": "Periodo: 2026-08-01 a 2026-08-31"
+        },
+        "moneda": {
+          "fragmento": "Moneda: pesos colombianos (COP)"
+        },
+        "movimientos": [
+          {
+            "fecha": "2026-08-03",
+            "descripcion": "Nómina Industrias Imaginarias",
+            "valor": 3800000,
+            "sentido": "abono",
+            "fragmento": "| 2026-08-03 | Nómina Industrias Imaginarias | Abono | $3.800.000 |"
+          },
+          {
+            "fecha": "2026-08-09",
+            "descripcion": "Pago de servicios públicos",
+            "valor": 192000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-08-09 | Pago de servicios públicos | Cargo | $192.000 |"
+          },
+          {
+            "fecha": "2026-08-16",
+            "descripcion": "Mercado del barrio",
+            "valor": 398000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-08-16 | Mercado del barrio | Cargo | $398.000 |"
+          },
+          {
+            "fecha": "2026-08-22",
+            "descripcion": "Transferencia a ahorro programado",
+            "valor": 300000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-08-22 | Transferencia a ahorro programado | Cargo | $300.000 |"
+          },
+          {
+            "fecha": "2026-08-27",
+            "descripcion": "Farmacia Imaginaria",
+            "valor": 64000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-08-27 | Farmacia Imaginaria | Cargo | $64.000 |"
+          }
+        ]
+      },
+      "conflictos": []
+    },
+    "extracto-2026-09.md": {
+      "tipo": "extracto_bancario",
+      "certificado": null,
+      "extracto": {
+        "titular": {
+          "valor": "Ana Pérez Ficticia",
+          "fragmento": "Titular: Ana Pérez Ficticia"
+        },
+        "periodo": {
+          "valor": {
+            "desde": "2026-09-01",
+            "hasta": "2026-09-30"
+          },
+          "fragmento": "Periodo: 2026-09-01 a 2026-09-30"
+        },
+        "moneda": {
+          "fragmento": "Moneda: pesos colombianos (COP)"
+        },
+        "movimientos": [
+          {
+            "fecha": "2026-09-03",
+            "descripcion": "Nómina Industrias Imaginarias",
+            "valor": 3800000,
+            "sentido": "abono",
+            "fragmento": "| 2026-09-03 | Nómina Industrias Imaginarias | Abono | $3.800.000 |"
+          },
+          {
+            "fecha": "2026-09-10",
+            "descripcion": "Pago de servicios públicos",
+            "valor": 179000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-09-10 | Pago de servicios públicos | Cargo | $179.000 |"
+          },
+          {
+            "fecha": "2026-09-14",
+            "descripcion": "Mercado del barrio",
+            "valor": 435000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-09-14 | Mercado del barrio | Cargo | $435.000 |"
+          },
+          {
+            "fecha": "2026-09-22",
+            "descripcion": "Transferencia a ahorro programado",
+            "valor": 300000,
+            "sentido": "cargo",
+            "fragmento": "| 2026-09-22 | Transferencia a ahorro programado | Cargo | $300.000 |"
+          }
+        ]
+      },
+      "conflictos": []
+    }
+  },
+  "pasos": [
+    {
+      "llamadas": [],
+      "respuesta": "Hola, con gusto te ayudo. ¿Cuál es tu número de documento?"
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "buscar_solicitante",
+          "entrada": {
+            "documento": "0001234567"
+          }
+        }
+      ],
+      "respuesta": "Te encontré. ¿Cuál es la fecha de expedición de tu documento?"
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "verificar_identidad",
+          "entrada": {
+            "idSolicitante": "CLI-0001000001",
+            "fechaExpedicion": "2012-05-14"
+          }
+        }
+      ],
+      "respuesta": "Verifiqué tu identidad. Puedes adjuntar tus documentos de ingreso."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "extraer_documento",
+          "entrada": {
+            "adjunto": 1
+          }
+        }
+      ],
+      "respuesta": "Recibí y revisé el documento."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "extraer_documento",
+          "entrada": {
+            "adjunto": 2
+          }
+        }
+      ],
+      "respuesta": "Recibí y revisé el documento."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "extraer_documento",
+          "entrada": {
+            "adjunto": 3
+          }
+        }
+      ],
+      "respuesta": "Recibí y revisé el documento."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "extraer_documento",
+          "entrada": {
+            "adjunto": 4
+          }
+        }
+      ],
+      "respuesta": "Recibí y revisé el documento."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "verificar_ingreso",
+          "entrada": {
+            "ingresoDeclarado": 3800000
+          }
+        }
+      ],
+      "respuesta": "Verifiqué tu ingreso con tus documentos."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "registrar_solicitud",
+          "entrada": {
+            "idSolicitante": "CLI-0001000001",
+            "monto": 8000000,
+            "plazoMeses": 36,
+            "origen": {
+              "monto": {
+                "fragmento": "8 millones"
+              },
+              "plazoMeses": {
+                "fragmento": "36 meses"
+              },
+              "ingresoDeclarado": {
+                "fragmento": "Gano 3.800.000"
+              }
+            }
+          }
+        },
+        {
+          "herramienta": "preaprobar_credito",
+          "entrada": {}
+        }
+      ],
+      "respuesta": "Registré tu solicitud y la envié a evaluación."
+    }
+  ]
+}

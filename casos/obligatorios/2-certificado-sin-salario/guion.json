@@ -1,0 +1,68 @@
+{
+  "clasificacion": {
+    "certificado-sin-salario.md": "certificado_laboral"
+  },
+  "extracciones": {
+    "certificado-sin-salario.md": {
+      "tipo": "certificado_laboral",
+      "certificado": {
+        "empleador": {
+          "valor": "Industrias Imaginarias del Valle S.A.S.",
+          "fragmento": "Industrias Imaginarias del Valle S.A.S."
+        },
+        "cargo": {
+          "valor": "analista de operaciones",
+          "fragmento": "en el cargo de analista de operaciones"
+        },
+        "fechaIngreso": {
+          "valor": "2022-02-01",
+          "fragmento": "desde el 1 de febrero de 2022"
+        },
+        "salario": null,
+        "moneda": null
+      },
+      "extracto": null,
+      "conflictos": []
+    }
+  },
+  "pasos": [
+    {
+      "llamadas": [],
+      "respuesta": "Hola, con gusto te ayudo. ¿Cuál es tu número de documento?"
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "buscar_solicitante",
+          "entrada": {
+            "documento": "0001234567"
+          }
+        }
+      ],
+      "respuesta": "Te encontré. ¿Cuál es la fecha de expedición de tu documento?"
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "verificar_identidad",
+          "entrada": {
+            "idSolicitante": "CLI-0001000001",
+            "fechaExpedicion": "2012-05-14"
+          }
+        }
+      ],
+      "respuesta": "Verifiqué tu identidad. Puedes adjuntar tus documentos de ingreso."
+    },
+    {
+      "llamadas": [
+        {
+          "herramienta": "extraer_documento",
+          "entrada": {
+            "adjunto": 1
+          }
+        }
+      ],
+      "respuesta": "Tu certificado no trae el salario. ¿Puedes enviarme el documento que lo contiene?"
+    }
+  ]
+}

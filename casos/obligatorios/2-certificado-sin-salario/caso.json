@@ -1,0 +1,36 @@
+{
+  "numero": 2,
+  "nombre": "certificado-sin-salario",
+  "descripcion": "Caso 2: el certificado laboral no trae el salario; el campo queda nulo, no se completa y se le pide el dato o el documento al solicitante",
+  "pasos": [
+    {
+      "mensaje": "Hola, quiero pedir un crédito"
+    },
+    {
+      "mensaje": "Mi número de documento es 0001234567"
+    },
+    {
+      "mensaje": "La fecha de expedición de mi documento es 2012-05-14"
+    },
+    {
+      "adjuntar": "certificado-sin-salario.md"
+    }
+  ],
+  "esperado": {
+    "decision": "solicitud_de_dato",
+    "llamadasRequeridas": ["verificar_identidad", "registrar_extraccion"],
+    "llamadasProhibidas": ["registrar_solicitud", "preaprobar_credito"],
+    "eventosRequeridos": ["solicitud_de_dato"],
+    "estadoCore": {
+      "solicitudRegistrada": false,
+      "preaprobada": false,
+      "campos": [
+        {
+          "documento": "certificado-sin-salario.md",
+          "campo": "salario",
+          "valor": null
+        }
+      ]
+    }
+  }
+}
