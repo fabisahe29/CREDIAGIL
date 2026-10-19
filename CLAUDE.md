@@ -30,7 +30,9 @@ Las reglas no negociables (reglas de negocio, datos ficticios, decisiones determ
 | `src/e2e/` | Ejecutor de los casos obligatorios: `npm run casos` (#17). Veredicto por decisión, llamadas y estado del core; modo guionado (por defecto) o `--modelo-real` |
 | `src/compartido/` | Contrato de errores, catálogo de eventos de negocio, logs, validación de extracciones con procedencia (#10) y esquemas de la verificación de ingreso (#11) y contrato de la simulación de capacidad de pago (#12) del registro de la solicitud con procedencia (#13), de la preaprobación (#14) y del escalamiento con su resumen para el analista (#15), con los asuntos pendientes (#16) |
 | `casos/` | Casos de prueba ficticios para la demo (`/caso` en el chat); casos de escalamiento desde el #15; casos de mensajes con varios asuntos desde el #16; los siete casos obligatorios con su resultado esperado y su guion, en `casos/obligatorios/`, desde el #17 |
-| `DECISIONES.md` | Decisiones de diseño con su alternativa descartada |
+| `src/entrega/` | Armado y verificación del `.zip` de entrega: `npm run entrega:armar` y `npm run entrega:verificar` (#19) |
+| `DECISIONES.md` | Resumen de dos páginas: mecanismo, motivo y alternativa descartada de cada una de las 11 necesidades del ecosistema |
+| `docs/registro-decisiones.md` | Registro detallado de decisiones por ticket, con su alternativa descartada; aquí se anotan las decisiones de cada plan |
 
 ## Reglas por zona
 

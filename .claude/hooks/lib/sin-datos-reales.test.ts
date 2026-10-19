@@ -34,6 +34,7 @@ const REVISADOS = [
   ...archivos(".claude/rules", ".md"),
   "docs/datos-ficticios.md",
   "DECISIONES.md",
+  "docs/registro-decisiones.md",
 ];
 
 describe("el código del ticket no contiene datos con forma real", () => {
