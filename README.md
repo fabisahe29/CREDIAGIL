@@ -130,6 +130,8 @@ La numeración es la del issue #17. En tickets anteriores se citó otra del enun
 
 ### Reproducir un caso en el chat (para el video)
 
+**Video de la ejecución de los casos de prueba**: [ver en Google Drive](https://drive.google.com/file/d/1yzjPuf3hHKW0aGjrBs1IzW1YIyCenfhV/view?usp=sharing).
+
 Cada caso se reproduce con los mismos documentos y pasos que usa el comando. Con el modelo real, el chat necesita `ANTHROPIC_API_KEY`:
 
 ```powershell
