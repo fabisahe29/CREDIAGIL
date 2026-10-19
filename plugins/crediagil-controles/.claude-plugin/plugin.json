@@ -1,0 +1,6 @@
+{
+  "name": "crediagil-controles",
+  "version": "1.0.0",
+  "description": "Controles reutilizables: bloqueo de secretos y datos con forma real, revisor de solo lectura y revisión de reglas del equipo.",
+  "author": { "name": "Equipo Crediágil" }
+}

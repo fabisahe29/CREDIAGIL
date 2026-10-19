@@ -17,6 +17,11 @@ describe("esFicticio", () => {
     assert.equal(esFicticio("0012345678"), false);
     assert.equal(esFicticio("1" + "0".repeat(9)), false);
   });
+
+  it("usa el prefijo que se le pasa en lugar del de por defecto", () => {
+    assert.equal(esFicticio("999.123.456", "999"), true);
+    assert.equal(esFicticio("0001234567", "999"), false);
+  });
 });
 
 describe("sincronía con docs/datos-ficticios.md", () => {

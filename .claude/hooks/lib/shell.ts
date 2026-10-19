@@ -1,6 +1,6 @@
 // Análisis estático mínimo de comandos de Bash y PowerShell para los controles.
 // No pretende ser un intérprete: separa tuberías, comandos y palabras respetando comillas.
-// Los comandos ofuscados a propósito quedan fuera de su alcance (research.md, R9).
+// Los comandos ofuscados a propósito quedan fuera de su alcance.
 
 /** Una tubería es una lista de comandos unidos por `|`; cada comando, una lista de palabras. */
 export type Tuberia = string[][];

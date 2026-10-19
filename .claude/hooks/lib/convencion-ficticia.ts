@@ -1,12 +1,11 @@
 // Convención de datos ficticios: fuente única que usa el control datos-reales.
-// Su versión para personas es docs/datos-ficticios.md; una prueba mantiene ambos sincronizados.
 
 export const PREFIJO_FICTICIO = "000";
 
 export type TipoDato = "cédula" | "NIT" | "cuenta";
 
 export interface PalabraClave {
-  /** Texto tal como aparece en docs/datos-ficticios.md. */
+  /** Texto de la palabra clave tal como se documenta. */
   texto: string;
   /** Expresión que la reconoce en una línea. */
   patron: RegExp;
@@ -58,6 +57,6 @@ export function tienePalabraClave(linea: string, tipo: TipoDato): boolean {
 }
 
 /** Un número es ficticio si sus dígitos, sin separadores, empiezan por el prefijo de la convención. */
-export function esFicticio(valor: string): boolean {
-  return valor.replace(/\D/g, "").startsWith(PREFIJO_FICTICIO);
+export function esFicticio(valor: string, prefijo: string = PREFIJO_FICTICIO): boolean {
+  return valor.replace(/\D/g, "").startsWith(prefijo);
 }

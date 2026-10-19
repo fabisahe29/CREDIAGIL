@@ -10,5 +10,11 @@
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": [".claude/hooks/**/*.ts", ".claude/revision/**/*.ts", "src/**/*.ts"]
+  "include": [
+    ".claude/hooks/**/*.ts",
+    ".claude/revision/**/*.ts",
+    ".claude/agents/**/*.ts",
+    "scripts/**/*.ts",
+    "src/**/*.ts"
+  ]
 }

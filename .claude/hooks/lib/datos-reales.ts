@@ -1,9 +1,15 @@
-// Control datos-reales (FR-001 a FR-004; aclaración Q2; research.md, R3).
+// Control datos-reales: bloquea datos con forma real antes de que se guarden.
 // Tarjeta: Luhn en cualquier contexto. Cédula, NIT y cuenta: solo con palabra clave en la línea.
 
 import type { Accion } from "./accion.ts";
 import { enmascarar, type Bloqueo } from "./bloqueo.ts";
-import { esFicticio, tienePalabraClave, type TipoDato } from "./convencion-ficticia.ts";
+import { ARCHIVO_CONFIGURACION, leerConfiguracion } from "./config-equipo.ts";
+import {
+  PREFIJO_FICTICIO,
+  esFicticio,
+  tienePalabraClave,
+  type TipoDato,
+} from "./convencion-ficticia.ts";
 
 type Tipo = "tarjeta" | TipoDato;
 
@@ -40,13 +46,18 @@ function contarDigitos(valor: string): number {
   return valor.replace(/\D/g, "").length;
 }
 
-function detectarEnLinea(linea: string): { tipo: Tipo; valor: string }[] {
+function detectarEnLinea(linea: string, prefijo: string): { tipo: Tipo; valor: string }[] {
   const hallazgos: { tipo: Tipo; valor: string }[] = [];
 
   for (const coincidencia of linea.matchAll(TARJETA)) {
     const valor = coincidencia[0];
     const digitos = valor.replace(/\D/g, "");
-    if (digitos.length >= 13 && digitos.length <= 19 && pasaLuhn(digitos) && !esFicticio(valor)) {
+    if (
+      digitos.length >= 13 &&
+      digitos.length <= 19 &&
+      pasaLuhn(digitos) &&
+      !esFicticio(valor, prefijo)
+    ) {
       hallazgos.push({ tipo: "tarjeta", valor });
     }
   }
@@ -63,7 +74,7 @@ function detectarEnLinea(linea: string): { tipo: Tipo; valor: string }[] {
       const valor = coincidencia[0];
       const cantidad = contarDigitos(valor);
       const yaDetectado = hallazgos.some((h) => h.valor.includes(valor) || valor.includes(h.valor));
-      if (cantidad >= minimo && cantidad <= maximo && !esFicticio(valor) && !yaDetectado) {
+      if (cantidad >= minimo && cantidad <= maximo && !esFicticio(valor, prefijo) && !yaDetectado) {
         hallazgos.push({ tipo, valor });
       }
     }
@@ -71,19 +82,32 @@ function detectarEnLinea(linea: string): { tipo: Tipo; valor: string }[] {
   return hallazgos;
 }
 
-export function datosReales(accion: Accion): Bloqueo[] {
+const REGLA = "Los datos con forma real no se guardan: usa datos ficticios.";
+const REGLA_POR_DEFECTO = `${REGLA} Se aplica la convención por defecto (no hay ${ARCHIVO_CONFIGURACION}).`;
+
+/**
+ * Sin contexto aplica la convención por defecto. Con contexto lee la configuración del equipo;
+ * si el archivo existe y no es válido, lanza `ConfiguracionInvalida`.
+ */
+export function datosReales(accion: Accion, contexto?: { raiz: string }): Bloqueo[] {
+  const { prefijoFicticio, porDefecto } =
+    contexto === undefined
+      ? { prefijoFicticio: PREFIJO_FICTICIO, porDefecto: false }
+      : leerConfiguracion(contexto.raiz);
+  const regla = contexto !== undefined && porDefecto ? REGLA_POR_DEFECTO : REGLA;
   const bloqueos: Bloqueo[] = [];
   for (const { origen, texto } of accion.textos) {
     texto.split(/\r?\n/).forEach((linea, indice) => {
-      for (const { tipo, valor } of detectarEnLinea(linea)) {
+      for (const { tipo, valor } of detectarEnLinea(linea, prefijoFicticio)) {
+        const correccion = `Usa un número ficticio que empiece por ${prefijoFicticio}.`;
         bloqueos.push({
           control: "datos-reales",
           detectado: `${tipo} ${enmascarar(valor)} en ${origen}, línea ${indice + 1}`,
-          regla: "constitución, Principio II · FR-001",
+          regla,
           correccion:
             tipo === "tarjeta"
-              ? "Usa un número ficticio que empiece por 000 (ver docs/datos-ficticios.md)."
-              : `Usa un número ficticio que empiece por 000 (ver docs/datos-ficticios.md). Si es un monto, sácalo de la línea que dice "${tipo}".`,
+              ? correccion
+              : `${correccion} Si es un monto, sácalo de la línea que dice "${tipo}".`,
         });
       }
     });

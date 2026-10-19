@@ -28,7 +28,7 @@ describe("componerMensaje", () => {
 
   it("indica la cantidad de motivos y el detalle de cada uno", () => {
     const mensaje = componerMensaje([datos]);
-    assert.match(mensaje, /^Acción bloqueada por los guardarraíles de Crediágil \(1 motivo\)\./);
+    assert.match(mensaje, /^Acción bloqueada por los controles \(1 motivo\)\./);
     assert.match(mensaje, /\[datos-reales\] tarjeta ••••6789 en a\.md, línea 1/);
     assert.match(mensaje, /Regla: Principio II · FR-001/);
     assert.match(mensaje, /Corrección: Usa la convención ficticia/);
@@ -40,14 +40,13 @@ describe("componerMensaje", () => {
     assert.ok(mensaje.indexOf("[secretos]") < mensaje.indexOf("[datos-reales]"));
   });
 
-  it("ordena revisores y puerta-pr después de spec-primero y antes de error-interno", () => {
+  it("acepta cualquier nombre de control y ordena según el orden que se le pasa", () => {
     const de = (control: Bloqueo["control"]): Bloqueo => ({ ...datos, control });
-    const mensaje = componerMensaje([
-      de("error-interno"),
-      de("puerta-pr"),
-      de("revisores"),
-      de("spec-primero"),
-    ]);
+    const orden = ["secretos", "datos-reales", "spec-primero", "revisores", "puerta-pr"];
+    const mensaje = componerMensaje(
+      [de("error-interno"), de("puerta-pr"), de("revisores"), de("spec-primero")],
+      orden,
+    );
     const posiciones = ["[spec-primero]", "[revisores]", "[puerta-pr]", "[error-interno]"].map(
       (etiqueta) => mensaje.indexOf(etiqueta),
     );
@@ -55,5 +54,12 @@ describe("componerMensaje", () => {
       posiciones,
       [...posiciones].sort((a, b) => a - b),
     );
+  });
+
+  it("deja los controles desconocidos después de los conocidos y el error al final", () => {
+    const de = (control: Bloqueo["control"]): Bloqueo => ({ ...datos, control });
+    const mensaje = componerMensaje([de("error-interno"), de("ajeno"), de("secretos")]);
+    assert.ok(mensaje.indexOf("[secretos]") < mensaje.indexOf("[ajeno]"));
+    assert.ok(mensaje.indexOf("[ajeno]") < mensaje.indexOf("[error-interno]"));
   });
 });

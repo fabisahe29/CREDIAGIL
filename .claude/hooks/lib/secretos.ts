@@ -1,4 +1,4 @@
-// Control secretos (FR-005 a FR-007; aclaración Q4; research.md, R4).
+// Control secretos: nadie abre, copia ni edita un archivo .env.
 // Herramientas de archivos, comandos que nombran un .env y comandos recursivos que lo alcanzan.
 
 import { readdirSync } from "node:fs";
@@ -17,9 +17,10 @@ interface ContextoSecretos {
   raiz: string;
 }
 
-const REGLA_ARCHIVOS = "constitución, Restricciones técnicas (secretos) · FR-005";
-const REGLA_NOMBRA = "constitución, Restricciones técnicas (secretos) · FR-006";
-const REGLA_RECURSIVO = "constitución, Restricciones técnicas (secretos) · FR-006a";
+const REGLA_ARCHIVOS =
+  "Los secretos solo se leen del entorno de la sesión, nunca de un archivo .env.";
+const REGLA_NOMBRA = "Un comando no puede nombrar un archivo .env.";
+const REGLA_RECURSIVO = "Un comando recursivo no puede alcanzar un archivo .env.";
 const CORRECCION_ARCHIVO =
   "Los secretos solo se leen del entorno de la sesión: no abras, copies ni edites archivos .env. Para documentar variables usa .env.example.";
 const CORRECCION_RECURSIVO =

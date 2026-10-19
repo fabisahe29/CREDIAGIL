@@ -1,5 +1,8 @@
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Accion } from "./accion.ts";
 import { datosReales } from "./datos-reales.ts";
 import { enBloques, tarjetaLuhn } from "./generadores.ts";
@@ -103,11 +106,62 @@ describe("datos-reales: mensaje", () => {
     assert.equal(bloqueo.control, "datos-reales");
     assert.match(bloqueo.detectado, /^tarjeta ••••\d{4} en src\/a\.ts, línea 2$/);
     assert.ok(!bloqueo.detectado.includes(t));
-    assert.match(bloqueo.correccion, /docs\/datos-ficticios\.md/);
+    assert.match(bloqueo.correccion, /empiece por 000/);
   });
 
   it("informa una línea por dato detectado", () => {
     const bloqueos = datosReales(escribir(`cédula ${cedula8}\nNIT ${nit}-3`));
     assert.equal(bloqueos.length, 2);
+  });
+});
+
+describe("datos-reales: configuración del equipo", () => {
+  const temporales: string[] = [];
+  after(() => {
+    for (const carpeta of temporales) rmSync(carpeta, { recursive: true, force: true });
+  });
+
+  function contextoCon(config?: string): { raiz: string } {
+    const carpeta = mkdtempSync(join(tmpdir(), "datos-reales-"));
+    temporales.push(carpeta);
+    if (config !== undefined) {
+      mkdirSync(join(carpeta, ".claude"), { recursive: true });
+      writeFileSync(join(carpeta, ".claude", "controles-equipo.json"), config);
+    }
+    return { raiz: carpeta };
+  }
+
+  it("no bloquea un número que empieza por el prefijo del equipo", () => {
+    const contexto = contextoCon('{ "prefijoFicticio": "999" }');
+    const bloqueos = datosReales(escribir("cédula 999" + "4".repeat(6)), contexto);
+    assert.deepEqual(bloqueos, []);
+  });
+
+  it("bloquea un número que empieza por el prefijo por defecto si el equipo declaró otro", () => {
+    const contexto = contextoCon('{ "prefijoFicticio": "999" }');
+    assert.equal(datosReales(escribir("cédula 000" + "4".repeat(6)), contexto).length, 1);
+  });
+
+  it("sin configuración aplica la convención por defecto y lo dice", () => {
+    const [bloqueo] = datosReales(escribir("cédula " + cedula8), contextoCon());
+    assert.ok(bloqueo);
+    assert.match(
+      bloqueo.regla,
+      /convención por defecto \(no hay \.claude\/controles-equipo\.json\)/,
+    );
+    assert.match(bloqueo.correccion, /empiece por 000/);
+  });
+
+  it("con configuración propia la corrección cita el prefijo del equipo", () => {
+    const contexto = contextoCon('{ "prefijoFicticio": "999" }');
+    const [bloqueo] = datosReales(escribir("cédula " + cedula8), contexto);
+    assert.ok(bloqueo);
+    assert.match(bloqueo.correccion, /empiece por 999/);
+    assert.doesNotMatch(bloqueo.regla, /por defecto/);
+  });
+
+  it("lanza si la configuración no es válida: el guardián la convierte en bloqueo", () => {
+    const contexto = contextoCon('{ "prefijoFicticio": "abc" }');
+    assert.throws(() => datosReales(escribir("sin datos"), contexto), /controles-equipo\.json/);
   });
 });

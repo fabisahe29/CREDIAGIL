@@ -6,12 +6,14 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node --test \".claude/**/*.test.ts\" \"src/**/*.test.ts\"",
+    "test": "node --test \".claude/**/*.test.ts\" \"scripts/**/*.test.ts\" \"src/**/*.test.ts\"",
     "chat": "node src/chat/principal.ts",
     "casos": "node src/e2e/principal.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "plugin:generar": "node scripts/plugin/generar.ts",
+    "plugin:verificar": "node scripts/plugin/verificar-instalacion.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
