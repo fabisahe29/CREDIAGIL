@@ -4,7 +4,7 @@ description: "Revisa un cambio contra las reglas que el equipo declara en .claud
 argument-hint: "[rango de git, por ejemplo main...HEAD; sin argumento revisa los cambios sin confirmar]"
 context: fork
 agent: crediagil-controles:revisor-reglas
-allowed-tools: Read, Grep, Glob, Bash(git diff *)
+allowed-tools: Read, Grep, Glob, Bash(git diff --end-of-options *)
 ---
 
 # Revisión de reglas del equipo
@@ -17,7 +17,7 @@ Audita el siguiente cambio con tus instrucciones de revisor de reglas. Esta tare
 
 ## Cambio a revisar
 
-!`git diff $ARGUMENTS`
+!`git diff --end-of-options $ARGUMENTS`
 
 Si el cambio está vacío, dilo en el resumen y termina con `reglas` vacío: no hay nada que auditar.
 
@@ -39,6 +39,8 @@ Ningún monto se calcula ni se compara con flotantes. Se usa un entero en la mon
 - `/revisar-reglas main...HEAD`: todo lo que la rama agrega respecto de `main`.
 - `/revisar-reglas HEAD~1`: el último commit.
 - Sin argumento: los cambios que aún no confirmas.
+
+Solo se admite un rango o una revisión de git: el argumento se pasa después de `--end-of-options`, así que git lo trata siempre como revisión y rechaza cualquier opción, como `--output=<ruta>`.
 
 **Leer el informe.** Cada regla queda como `cumplida`, `incumplida` o `no_aplicable`. Una regla `cumplida` cita archivo y línea. Una regla que el revisor no entiende se informa como `no_aplicable` con el motivo: reescríbela con un criterio que se pueda comprobar.
 

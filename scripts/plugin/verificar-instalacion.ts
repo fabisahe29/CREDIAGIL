@@ -62,6 +62,7 @@ const PLUGIN = "crediagil-controles";
 const CATALOGO = "crediagil";
 const PIEZAS: readonly NombrePieza[] = ["hook", "subagente", "skill"];
 const REVISOR = `${PLUGIN}:revisor-reglas`;
+const ARCHIVO_CONFIGURACION = ".claude/controles-equipo.json";
 
 // Ningún valor con forma real se escribe literal: se arma en tiempo de ejecución.
 const cedulaReal = "10" + "4".repeat(8);
@@ -169,6 +170,20 @@ function comprobarHook(directorio: string, repositorio: string): Comprobacion[] 
     invalida.tipo === "deny" && /controles-equipo\.json no es válido/.test(invalida.motivo),
   );
   rmSync(configuracion, { force: true });
+
+  const escribirConfiguracion = ejecutarGuardian(
+    guardian,
+    JSON.stringify({
+      tool_name: "Write",
+      tool_input: { file_path: ARCHIVO_CONFIGURACION, content: "{}" },
+    }),
+    repositorio,
+  );
+  comprobar(
+    "impide que el agente escriba la configuración de los controles",
+    escribirConfiguracion.tipo === "deny" &&
+      /\[configuracion-protegida\]/.test(escribirConfiguracion.motivo),
+  );
   return comprobaciones;
 }
 

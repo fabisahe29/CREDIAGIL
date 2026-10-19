@@ -36,6 +36,11 @@ export const PIEZAS: readonly Pieza[] = [
   },
   { fuente: ".claude/hooks/lib/revisores.ts", destino: "hooks/lib/revisores.ts", clase: "control" },
   {
+    fuente: ".claude/hooks/lib/proteccion-config.ts",
+    destino: "hooks/lib/proteccion-config.ts",
+    clase: "control",
+  },
+  {
     fuente: ".claude/hooks/lib/config-equipo.ts",
     destino: "hooks/lib/config-equipo.ts",
     clase: "control",

@@ -108,6 +108,47 @@ describe("guardián del plugin: configuración del equipo", () => {
     assert.match(r.motivo ?? "", /\[configuracion\]/);
     assert.match(r.motivo ?? "", /controles-equipo\.json no es válido/);
     assert.match(r.motivo ?? "", /"abc"/);
-    assert.match(r.motivo ?? "", /Edita .*controles-equipo\.json o bórralo/);
+    assert.match(r.motivo ?? "", /persona .*fuera de la sesión/);
+  });
+
+  it("una configuración inválida no bloquea las acciones sin texto que revisar", () => {
+    writeFileSync(join(raiz, ".claude", "controles-equipo.json"), '{ "prefijoFicticio": "abc" }');
+    const lectura = { tool_name: "Read", tool_input: { file_path: "docs/guia.md" } };
+    assert.equal(ejecutar(lectura, raiz).salida, "");
+    const lecturaDeLaConfiguracion = {
+      tool_name: "Read",
+      tool_input: { file_path: ".claude/controles-equipo.json" },
+    };
+    assert.equal(ejecutar(lecturaDeLaConfiguracion, raiz).salida, "");
+  });
+
+  it("rechaza un prefijo de 1 dígito, que dejaría pasar numeración real", () => {
+    writeFileSync(join(raiz, ".claude", "controles-equipo.json"), '{ "prefijoFicticio": "1" }');
+    const r = ejecutar(escritura("sin datos"), raiz);
+    assert.match(r.motivo ?? "", /\[configuracion\]/);
+    assert.match(r.motivo ?? "", /entre 3 y 6 dígitos/);
+  });
+});
+
+describe("guardián del plugin: protección de la configuración", () => {
+  const raiz = mkdtempSync(join(tmpdir(), "guardian-controles-prot-"));
+  after(() => rmSync(raiz, { recursive: true, force: true }));
+
+  it("el agente no puede escribir la configuración de los controles", () => {
+    const entrada = {
+      tool_name: "Write",
+      tool_input: { file_path: ".claude/controles-equipo.json", content: "{}" },
+    };
+    const r = ejecutar(entrada, raiz);
+    assert.match(r.motivo ?? "", /\[configuracion-protegida\]/);
+    assert.match(r.motivo ?? "", /persona/);
+  });
+
+  it("tampoco con un comando", () => {
+    const entrada = {
+      tool_name: "Bash",
+      tool_input: { command: "echo '{}' > .claude/controles-equipo.json" },
+    };
+    assert.match(ejecutar(entrada, raiz).motivo ?? "", /\[configuracion-protegida\]/);
   });
 });

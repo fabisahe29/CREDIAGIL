@@ -40,6 +40,8 @@ Los mensajes, los comentarios y el tipo `Control` de los archivos que viajan pie
 
 Las reglas del revisor van en `.claude/reglas-equipo.md` y el único ajuste del hook, `prefijoFicticio`, en `.claude/controles-equipo.json`. Sin ellos, el revisor informa que falta la configuración y el hook usa la convención por defecto y lo dice.
 
+**Ajuste tras la revisión de código**: el prefijo permitía que el propio agente relajara el control de datos con forma real escribiendo la configuración con un prefijo de un dígito. Ahora el prefijo exige de 3 a 6 dígitos y el control `configuracion-protegida` bloquea toda escritura del agente en `.claude/controles-equipo.json`, sea con herramientas de edición o con un comando de shell: la edita una persona fuera de la sesión. La configuración se lee solo cuando la acción trae texto que revisar, así que un archivo inválido no bloquea acciones sin texto, como un `Read`.
+
 **Motivo**: una actualización del plugin no puede borrar lo que el equipo declaró, y el plugin no puede suponer reglas ajenas.
 
 **Alternativas descartadas**: un solo archivo con reglas y ajustes mezclados; exponer también las palabras clave y los patrones de detección, que ningún equipo ha pedido.

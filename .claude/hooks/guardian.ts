@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ejecutar, type ContextoBase, type ControlGuardian } from "./guardian-base.ts";
 import { datosReales } from "./lib/datos-reales.ts";
 import { secretos } from "./lib/secretos.ts";
+import { proteccionConfig } from "./lib/proteccion-config.ts";
 import { puertaPr } from "./lib/puerta-pr.ts";
 import { revisores } from "./lib/revisores.ts";
 import { specPrimero } from "./lib/spec-primero.ts";
@@ -20,6 +21,7 @@ export interface Contexto extends ContextoBase {
 export const CONTROLES: ControlGuardian<Contexto>[] = [
   secretos,
   datosReales,
+  proteccionConfig,
   specPrimero,
   revisores,
   puertaPr,
@@ -28,6 +30,7 @@ export const CONTROLES: ControlGuardian<Contexto>[] = [
 export const ORDEN: readonly string[] = [
   "secretos",
   "datos-reales",
+  "configuracion-protegida",
   "spec-primero",
   "revisores",
   "puerta-pr",

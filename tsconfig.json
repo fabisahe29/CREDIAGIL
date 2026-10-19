@@ -14,6 +14,7 @@
     ".claude/hooks/**/*.ts",
     ".claude/revision/**/*.ts",
     ".claude/agents/**/*.ts",
+    ".claude/skills/**/*.ts",
     "scripts/**/*.ts",
     "src/**/*.ts"
   ]

@@ -39,10 +39,10 @@ describe("leerConfiguracion", () => {
     assert.deepEqual(config, { prefijoFicticio: "000", porDefecto: false });
   });
 
-  it("acepta un prefijo de 1 y de 6 dígitos", () => {
+  it("acepta un prefijo de 3 y de 6 dígitos", () => {
     assert.equal(
-      leerConfiguracion(raizConConfig('{ "prefijoFicticio": "7" }')).prefijoFicticio,
-      "7",
+      leerConfiguracion(raizConConfig('{ "prefijoFicticio": "777" }')).prefijoFicticio,
+      "777",
     );
     assert.equal(
       leerConfiguracion(raizConConfig('{ "prefijoFicticio": "123456" }')).prefijoFicticio,
@@ -55,6 +55,12 @@ describe("leerConfiguracion: errores", () => {
   const invalidos: [string, string, RegExp][] = [
     ["un prefijo con letras", '{ "prefijoFicticio": "abc" }', /"abc"/],
     ["un prefijo vacío", '{ "prefijoFicticio": "" }', /""/],
+    [
+      "un prefijo de 1 dígito, que coincidiría con numeración real",
+      '{ "prefijoFicticio": "1" }',
+      /"1"/,
+    ],
+    ["un prefijo de 2 dígitos", '{ "prefijoFicticio": "99" }', /"99"/],
     ["un prefijo de 7 dígitos", '{ "prefijoFicticio": "1234567" }', /1234567/],
     ["un prefijo que no es texto", '{ "prefijoFicticio": 0 }', /0/],
     ["un campo desconocido", '{ "otroCampo": true }', /otroCampo/],
@@ -76,10 +82,17 @@ describe("leerConfiguracion: errores", () => {
     });
   }
 
-  it("dice cómo corregirlo", () => {
+  it("dice que lo corrige una persona fuera de la sesión", () => {
     assert.throws(
       () => leerConfiguracion(raizConConfig('{ "prefijoFicticio": "abc" }')),
-      /Edita .*controles-equipo\.json o bórralo/,
+      /persona .*fuera de la sesión/,
+    );
+  });
+
+  it("indica el mínimo de 3 dígitos", () => {
+    assert.throws(
+      () => leerConfiguracion(raizConConfig('{ "prefijoFicticio": "1" }')),
+      /entre 3 y 6 dígitos/,
     );
   });
 });

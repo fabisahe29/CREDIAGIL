@@ -8,8 +8,9 @@ import { PREFIJO_FICTICIO } from "./convencion-ficticia.ts";
 export const ARCHIVO_CONFIGURACION = ".claude/controles-equipo.json";
 
 const CAMPOS_CONOCIDOS: ReadonlySet<string> = new Set(["prefijoFicticio"]);
-const FORMA_PREFIJO = /^\d{1,6}$/;
-const CORRECCION = `Edita ${ARCHIVO_CONFIGURACION} o bórralo para usar el valor por defecto.`;
+// Mínimo de 3 dígitos: un prefijo más corto coincidiría con numeración real y dejaría pasar datos reales.
+const FORMA_PREFIJO = /^\d{3,6}$/;
+const CORRECCION = `Que una persona lo corrija o lo borre (para usar el valor por defecto) fuera de la sesión: el agente no puede editar ${ARCHIVO_CONFIGURACION}.`;
 
 export interface ConfiguracionControles {
   /** Los números que empiezan por este prefijo, sin separadores, se tratan como ficticios. */
@@ -55,7 +56,7 @@ export function leerConfiguracion(raiz: string): ConfiguracionControles {
   if (prefijo === undefined) return { prefijoFicticio: PREFIJO_FICTICIO, porDefecto: false };
   if (typeof prefijo !== "string" || !FORMA_PREFIJO.test(prefijo)) {
     throw invalida(
-      `"prefijoFicticio" debe tener entre 1 y 6 dígitos; se encontró ${JSON.stringify(prefijo)}.`,
+      `"prefijoFicticio" debe tener entre 3 y 6 dígitos; se encontró ${JSON.stringify(prefijo)}.`,
     );
   }
   return { prefijoFicticio: prefijo, porDefecto: false };

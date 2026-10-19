@@ -16,12 +16,18 @@ describe("skill revisar-reglas", () => {
   it("solo pre-aprueba lectura y el diff de git", () => {
     const linea = /^allowed-tools: (.*)$/m.exec(contenido)?.[1] ?? "";
     assert.match(linea, /Read/);
-    assert.match(linea, /Bash\(git diff \*\)/);
-    assert.doesNotMatch(linea, /Write|Edit|Bash\((?!git diff)/);
+    assert.match(linea, /Bash\(git diff --end-of-options \*\)/);
+    assert.doesNotMatch(linea, /Write|Edit|Bash\((?!git diff --end-of-options)/);
   });
 
-  it("entrega el diff al revisor con el argumento de la invocación", () => {
-    assert.match(contenido, /!`git diff \$ARGUMENTS`/);
+  it("entrega el diff al revisor con el argumento después de --end-of-options", () => {
+    // Sin el separador, un argumento como --output=<ruta> haría que git escriba un archivo.
+    assert.match(contenido, /!`git diff --end-of-options \$ARGUMENTS`/);
+    assert.doesNotMatch(contenido, /!`git diff \$ARGUMENTS`/);
+  });
+
+  it("documenta que solo se admite una revisión de git", () => {
+    assert.match(contenido, /Solo se admite un rango o una revisión de git/);
   });
 
   it("explica cómo declarar las reglas del equipo", () => {

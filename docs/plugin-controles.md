@@ -12,6 +12,8 @@ Un plugin de Claude Code con los controles reutilizables de este proyecto. Sirve
 
 Lo propio de originación de crédito y del flujo de tickets de este proyecto no viaja en el plugin.
 
+**Convención de nombres de revisores.** El hook trata como revisor, y lo deja en solo lectura, a todo subagente cuyo nombre empiece por `revisor-`, con o sin prefijo de plugin (`revisor-reglas`, `crediagil-controles:revisor-reglas`). Si un equipo crea un subagente que sí necesita escribir, no debe llamarlo `revisor-…`.
+
 ## Requisitos
 
 - Claude Code 2.1.275 o posterior.
@@ -88,7 +90,11 @@ Los límites de cada proceso viven en un único archivo con pruebas en el borde 
 { "prefijoFicticio": "999" }
 ```
 
-`prefijoFicticio` es una cadena de 1 a 6 dígitos. Sin el archivo se usa `"000"` y el mensaje de bloqueo lo dice. Si el archivo existe y no es válido (un prefijo con letras, un campo desconocido o un JSON roto), el hook bloquea con un mensaje que indica qué corregir; no lo ignora.
+`prefijoFicticio` es una cadena de **3 a 6 dígitos**. Un prefijo más corto coincidiría con numeración real y dejaría pasar datos reales, por eso se rechaza. Sin el archivo se usa `"000"` y el mensaje de bloqueo lo dice.
+
+Si el archivo existe y no es válido (un prefijo con letras o de menos de 3 dígitos, un campo desconocido o un JSON roto), el hook bloquea las acciones que traen texto que revisar, con un mensaje que indica qué corregir; no lo ignora. Las acciones sin texto, como leer un archivo, no se bloquean.
+
+**El agente no puede escribir este archivo.** El hook bloquea cualquier escritura o comando que lo nombre, para que el agente no relaje por su cuenta el control de datos con forma real. Una persona lo edita fuera de la sesión de Claude Code. Leerlo con la herramienta `Read` sí está permitido.
 
 ## Actualizar
 

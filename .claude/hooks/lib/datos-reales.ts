@@ -86,10 +86,12 @@ const REGLA = "Los datos con forma real no se guardan: usa datos ficticios.";
 const REGLA_POR_DEFECTO = `${REGLA} Se aplica la convención por defecto (no hay ${ARCHIVO_CONFIGURACION}).`;
 
 /**
- * Sin contexto aplica la convención por defecto. Con contexto lee la configuración del equipo;
- * si el archivo existe y no es válido, lanza `ConfiguracionInvalida`.
+ * Sin contexto aplica la convención por defecto. Con contexto lee la configuración del equipo,
+ * pero solo si la acción trae texto que revisar: así una configuración inválida no bloquea
+ * acciones que no la necesitan. Si el archivo existe y no es válido, lanza `ConfiguracionInvalida`.
  */
 export function datosReales(accion: Accion, contexto?: { raiz: string }): Bloqueo[] {
+  if (accion.textos.length === 0) return [];
   const { prefijoFicticio, porDefecto } =
     contexto === undefined
       ? { prefijoFicticio: PREFIJO_FICTICIO, porDefecto: false }

@@ -30,10 +30,13 @@ Los límites de cada proceso viven en un único archivo con pruebas en el borde 
 
 | Campo | Tipo | Regla |
 |-------|------|-------|
-| `prefijoFicticio` | cadena de 1 a 6 dígitos | Los números cuyo inicio, sin separadores, sea este prefijo se tratan como ficticios. Por defecto `"000"`. |
+| `prefijoFicticio` | cadena de 3 a 6 dígitos | Los números cuyo inicio, sin separadores, sea este prefijo se tratan como ficticios. Por defecto `"000"`. |
 
+- El mínimo de 3 dígitos evita que un prefijo corto coincida con numeración real y deje pasar datos reales (Principio II).
 - Un campo desconocido o un valor que no cumple la regla es un error de configuración: el hook bloquea con un mensaje legible (FR-011). No lo ignora.
+- La configuración se lee solo cuando la acción trae texto que revisar. Una configuración inválida no bloquea acciones sin texto, como un `Read`.
 - Un archivo ausente no es un error: se usa el valor por defecto.
+- **El agente no escribe este archivo.** El control `configuracion-protegida` bloquea toda escritura de las herramientas de edición y todo comando de shell que lo nombre. Lo edita una persona fuera de la sesión.
 
 ## Mensajes de bloqueo del hook
 
@@ -48,8 +51,8 @@ Ejemplo de error de configuración:
 
 ```text
 Bloqueado: controles-equipo.json no es válido.
-Detectado: "prefijoFicticio" debe tener entre 1 y 6 dígitos; se encontró "abc".
-Corrección: edita .claude/controles-equipo.json o bórralo para usar el valor por defecto.
+Detectado: "prefijoFicticio" debe tener entre 3 y 6 dígitos; se encontró "abc".
+Corrección: que una persona lo corrija o lo borre (para usar el valor por defecto) fuera de la sesión: el agente no puede editar .claude/controles-equipo.json.
 ```
 
 ## Cómo se evalúa

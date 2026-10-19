@@ -12,7 +12,12 @@ export interface Bloqueo {
 }
 
 /** Orden de los controles genéricos en el mensaje; quien usa otros controles pasa el suyo. */
-export const ORDEN_GENERICO: readonly Control[] = ["secretos", "datos-reales", "revisores"];
+export const ORDEN_GENERICO: readonly Control[] = [
+  "secretos",
+  "datos-reales",
+  "configuracion-protegida",
+  "revisores",
+];
 
 const ERROR_INTERNO: Control = "error-interno";
 

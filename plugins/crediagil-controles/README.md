@@ -17,7 +17,7 @@ Node.js 22.18 o posterior: el hook ejecuta TypeScript directamente.
 La configuración vive en el repositorio del equipo, no aquí:
 
 - `.claude/reglas-equipo.md`: las reglas que audita el revisor, un encabezado de segundo nivel por regla. Sin este archivo, el revisor informa `sin_configuracion` y no audita.
-- `.claude/controles-equipo.json` (opcional): `{ "prefijoFicticio": "000" }`. Un número de identificación, cuenta o tarjeta ficticio empieza por este prefijo, contando solo los dígitos.
+- `.claude/controles-equipo.json` (opcional): `{ "prefijoFicticio": "000" }`, de 3 a 6 dígitos. Una persona lo edita fuera de la sesión: el hook no deja que el agente lo escriba. Un número de identificación, cuenta o tarjeta ficticio empieza por este prefijo, contando solo los dígitos.
 
 ## Uso
 
