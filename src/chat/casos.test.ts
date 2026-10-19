@@ -337,3 +337,64 @@ describe("casos: preaprobación (#14)", () => {
     });
   }
 });
+describe("casos: escalamiento (#15)", () => {
+  /** Cada caso es un solo mensaje: el escalamiento ocurre antes de identificar al solicitante. */
+  const CASOS: Record<string, { mensaje: string; descripcion: RegExp }> = {
+    "escalamiento-pide-persona": {
+      mensaje: "Quiero hablar con una persona",
+      descripcion: /Regla 4/,
+    },
+    "escalamiento-pide-persona-con-datos": {
+      mensaje: "Hola, quiero 4 millones a 24 meses, pero prefiero hablar con una persona",
+      descripcion: /Regla 4/,
+    },
+    "escalamiento-moneda-extranjera": {
+      mensaje: "Quiero 4 millones a 24 meses y mi sueldo me lo pagan en dólares",
+      descripcion: /Regla 5/,
+    },
+  };
+
+  for (const [nombre, { mensaje, descripcion }] of Object.entries(CASOS)) {
+    it(`el caso versionado casos/${nombre} carga sin errores`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.equal(r.ok, true, r.ok ? "" : r.problema);
+    });
+
+    it(`casos/${nombre} es un solo mensaje, sin adjuntos y sin identificarse`, async () => {
+      const r = await cargarCaso(resolve("casos", nombre), process.cwd());
+      assert.ok(r.ok);
+      if (!r.ok) return;
+      assert.deepEqual(r.caso.pasos, [{ mensaje }]);
+      assert.match(r.caso.descripcion, descripcion);
+    });
+
+    it(`casos/${nombre} cumple la convención de datos ficticios`, () => {
+      const carpeta = resolve("casos", nombre);
+      for (const archivo of readdirSync(carpeta)) {
+        const texto = readFileSync(join(carpeta, archivo), "utf8");
+        const bloqueos = datosReales({
+          herramienta: "Write",
+          rutas: [`casos/${nombre}/${archivo}`],
+          textos: [{ origen: `casos/${nombre}/${archivo}`, texto }],
+        });
+        assert.deepEqual(
+          bloqueos.map((b) => b.detectado),
+          [],
+          archivo,
+        );
+      }
+    });
+  }
+
+  it("la petición de persona de los dos primeros casos la detecta el código, sin el modelo", async () => {
+    const { detectarPeticionPersona } = await import("../politica/escalamiento.ts");
+    for (const nombre of ["escalamiento-pide-persona", "escalamiento-pide-persona-con-datos"]) {
+      assert.equal(detectarPeticionPersona(CASOS[nombre]!.mensaje), true, nombre);
+    }
+  });
+
+  it("el caso de moneda extranjera no pide una persona: lo clasifica el modelo con la Regla 5", async () => {
+    const { detectarPeticionPersona } = await import("../politica/escalamiento.ts");
+    assert.equal(detectarPeticionPersona(CASOS["escalamiento-moneda-extranjera"]!.mensaje), false);
+  });
+});

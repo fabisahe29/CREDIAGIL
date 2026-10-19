@@ -4,6 +4,85 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-18 · Escalamiento con criterio y handoff al analista
+
+**Issue**: [#15 — Escalamiento con criterio y handoff al analista](https://github.com/fabisahe29/CREDIAGIL/issues/15)
+
+**Detalle**: [specs/013-escalamiento-analista/research.md](specs/013-escalamiento-analista/research.md), decisiones R1 a R14
+
+### Decisión 1: la causa es una de cinco y el motivo de la señal se conserva
+
+El resumen lleva una causa cerrada (`peticion_de_persona`, `monto_sobre_umbral`, `cuota_sobre_porcentaje`, `discrepancia_de_ingreso`, `caso_no_cubierto`) que una función de la política deduce del motivo y del código de la Regla 2. El motivo de la señal, de los doce que ya existen, viaja junto a ella.
+
+**Motivo**: la spec fija cinco causas, pero el código ya escala por siete razones más (identidad, documentos, fallas técnicas). Sin el motivo, una falla técnica quedaría llamada «caso no cubierto» sin explicación.
+
+**Alternativas descartadas**: ampliar las causas, porque cambia una spec ya clarificada; reducir los motivos a cinco, porque oculta la razón al analista.
+
+### Decisión 2: la acción recomendada sale de un catálogo cerrado de la política
+
+Siete acciones: las cuatro de la aclaración Q2 y tres para identidad, documentos y fallas técnicas, que Q2 no nombra. La acción la deduce `accionRecomendada` de la política; el agente no la redacta.
+
+**Motivo**: con una sola acción por causa, a una falla técnica le tocaría «revisar tipo de documento o moneda». Un catálogo fijo es reproducible y auditable.
+
+**Alternativas descartadas**: una acción genérica para todas, que Q2 descartó; que el modelo la redacte, porque no es reproducible.
+
+### Decisión 3: el core arma el resumen con lo que ya sabe
+
+`escalar_a_analista` recibe solo la clasificación; el core toma el solicitante, la solicitud, los ingresos, las discrepancias y los datos extraídos de su propio estado y valida el resumen. Una excepción: el monto y el plazo que dijo el solicitante, con su cita, cuando todavía no hay solicitud registrada.
+
+**Motivo**: el mismo principio de #13 y #14: lo que el core ya tiene no lo transcribe el modelo. Las reglas 4 y 5 escalan antes de identificar, así que sin la excepción esos resúmenes nunca traerían monto ni plazo.
+
+**Alternativas descartadas**: que el adaptador componga todo el resumen, porque duplica lecturas justo cuando escalar no puede fallar; que el modelo lo redacte, porque puede inventar.
+
+### Decisión 4: la Regla 4 se decide por código antes de llamar al modelo
+
+`detectarPeticionPersona` evalúa el mensaje con listas cerradas y una negación inmediata. Si coincide, se escala sin llamar al modelo.
+
+**Motivo**: «sin invocar otras herramientas antes» no puede depender de que el modelo respete el orden, y un hook solo puede negar herramientas, no saber qué pidió el solicitante.
+
+**Alternativas descartadas**: reforzar el prompt, que es el comportamiento de hoy; una clasificación previa con el modelo, que no es determinista; un hook que obligue a llamar primero a `solicitar_analista`.
+
+### Decisión 5: se acumulan todas las causas y la principal es la de mayor precedencia
+
+`dejarSenal` guarda cada señal observada; la principal sigue siendo la de la regla anterior en el orden 4 → 5 → 1 → 3 → 2 y las demás van como causas adicionales.
+
+**Motivo**: la señal perdedora hoy se descarta sin rastro, y el analista debe recibir todo lo extraído, validado y pendiente (Principio V).
+
+**Alternativas descartadas**: leer las causas de los logs, que no son un contrato; reevaluar todas las reglas al cerrar el turno.
+
+### Decisión 6: escalar no puede fallar, y la entrega es idempotente por conversación
+
+La entrega al core usa reintentos acotados. Si no llega, la conversación escala igual con la entrega pendiente y un log de error. La clave de idempotencia se calcula con la conversación, y hay un solo escalamiento por conversación.
+
+**Motivo**: escalar es el camino seguro y no puede depender de que el core esté arriba (Principios V y VI). Una clave por conversación evita dos casos para el mismo solicitante.
+
+**Alternativas descartadas**: no escalar si falla la entrega; una clave que incluya el motivo, que permitiría dos entregas.
+
+### Decisión 7: lo que falta se declara como pendiente, no se rechaza
+
+El resumen lleva `pendientes`, una lista cerrada que calcula el core. Un campo ausente que no figura como pendiente es un error; uno declarado pendiente es válido.
+
+**Motivo**: concilia rechazar un resumen que no valida con escalar igual cuando faltan datos, y el analista siempre sabe qué falta.
+
+**Alternativas descartadas**: rechazar el resumen incompleto, que impediría escalar la Regla 4; no declarar los pendientes.
+
+### Decisión 8: las reglas y los motivos pasan a la política
+
+`src/politica/escalamiento.ts` es la única fuente de los motivos, las causas, las acciones y la regla de cada motivo, incluida `REGLA_4`. Los nombres exportados de `adaptador.ts` se mantienen.
+
+**Motivo**: el core necesita la regla de cada motivo y no puede importar del agente.
+
+**Alternativas descartadas**: duplicar las constantes en el core; que el agente envíe el texto de la regla.
+
+### Riesgos residuales aceptados
+
+- Una paráfrasis de la petición de persona que las listas no reconozcan llega al modelo, sin la garantía de «sin herramientas antes».
+- La spec no tiene causas propias para identidad y fallas técnicas; se confirma o se enmienda FR-006.
+- Si la entrega falla, no hay un proceso que la reintente: queda el log de error y la clave determinista.
+- El resumen solo se ve en el proceso del chat, con `--demo`.
+
+---
+
 ## 2026-10-18 · Preaprobación automática dentro de la política
 
 **Issue**: [#14 — Preaprobación automática dentro de la política](https://github.com/fabisahe29/CREDIAGIL/issues/14)

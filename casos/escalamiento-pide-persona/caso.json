@@ -1,0 +1,5 @@
+{
+  "nombre": "escalamiento-pide-persona",
+  "descripcion": "Caso de prueba 6 (#15): el solicitante pide hablar con una persona; la Regla 4 escala de inmediato, sin llamar al modelo ni a ninguna herramienta, y el analista recibe un resumen con todo pendiente",
+  "pasos": [{ "mensaje": "Quiero hablar con una persona" }]
+}

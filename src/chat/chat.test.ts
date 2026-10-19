@@ -15,6 +15,10 @@ import type { ClienteCore } from "../agente/cliente-core.ts";
 import { exito } from "../compartido/errores.ts";
 import type { EventoNegocio } from "../compartido/eventos.ts";
 import { fijarDestino } from "../compartido/logs.ts";
+import {
+  claveIdempotenciaEscalamiento,
+  esquemaResumenAnalista,
+} from "../compartido/escalamiento.ts";
 import { CORE_NO_SIMULADO } from "../agente/core-no-simulado.ts";
 
 // ── Utilidades ────────────────────────────────────────────────────────────────
@@ -57,6 +61,8 @@ const resultado = (
   respuesta,
   tipo: "respuesta",
   documentosRevisados: 0,
+  handoff: null,
+  entrega: null,
   escalamiento: null,
   turnos: 1,
   eventos: [],
@@ -821,5 +827,81 @@ describe("chat: casos de prueba (US5)", () => {
     const chat = arrancar(undefined, { casoInicial: "inicial" });
     await hasta(() => chat.salida.includes("▶ Caso terminado."));
     assert.equal(chat.llamadas[0]!.mensaje, "Hola desde el caso");
+  });
+});
+// ── Resumen para el analista solo en modo de demostración (#15, US5) ───────────────────────
+
+describe("chat: el resumen para el analista solo se imprime con --demo (#15, US5)", () => {
+  const handoff = esquemaResumenAnalista.parse({
+    idEscalamiento: "ESC-0003000001",
+    correlationId: ID_1,
+    claveIdempotencia: claveIdempotenciaEscalamiento(ID_1),
+    escaladoEn: "2026-10-18T12:00:00.000Z",
+    versionPolitica: "2026-10-18.4",
+    causa: "peticion_de_persona",
+    motivo: "pide_persona",
+    regla: "Regla 4 · el solicitante pide hablar con una persona",
+    accionRecomendada: "contactar_al_solicitante",
+    causasAdicionales: [],
+    solicitante: { identificado: false },
+    solicitud: null,
+    monto: null,
+    plazoMeses: null,
+    ingresoDeclarado: null,
+    verificacionIngreso: null,
+    discrepancias: [],
+    datosExtraidos: [],
+    decision: null,
+    pendientes: ["identidad", "monto", "plazo", "ingreso_verificado", "documentos"],
+  });
+
+  const escalada = (extra: Partial<ResultadoConversacion>) => () =>
+    resultado("Un analista de crédito revisará tu caso.", {
+      tipo: "escalada",
+      eventos: [escalamiento],
+      ...extra,
+    });
+
+  it("con --demo imprime el resumen después de los eventos y antes del estado", async () => {
+    const chat = arrancar([escalada({ handoff, entrega: "entregada" })], {
+      demo: true,
+    });
+    chat.linea("Quiero hablar con una persona");
+    await hasta(() => chat.salida.some((l) => l.includes("ESCALADA A ANALISTA")));
+    const texto = chat.salida.join("\n");
+    const evento = texto.indexOf("[ESCALAMIENTO]");
+    const resumenImpreso = texto.indexOf("══ Resumen para el analista · ESC-0003000001 ══");
+    const estado = texto.indexOf("Estado de la solicitud: ESCALADA A ANALISTA");
+    assert.ok(evento >= 0 && resumenImpreso > evento && estado > resumenImpreso, texto);
+    assert.match(texto, /Pendientes: identidad, monto, plazo, ingreso_verificado, documentos/);
+  });
+
+  it("sin --demo no imprime el resumen: es para el analista, no para el solicitante", async () => {
+    const chat = arrancar([escalada({ handoff, entrega: "entregada" })]);
+    chat.linea("Quiero hablar con una persona");
+    await hasta(() => chat.salida.some((l) => l.includes("ESCALADA A ANALISTA")));
+    const texto = chat.salida.join("\n");
+    assert.equal(texto.includes("Resumen para el analista"), false);
+    assert.equal(texto.includes("Entrega al analista"), false);
+  });
+
+  it("con --demo y la entrega pendiente imprime que quedó pendiente, sin resumen", async () => {
+    const chat = arrancar([escalada({ handoff: null, entrega: "pendiente" })], {
+      demo: true,
+    });
+    chat.linea("Quiero hablar con una persona");
+    await hasta(() => chat.salida.some((l) => l.includes("ESCALADA A ANALISTA")));
+    const texto = chat.salida.join("\n");
+    assert.ok(chat.salida.includes("Entrega al analista: pendiente"), texto);
+    assert.equal(texto.includes("Resumen para el analista"), false);
+  });
+
+  it("con --demo y una conversación que no escaló no imprime nada del escalamiento", async () => {
+    const chat = arrancar([() => resultado("Hola")], { demo: true });
+    chat.linea("Hola");
+    await hasta(() => chat.salida.includes("Agente: Hola"));
+    const texto = chat.salida.join("\n");
+    assert.equal(texto.includes("Resumen para el analista"), false);
+    assert.equal(texto.includes("Entrega al analista"), false);
   });
 });

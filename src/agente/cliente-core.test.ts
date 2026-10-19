@@ -15,6 +15,7 @@ import {
 import { construirResultado, validarSalida } from "../compartido/extraccion.ts";
 import { CONTENIDO_CERTIFICADO, salidaCertificado } from "../compartido/extraccion-ejemplos.ts";
 import { ejemploCertificado, extractosTrimestre } from "../compartido/ingreso-ejemplos.ts";
+import { claveIdempotenciaEscalamiento } from "../compartido/escalamiento.ts";
 
 describe("cliente del core contra el servidor real", () => {
   let core: ClienteCore;
@@ -1102,5 +1103,166 @@ describe("cliente del core: preaprobarSolicitud (#14, US1)", () => {
     const t = await lento.preaprobarSolicitud(randomUUID());
     assert.equal(t.ok, false);
     if (!t.ok) assert.equal(t.error.codigo, "tiempo_agotado");
+  });
+});
+describe("cliente del core: escalarAAnalista y consultarEscalamiento (#15, US1)", () => {
+  const entrada = (correlationId: string) => ({
+    claveIdempotencia: claveIdempotenciaEscalamiento(correlationId),
+    causa: "peticion_de_persona" as const,
+    motivo: "pide_persona" as const,
+  });
+
+  it("escala contra el servidor real, sin identidad ni solicitud, y repetirlo devuelve el mismo resumen", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const correlationId = randomUUID();
+      const primera = await core.escalarAAnalista(entrada(correlationId), correlationId);
+      assert.equal(primera.ok, true, JSON.stringify(primera));
+      if (!primera.ok) return;
+      assert.equal(primera.datos.repetida, false);
+      assert.equal(primera.datos.escalamiento.solicitante.identificado, false);
+      assert.equal(primera.datos.escalamiento.causa, "peticion_de_persona");
+
+      const repetida = await core.escalarAAnalista(entrada(correlationId), correlationId);
+      assert.equal(repetida.ok && repetida.datos.repetida, true);
+      assert.equal(
+        repetida.ok && repetida.datos.escalamiento.idEscalamiento,
+        primera.datos.escalamiento.idEscalamiento,
+      );
+
+      const leida = await core.consultarEscalamiento(correlationId);
+      assert.equal(leida.ok, true, JSON.stringify(leida));
+      if (leida.ok) {
+        assert.equal(
+          leida.datos.escalamiento?.idEscalamiento,
+          primera.datos.escalamiento.idEscalamiento,
+        );
+      }
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("consultarEscalamiento devuelve null sin escalamiento", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const leida = await core.consultarEscalamiento(randomUUID());
+      assert.deepEqual(leida, { ok: true, datos: { escalamiento: null } });
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("un rechazo del servidor llega validado por el contrato", async () => {
+    const core = await crearClienteCore({ env: { CREDIAGIL_FALLA: "" } });
+    try {
+      const correlationId = randomUUID();
+      const r = await core.escalarAAnalista(
+        { ...entrada(correlationId), causa: "caso_no_cubierto" },
+        correlationId,
+      );
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.error.codigo, "causa_incoherente");
+    } finally {
+      await core.cerrar();
+    }
+  });
+
+  it("envía el nombre de la herramienta y los argumentos con el correlationId", async () => {
+    const llamadas: { name: string; arguments: Record<string, unknown> }[] = [];
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async (params) => {
+          llamadas.push(params);
+          return {
+            structuredContent: { ok: true, datos: { escalamiento: null } },
+          };
+        },
+        close: async () => {},
+      },
+    });
+    const correlationId = randomUUID();
+    const e = {
+      ...entrada(correlationId),
+      causasAdicionales: [
+        {
+          causa: "caso_no_cubierto" as const,
+          motivo: "caso_no_cubierto" as const,
+        },
+      ],
+    };
+    await core.escalarAAnalista(e, correlationId);
+    await core.consultarEscalamiento(correlationId);
+    assert.deepEqual(llamadas, [
+      { name: "escalar_a_analista", arguments: { ...e, correlationId } },
+      { name: "consultar_escalamiento", arguments: { correlationId } },
+    ]);
+  });
+
+  it("una respuesta fuera de contrato es respuesta_fuera_de_contrato, no se adivina", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({
+          structuredContent: {
+            ok: true,
+            datos: {
+              escalamiento: { idEscalamiento: "ESC-1", causa: "otra" },
+              repetida: false,
+            },
+          },
+        }),
+        close: async () => {},
+      },
+    });
+    const r = await core.escalarAAnalista(entrada(randomUUID()), randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "respuesta_fuera_de_contrato");
+    const c = await core.consultarEscalamiento(randomUUID());
+    assert.equal(c.ok, false);
+    if (!c.ok) assert.equal(c.error.codigo, "respuesta_fuera_de_contrato");
+  });
+
+  it("una falla del llamador es core_no_disponible y un tiempo agotado es tiempo_agotado", async () => {
+    const caido = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new Error("conexión rota");
+        },
+        close: async () => {},
+      },
+    });
+    const r = await caido.escalarAAnalista(entrada(randomUUID()), randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.error.codigo, "core_no_disponible");
+      assert.equal(r.error.reintentable, true);
+    }
+    const lento = await crearClienteCore({
+      llamador: {
+        callTool: async () => {
+          throw new McpError(ErrorCode.RequestTimeout, "tiempo");
+        },
+        close: async () => {},
+      },
+    });
+    const t = await lento.escalarAAnalista(entrada(randomUUID()), randomUUID());
+    assert.equal(t.ok, false);
+    if (!t.ok) assert.equal(t.error.codigo, "tiempo_agotado");
+  });
+
+  it("un cliente cerrado es core_no_disponible", async () => {
+    const core = await crearClienteCore({
+      llamador: {
+        callTool: async () => ({ structuredContent: {} }),
+        close: async () => {},
+      },
+    });
+    await core.cerrar();
+    const r = await core.escalarAAnalista(entrada(randomUUID()), randomUUID());
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.error.codigo, "core_no_disponible");
+    const c = await core.consultarEscalamiento(randomUUID());
+    assert.equal(c.ok, false);
+    if (!c.ok) assert.equal(c.error.codigo, "core_no_disponible");
   });
 });

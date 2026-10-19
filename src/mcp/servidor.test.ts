@@ -32,6 +32,10 @@ import {
 } from "../compartido/capacidad-pago.ts";
 import { DESCRIPCION_REGISTRAR_SOLICITUD } from "../compartido/solicitud.ts";
 import { DESCRIPCION_PREAPROBAR_CREDITO } from "../compartido/preaprobacion.ts";
+import {
+  DESCRIPCION_ESCALAR_A_ANALISTA,
+  claveIdempotenciaEscalamiento,
+} from "../compartido/escalamiento.ts";
 
 const PRINCIPAL = fileURLToPath(new URL("./principal.ts", import.meta.url));
 
@@ -1570,5 +1574,233 @@ describe("servidor MCP del core: preaprobar_credito (#14)", () => {
         false,
       );
     });
+  });
+});
+describe("servidor MCP del core: escalar_a_analista y consultar_escalamiento (#15)", () => {
+  let conexion: Conexion;
+  // Un servidor por prueba: cada solicitante puede tener una sola solicitud abierta en el core.
+  beforeEach(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  afterEach(async () => {
+    await conexion.cerrar();
+  });
+
+  const FECHA_UNICO = SOLICITANTES_EJEMPLO.find(
+    (s) => s.idSolicitante === ID_SOLICITANTE_UNICO,
+  )!.fechaExpedicion;
+  const cita = (fragmento: string) => ({ tipo: "afirmacion", fragmento });
+
+  /** Identidad de Ana, documentos con ingreso de 3.800.000 y una solicitud registrada. */
+  async function conSolicitudRegistrada() {
+    const correlationId = randomUUID();
+    const identidad = await llamarHerramienta(conexion, "verificar_identidad", {
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      fechaExpedicion: FECHA_UNICO,
+      idIntento: randomUUID(),
+      correlationId,
+    });
+    assert.equal(identidad.isError, false, JSON.stringify(identidad.contenido));
+    for (const e of [ejemploCertificado(), ...extractosTrimestre()]) {
+      const v = validarSalida(e.salida, e, new Date());
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = await llamarHerramienta(conexion, "registrar_extraccion", {
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      });
+      assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    }
+    const ingreso = await llamarHerramienta(conexion, "verificar_ingreso", {
+      correlationId,
+      ingresoDeclarado: 3_800_000,
+    });
+    assert.equal(ingreso.isError, false, JSON.stringify(ingreso.contenido));
+    const registro = await llamarHerramienta(conexion, "registrar_solicitud", {
+      correlationId,
+      idSolicitante: ID_SOLICITANTE_UNICO,
+      monto: 4_000_000,
+      plazoMeses: 24,
+      claveIdempotencia: `clave-${correlationId}`,
+      procedencia: {
+        monto: cita("quiero el monto"),
+        plazoMeses: cita("a ese plazo"),
+        ingresoDeclarado: cita("gano ese ingreso"),
+      },
+    });
+    assert.equal(registro.isError, false, JSON.stringify(registro.contenido));
+    return correlationId;
+  }
+
+  const entrada = (correlationId: string, cambios: Record<string, unknown> = {}) => ({
+    correlationId,
+    claveIdempotencia: claveIdempotenciaEscalamiento(correlationId),
+    causa: "peticion_de_persona",
+    motivo: "pide_persona",
+    ...cambios,
+  });
+
+  const escalar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "escalar_a_analista", argumentos);
+
+  const leer = (correlationId: string) =>
+    llamarHerramienta(conexion, "consultar_escalamiento", { correlationId });
+
+  it("anuncia escalar_a_analista con efectos, la descripción compartida y sin los datos que toma el core", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "escalar_a_analista");
+    assert.ok(herramienta, "falta escalar_a_analista");
+    assert.notEqual(herramienta.annotations?.readOnlyHint, true);
+    assert.equal(herramienta.description, DESCRIPCION_ESCALAR_A_ANALISTA);
+    assert.ok(herramienta.outputSchema, "falta el esquema de salida");
+    const campos = Object.keys(herramienta.inputSchema.properties ?? {});
+    for (const campo of ["correlationId", "claveIdempotencia", "causa", "motivo", "codigo"]) {
+      assert.ok(campos.includes(campo), `falta ${campo} en el esquema anunciado`);
+    }
+    for (const campo of ["solicitante", "ingresoVerificado", "accionRecomendada", "regla"]) {
+      assert.equal(campos.includes(campo), false, `${campo} no es un campo de entrada`);
+    }
+  });
+
+  it("anuncia consultar_escalamiento como solo lectura", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "consultar_escalamiento");
+    assert.ok(herramienta, "falta consultar_escalamiento");
+    assert.equal(herramienta.annotations?.readOnlyHint, true);
+    assert.ok(herramienta.outputSchema);
+  });
+
+  it("escala sin identidad ni solicitud y devuelve el resumen con repetida false", async () => {
+    const correlationId = randomUUID();
+    const r = await escalar(entrada(correlationId));
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    const datos = r.contenido.datos as {
+      escalamiento: {
+        idEscalamiento: string;
+        causa: string;
+        solicitante: { identificado: boolean };
+        pendientes: string[];
+      };
+      repetida: boolean;
+    };
+    assert.equal(datos.repetida, false);
+    assert.match(datos.escalamiento.idEscalamiento, /^ESC-000\d{7}$/);
+    assert.equal(datos.escalamiento.causa, "peticion_de_persona");
+    assert.equal(datos.escalamiento.solicitante.identificado, false);
+    assert.equal(datos.escalamiento.pendientes.length, 5);
+  });
+
+  it("con la solicitud armada, el resumen trae el solicitante y la solicitud", async () => {
+    const correlationId = await conSolicitudRegistrada();
+    const r = await escalar(
+      entrada(correlationId, {
+        causa: "cuota_sobre_porcentaje",
+        motivo: "preaprobacion_fuera_de_politica",
+        codigo: "cuota_sobre_porcentaje",
+      }),
+    );
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    const escalamiento = (
+      r.contenido.datos as {
+        escalamiento: {
+          solicitante: { identificado: boolean; idSolicitante?: string };
+          solicitud: { idSolicitud: string; estado: string } | null;
+          pendientes: string[];
+        };
+      }
+    ).escalamiento;
+    assert.equal(escalamiento.solicitante.identificado, true);
+    assert.equal(escalamiento.solicitante.idSolicitante, ID_SOLICITANTE_UNICO);
+    assert.equal(escalamiento.solicitud?.estado, "en_estudio");
+    assert.deepEqual(escalamiento.pendientes, []);
+  });
+
+  it("repetir devuelve el mismo resumen con repetida true y una sola auditoría", async () => {
+    const correlationId = randomUUID();
+    const primera = await escalar(entrada(correlationId));
+    const segunda = await escalar(entrada(correlationId));
+    assert.equal(segunda.isError, false);
+    assert.equal(segunda.contenido.datos?.["repetida"], true);
+    assert.deepEqual(
+      segunda.contenido.datos?.["escalamiento"],
+      primera.contenido.datos?.["escalamiento"],
+    );
+    const registros = await registrosDe(conexion, correlationId);
+    const auditorias = registros.filter((l) => l["evento"] === "auditoria_escalamiento");
+    assert.equal(auditorias.length, 1);
+    assert.equal(auditorias[0]?.["resultado"], "escalada");
+  });
+
+  it("un campo que el core toma de su estado es formato_invalido sobre ese campo", async () => {
+    const correlationId = randomUUID();
+    for (const campo of ["solicitante", "ingresoVerificado", "accionRecomendada", "regla"]) {
+      const r = await escalar(entrada(correlationId, { [campo]: "x" }));
+      assert.equal(r.isError, true, campo);
+      assert.equal(r.contenido.error?.codigo, "formato_invalido", campo);
+      assert.equal(r.contenido.error?.campo, campo, campo);
+    }
+    const leida = await leer(correlationId);
+    assert.equal(leida.contenido.datos?.["escalamiento"], null);
+  });
+
+  it("una causa que no corresponde al motivo es causa_incoherente sobre causa", async () => {
+    const r = await escalar(entrada(randomUUID(), { causa: "caso_no_cubierto" }));
+    assert.equal(r.isError, true);
+    assert.equal(r.contenido.error?.categoria, "validacion");
+    assert.equal(r.contenido.error?.codigo, "causa_incoherente");
+    assert.equal(r.contenido.error?.campo, "causa");
+  });
+
+  it("sin correlationId o con uno inválido es formato_invalido sobre correlationId", async () => {
+    assert.equal((await escalar({})).contenido.error?.campo, "correlationId");
+    assert.equal(
+      (await escalar({ ...entrada(randomUUID()), correlationId: "no-uuid" })).contenido.error
+        ?.campo,
+      "correlationId",
+    );
+    assert.equal((await leer("no-uuid")).contenido.error?.campo, "correlationId");
+  });
+
+  it("consultar_escalamiento devuelve null sin escalamiento y el resumen con él", async () => {
+    const correlationId = randomUUID();
+    const vacio = await leer(correlationId);
+    assert.equal(vacio.isError, false);
+    assert.equal(vacio.contenido.datos?.["escalamiento"], null);
+    const escalado = await escalar(entrada(correlationId));
+    const leido = await leer(correlationId);
+    assert.deepEqual(
+      leido.contenido.datos?.["escalamiento"],
+      escalado.contenido.datos?.["escalamiento"],
+    );
+  });
+
+  it("el log de la herramienta lleva el resultado y el escalamiento, sin datos del caso", async () => {
+    const correlationId = await conSolicitudRegistrada();
+    await escalar(entrada(correlationId));
+    const registros = await registrosDe(conexion, correlationId);
+    const herramienta = registros.find(
+      (l) => l["evento"] === "herramienta" && l["herramienta"] === "escalar_a_analista",
+    );
+    assert.equal(herramienta?.["resultado"], "ok");
+    assert.match(String(herramienta?.["idEscalamiento"]), /^ESC-000\d{7}$/);
+    for (const campo of ["monto", "plazoMeses", "nombre", "solicitante", "ingreso", "causa"]) {
+      assert.equal(campo in herramienta!, false, `${campo} en el log de la herramienta`);
+    }
+    const auditoria = registros.find((l) => l["evento"] === "auditoria_escalamiento");
+    assert.equal(auditoria?.["resultado"], "escalada");
+    assert.equal(auditoria?.["causa"], "peticion_de_persona");
+    assert.equal(auditoria?.["versionPolitica"], VERSION_POLITICA);
+    assert.equal(typeof auditoria?.["ts"], "string");
+    const texto = JSON.stringify(
+      registros.filter(
+        (l) =>
+          l["evento"] === "auditoria_escalamiento" || l["herramienta"] === "escalar_a_analista",
+      ),
+    );
+    for (const dato of ["certificado", "extracto", "Industrias", "Ficticia", "quiero el monto"]) {
+      assert.equal(texto.includes(dato), false, `«${dato}» en el log o la auditoría`);
+    }
   });
 });

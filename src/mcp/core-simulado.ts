@@ -44,6 +44,22 @@ import { validarConsistencia } from "../politica/consistencia.ts";
 import { calcularDiferenciaPorcentaje, decidirIngreso } from "../politica/ingreso.ts";
 import { REGLA_2, evaluarRegla2, type DecisionRegla2 } from "../politica/preaprobacion.ts";
 import { validarEntradaPreaprobacion } from "../compartido/preaprobacion.ts";
+import {
+  CAUSAS_CON_DECISION_DE_LA_REGLA_2,
+  accionRecomendada,
+  reglaDeEscalamiento,
+  type CausaEscalamiento,
+  type MotivoEscalamiento,
+  type Pendiente,
+} from "../politica/escalamiento.ts";
+import {
+  calcularPendientes,
+  esquemaResumenAnalista,
+  validarEntradaEscalamiento,
+  type DiscrepanciaResumen,
+  type ResultadoEscalamiento,
+  type ResumenAnalista,
+} from "../compartido/escalamiento.ts";
 import type { VerificacionIngreso } from "../compartido/ingreso.ts";
 import {
   esquemaSolicitudRegistrada,
@@ -249,6 +265,27 @@ export interface AuditoriaPreaprobacion {
 
 export type RespuestaPreaprobacion = Respuesta<ResultadoRegistro>;
 
+/**
+ * Auditoría de un escalamiento (#15, R11): la regla, la causa, los identificadores y lo que faltaba;
+ * nunca nombres, documentos, citas ni contenido.
+ */
+export interface AuditoriaEscalamiento {
+  resultado: "escalada";
+  regla: string;
+  causa: CausaEscalamiento;
+  motivo: MotivoEscalamiento;
+  /** Solo con la preaprobación fuera de política: el código del bloqueo. */
+  codigo?: string;
+  causasAdicionales: number;
+  idEscalamiento: string;
+  idSolicitud?: string;
+  idSolicitante?: string;
+  pendientes: Pendiente[];
+  versionPolitica: string;
+}
+
+export type RespuestaEscalamiento = Respuesta<ResultadoEscalamiento>;
+
 export interface Core {
   consultarSolicitud(idSolicitud: unknown): Respuesta<{ solicitud: Solicitud | null }>;
   buscarSolicitante(criterio: CriterioBusqueda): Respuesta<{ coincidencias: Coincidencia[] }>;
@@ -307,6 +344,20 @@ export interface Core {
   consultarSolicitudRegistrada(
     correlationId: unknown,
   ): Respuesta<{ solicitud: SolicitudRegistrada | null }>;
+  /**
+   * Entrega un caso a un analista con un resumen que arma el core con su propio estado (#15, R3). No
+   * exige identidad ni solicitud registrada, y nunca se rechaza por no poder justificar la causa: solo
+   * por la forma de la entrada. Es idempotente por conversación. `auditoria` es `null` si no hubo
+   * decisión que auditar: falla simulada, error o repetición.
+   */
+  escalarAAnalista(entrada: unknown): {
+    respuesta: RespuestaEscalamiento;
+    auditoria: AuditoriaEscalamiento | null;
+  };
+  /** Solo lectura (#15): el escalamiento de la conversación, o `null`. */
+  consultarEscalamiento(
+    correlationId: unknown,
+  ): Respuesta<{ escalamiento: ResumenAnalista | null }>;
 }
 
 export interface OpcionesCore {
@@ -393,6 +444,9 @@ export function crearCore({
   const registradas = new Map<string, SolicitudRegistrada>();
   const registradasPorConversacion = new Map<string, string[]>();
   let siguienteNumeroSolicitud = 2_000_001;
+  /** Un escalamiento por conversación y el contador de sus identificadores (#15, R8). */
+  const escalamientos = new Map<string, ResumenAnalista>();
+  let siguienteNumeroEscalamiento = 3_000_001;
 
   /** Valida y evalúa un intento en el orden de R4; no guarda la respuesta. */
   function evaluarIntento(
@@ -1299,6 +1353,163 @@ export function crearCore({
       return exito({ solicitud: solicitud === undefined ? null : structuredClone(solicitud) });
     },
 
+    escalarAAnalista(entrada) {
+      if (fallaSimulada.debeFallar()) return { respuesta: fallo(noDisponible()), auditoria: null };
+      const forma = validarEntradaEscalamiento(entrada);
+      if (!forma.ok) return { respuesta: fallo(forma.error), auditoria: null };
+      const { correlationId, motivo, codigo, declarado } = forma.entrada;
+
+      // Un solo escalamiento por conversación: repetir, o llegar con otra clave u otra causa, devuelve el
+      // primero y no audita (R8).
+      const previo = escalamientos.get(correlationId);
+      if (previo !== undefined) {
+        return {
+          respuesta: exito({ escalamiento: structuredClone(previo), repetida: true }),
+          auditoria: null,
+        };
+      }
+
+      const clasificacion = { motivo, ...(codigo !== undefined ? { codigo } : {}) };
+      const causasAdicionales = (forma.entrada.causasAdicionales ?? []).map((a) => ({
+        causa: a.causa,
+        motivo: a.motivo,
+        ...(a.codigo !== undefined ? { codigo: a.codigo } : {}),
+        accionRecomendada: accionRecomendada({
+          motivo: a.motivo,
+          ...(a.codigo !== undefined ? { codigo: a.codigo } : {}),
+        }),
+      }));
+
+      // Todo lo demás sale del estado del core, nunca de la entrada (R3).
+      const identidad = identidades.get(correlationId);
+      const identificado =
+        identidad?.verificada === true
+          ? registrados.find((s) => s.idSolicitante === identidad.idSolicitante)
+          : undefined;
+      const ultima = registradasPorConversacion.get(correlationId)?.at(-1);
+      const registrada = ultima === undefined ? undefined : registradas.get(ultima);
+      const solicitud =
+        identificado !== undefined &&
+        registrada?.solicitante.idSolicitante === identificado.idSolicitante
+          ? registrada
+          : undefined;
+      const propia =
+        identificado === undefined
+          ? null
+          : verificacionPropia(correlationId, identificado.idSolicitante);
+      const verificacionIngreso =
+        solicitud?.verificacionIngreso ?? (propia === null ? null : verificacionRegistrada(propia));
+
+      const discrepancias: DiscrepanciaResumen[] = [];
+      if (
+        verificacionIngreso?.estado === "discrepancia" &&
+        verificacionIngreso.discrepancia !== null
+      ) {
+        const d = verificacionIngreso.discrepancia;
+        discrepancias.push({
+          tipo: "ingreso",
+          declarado: d.declarado,
+          verificado: d.verificado,
+          diferenciaPorcentaje: d.diferenciaPorcentaje,
+          umbralPorcentaje: d.umbralPorcentaje,
+        });
+      }
+      for (const i of verificacionIngreso?.inconsistencias ?? []) {
+        if (i.detiene) {
+          discrepancias.push({ tipo: "documental", regla: i.regla, adjuntos: [...i.adjuntos] });
+        }
+      }
+
+      const base = {
+        solicitante:
+          identificado === undefined
+            ? { identificado: false as const }
+            : {
+                identificado: true as const,
+                idSolicitante: identificado.idSolicitante,
+                nombre: identificado.nombre,
+                documentoEnmascarado: enmascararDocumento(identificado.documento),
+              },
+        monto: solicitud?.monto ?? declarado?.monto ?? null,
+        plazoMeses: solicitud?.plazoMeses ?? declarado?.plazoMeses ?? null,
+        verificacionIngreso,
+        datosExtraidos: extraccionesDe(correlationId),
+      };
+      const candidato = {
+        idEscalamiento: "ESC-000" + String(siguienteNumeroEscalamiento),
+        correlationId,
+        claveIdempotencia: forma.entrada.claveIdempotencia,
+        escaladoEn: ahora().toISOString(),
+        versionPolitica: VERSION_POLITICA,
+        causa: forma.entrada.causa,
+        motivo,
+        ...(codigo !== undefined ? { codigo } : {}),
+        regla: reglaDeEscalamiento(motivo),
+        accionRecomendada: accionRecomendada(clasificacion),
+        causasAdicionales,
+        ...base,
+        solicitud:
+          solicitud === undefined
+            ? null
+            : { idSolicitud: solicitud.idSolicitud, estado: solicitud.estado },
+        ingresoDeclarado: solicitud?.ingresoDeclarado ?? null,
+        discrepancias,
+        decision:
+          solicitud !== undefined && CAUSAS_CON_DECISION_DE_LA_REGLA_2.includes(forma.entrada.causa)
+            ? decisionDeLaRegla2(solicitud)
+            : null,
+        pendientes: calcularPendientes(base),
+      };
+      const analisis = esquemaResumenAnalista.safeParse(structuredClone(candidato));
+      if (!analisis.success) {
+        return {
+          respuesta: fallo(
+            errorNegocio("resumen_invalido", "El resumen del escalamiento no cumple su esquema."),
+          ),
+          auditoria: null,
+        };
+      }
+      const resumen = analisis.data;
+      siguienteNumeroEscalamiento++;
+      escalamientos.set(correlationId, resumen);
+      return {
+        respuesta: exito({ escalamiento: structuredClone(resumen), repetida: false }),
+        auditoria: {
+          resultado: "escalada",
+          regla: resumen.regla,
+          causa: resumen.causa,
+          motivo: resumen.motivo,
+          ...(resumen.codigo !== undefined ? { codigo: resumen.codigo } : {}),
+          causasAdicionales: resumen.causasAdicionales.length,
+          idEscalamiento: resumen.idEscalamiento,
+          ...(resumen.solicitud !== null ? { idSolicitud: resumen.solicitud.idSolicitud } : {}),
+          ...(resumen.solicitante.identificado
+            ? { idSolicitante: resumen.solicitante.idSolicitante }
+            : {}),
+          pendientes: [...resumen.pendientes],
+          versionPolitica: VERSION_POLITICA,
+        },
+      };
+    },
+
+    consultarEscalamiento(correlationId) {
+      if (fallaSimulada.debeFallar()) return fallo(noDisponible());
+      const id = z.uuid().safeParse(correlationId);
+      if (!id.success) {
+        return fallo(
+          errorValidacion(
+            "formato_invalido",
+            "El correlationId debe ser un UUID.",
+            "correlationId",
+          ),
+        );
+      }
+      const escalamiento = escalamientos.get(id.data);
+      return exito({
+        escalamiento: escalamiento === undefined ? null : structuredClone(escalamiento),
+      });
+    },
+
     consultarExtracciones(correlationId) {
       if (fallaSimulada.debeFallar()) return fallo(noDisponible());
       const id = z.uuid().safeParse(correlationId);
@@ -1316,6 +1527,25 @@ export function crearCore({
         .sort((a, b) => (a.adjuntos[0] ?? 0) - (b.adjuntos[0] ?? 0));
       return exito({ extracciones: lista });
     },
+  };
+}
+
+/**
+ * La decisión explicable de la Regla 2 con lo que guarda la solicitud (#15, R3): la misma función de la
+ * política que usan el hook y la preaprobación, sin repetir ningún umbral. Un escalamiento no se rechaza
+ * porque la política diga que la solicitud cumple: la decisión lo deja a la vista del analista.
+ */
+function decisionDeLaRegla2(solicitud: SolicitudRegistrada) {
+  const d = evaluarRegla2({
+    monto: solicitud.monto.valor,
+    plazoMeses: solicitud.plazoMeses.valor,
+    verificacion: solicitud.verificacionIngreso,
+  });
+  return {
+    regla: d.regla,
+    motivo: d.motivo,
+    valores: d.valores,
+    versionPolitica: d.versionPolitica,
   };
 }
 

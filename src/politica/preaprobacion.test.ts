@@ -70,8 +70,8 @@ describe("política: constantes de la Regla 2 (#14, R1)", () => {
     assert.equal(PORCENTAJE_MAXIMO_CUOTA_INGRESO, 30);
   });
 
-  it("la versión de la política sube a 2026-10-18.3", () => {
-    assert.equal(VERSION_POLITICA, "2026-10-18.3");
+  it("la versión de la política sube a 2026-10-18.4", () => {
+    assert.equal(VERSION_POLITICA, "2026-10-18.4");
   });
 });
 

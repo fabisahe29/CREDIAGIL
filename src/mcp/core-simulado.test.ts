@@ -32,7 +32,12 @@ import {
   TOPE_MONTO_PREAPROBACION,
   VERSION_POLITICA,
 } from "../politica/politica.ts";
-import { REGLA_2 } from "../politica/preaprobacion.ts";
+import { REGLA_2, evaluarRegla2 } from "../politica/preaprobacion.ts";
+import {
+  claveIdempotenciaEscalamiento,
+  esquemaResumenAnalista,
+} from "../compartido/escalamiento.ts";
+import { REGLA_4 } from "../politica/escalamiento.ts";
 import { calcularCuota } from "../politica/cuota.ts";
 import {
   AVISOS_CAPACIDAD_PAGO,
@@ -2903,4 +2908,709 @@ describe("core simulado: preaprobarSolicitud exige una solicitud registrada (#14
     if (!decision.respuesta.ok)
       assert.equal(decision.respuesta.error.codigo, "ingreso_no_verificado");
   });
+});
+// ---------------------------------------------------------------------------------------------
+// Escalamiento (#15, US1): el resumen para el analista
+// ---------------------------------------------------------------------------------------------
+
+const entradaEscalamiento = (correlationId: string, cambios: Record<string, unknown> = {}) => ({
+  correlationId,
+  claveIdempotencia: claveIdempotenciaEscalamiento(correlationId),
+  causa: "peticion_de_persona",
+  motivo: "pide_persona",
+  ...cambios,
+});
+
+type ResultadoEscalamiento = ReturnType<ReturnType<typeof crearCore>["escalarAAnalista"]>;
+
+function escaladoOk(resultado: ResultadoEscalamiento) {
+  assert.ok(resultado.respuesta.ok, JSON.stringify(resultado.respuesta));
+  if (!resultado.respuesta.ok) throw new Error("se esperaba un escalamiento");
+  return resultado.respuesta.datos;
+}
+
+function escaladoError(resultado: ResultadoEscalamiento) {
+  assert.equal(resultado.respuesta.ok, false);
+  if (resultado.respuesta.ok) throw new Error("se esperaba un error");
+  return resultado.respuesta.error;
+}
+
+const PENDIENTES_TODOS = ["identidad", "monto", "plazo", "ingreso_verificado", "documentos"];
+
+describe("core simulado: escalarAAnalista sin identidad ni solicitud (#15, US1 · aclaraciones Q1 y Q3)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  it("entrega un resumen con todo pendiente cuando el solicitante pide una persona", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const resultado = core.escalarAAnalista(entradaEscalamiento(correlationId));
+    const { escalamiento, repetida } = escaladoOk(resultado);
+    assert.equal(repetida, false);
+    assert.match(escalamiento.idEscalamiento, /^ESC-000\d{7}$/);
+    assert.equal(escalamiento.correlationId, correlationId);
+    assert.equal(escalamiento.escaladoEn, HOY_EJEMPLO.toISOString());
+    assert.equal(escalamiento.versionPolitica, VERSION_POLITICA);
+    assert.equal(escalamiento.causa, "peticion_de_persona");
+    assert.equal(escalamiento.motivo, "pide_persona");
+    assert.equal(escalamiento.regla, REGLA_4);
+    assert.equal(escalamiento.accionRecomendada, "contactar_al_solicitante");
+    assert.deepEqual(escalamiento.causasAdicionales, []);
+    assert.deepEqual(escalamiento.solicitante, { identificado: false });
+    assert.equal(escalamiento.solicitud, null);
+    assert.equal(escalamiento.monto, null);
+    assert.equal(escalamiento.plazoMeses, null);
+    assert.equal(escalamiento.ingresoDeclarado, null);
+    assert.equal(escalamiento.verificacionIngreso, null);
+    assert.deepEqual(escalamiento.discrepancias, []);
+    assert.deepEqual(escalamiento.datosExtraidos, []);
+    assert.deepEqual(escalamiento.pendientes, PENDIENTES_TODOS);
+    assert.equal(esquemaResumenAnalista.safeParse(escalamiento).success, true);
+  });
+
+  it("con monto y plazo declarados con procedencia válida, los pone y quita sus pendientes", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const monto = {
+      valor: 4_000_000,
+      procedencia: { tipo: "afirmacion", fragmento: "quiero 4 millones" },
+    };
+    const plazoMeses = {
+      valor: 24,
+      procedencia: { tipo: "afirmacion", fragmento: "a 24 meses" },
+    };
+    const { escalamiento } = escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          causa: "caso_no_cubierto",
+          motivo: "caso_no_cubierto",
+          declarado: { monto, plazoMeses },
+        }),
+      ),
+    );
+    assert.deepEqual(escalamiento.monto, monto);
+    assert.deepEqual(escalamiento.plazoMeses, plazoMeses);
+    assert.deepEqual(escalamiento.pendientes, ["identidad", "ingreso_verificado", "documentos"]);
+    assert.equal(escalamiento.accionRecomendada, "revisar_tipo_de_documento_o_moneda");
+  });
+
+  it("un declarado sin procedencia o con una mal formada se rechaza con su campo y no guarda nada", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const sin = escaladoError(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          declarado: { monto: { valor: 4_000_000 } },
+        }),
+      ),
+    );
+    assert.equal(sin.codigo, "procedencia_faltante");
+    assert.equal(sin.campo, "procedencia.monto");
+    const mala = escaladoError(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          declarado: {
+            monto: { valor: 4_000_000, procedencia: { tipo: "otro" } },
+          },
+        }),
+      ),
+    );
+    assert.equal(mala.codigo, "procedencia_invalida");
+    const guardado = core.consultarEscalamiento(correlationId);
+    assert.ok(guardado.ok);
+    if (guardado.ok) assert.equal(guardado.datos.escalamiento, null);
+  });
+});
+
+describe("core simulado: escalarAAnalista con la conversación armada (#15, US1)", () => {
+  it("con la identidad de Ana y una solicitud con discrepancia de ingresos, el resumen trae todo", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDeclarado: 4_300_000,
+    });
+    const ana = solicitante(ID_SOLICITANTE_UNICO);
+    const registrada = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(registrada.ok);
+    if (!registrada.ok || registrada.datos.solicitud === null) {
+      throw new Error("falta la solicitud");
+    }
+    const solicitud = registrada.datos.solicitud;
+
+    const { escalamiento } = escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          causa: "discrepancia_de_ingreso",
+          motivo: "discrepancia_de_ingreso",
+        }),
+      ),
+    );
+
+    assert.deepEqual(escalamiento.solicitante, {
+      identificado: true,
+      idSolicitante: ana.idSolicitante,
+      nombre: ana.nombre,
+      documentoEnmascarado: enmascararDocumento(ana.documento),
+    });
+    assert.deepEqual(escalamiento.solicitud, {
+      idSolicitud: solicitud.idSolicitud,
+      estado: "en_estudio",
+    });
+    assert.deepEqual(escalamiento.monto, solicitud.monto);
+    assert.deepEqual(escalamiento.plazoMeses, solicitud.plazoMeses);
+    assert.deepEqual(escalamiento.ingresoDeclarado, solicitud.ingresoDeclarado);
+    assert.equal(escalamiento.ingresoDeclarado?.valor, 4_300_000);
+    assert.deepEqual(escalamiento.verificacionIngreso, solicitud.verificacionIngreso);
+    assert.equal(escalamiento.verificacionIngreso?.ingresoVerificado?.monto, 3_800_000);
+    assert.equal(escalamiento.discrepancias.length, 1);
+    const discrepancia = escalamiento.discrepancias[0];
+    assert.equal(discrepancia?.tipo, "ingreso");
+    if (discrepancia?.tipo === "ingreso") {
+      assert.equal(discrepancia.declarado, 4_300_000);
+      assert.equal(discrepancia.verificado, 3_800_000);
+      assert.equal(
+        discrepancia.diferenciaPorcentaje,
+        solicitud.verificacionIngreso?.discrepancia?.diferenciaPorcentaje,
+      );
+      assert.equal(
+        discrepancia.umbralPorcentaje,
+        solicitud.verificacionIngreso?.discrepancia?.umbralPorcentaje,
+      );
+    }
+    assert.equal(escalamiento.datosExtraidos.length, 4);
+    assert.deepEqual(escalamiento.pendientes, []);
+    assert.equal(escalamiento.causa, "discrepancia_de_ingreso");
+    assert.equal(escalamiento.accionRecomendada, "verificar_ingresos_con_soporte");
+    assert.equal(escalamiento.regla, REGLA_3);
+  });
+
+  it("con una solicitud registrada, el declarado se ignora y mandan el monto y el plazo de la solicitud", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const { escalamiento } = escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          declarado: {
+            monto: {
+              valor: 1_000_000,
+              procedencia: { tipo: "afirmacion", fragmento: "otro monto" },
+            },
+          },
+        }),
+      ),
+    );
+    assert.equal(escalamiento.monto?.valor, 4_000_000);
+    assert.equal(escalamiento.plazoMeses?.valor, 24);
+  });
+
+  it("una inconsistencia entre archivos que detiene se resume como una discrepancia documental", () => {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const correlationId = randomUUID();
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-doc",
+      correlationId,
+    });
+    for (const e of [
+      ejemploCertificado(),
+      ejemploExtracto({ titular: "Otra Persona Inventada" }),
+    ]) {
+      const v = validarSalida(e.salida, e, HOY_EJEMPLO);
+      if (!v.ok) assert.fail(JSON.stringify(v.errores));
+      const r = core.registrarExtraccion({
+        correlationId,
+        adjunto: e.adjunto,
+        nombre: e.nombre,
+        contenido: e.contenido,
+        resultado: construirResultado(v.salida, e, 1),
+      }).respuesta;
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    core.verificarIngreso({ correlationId, ingresoDeclarado: 3_800_000 });
+
+    const { escalamiento } = escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          causa: "caso_no_cubierto",
+          motivo: "inconsistencia_documental",
+        }),
+      ),
+    );
+    assert.equal(escalamiento.verificacionIngreso?.estado, "inconsistencia");
+    const documental = escalamiento.discrepancias.find((d) => d.tipo === "documental");
+    assert.ok(documental, "falta la discrepancia documental");
+    if (documental?.tipo === "documental") {
+      assert.equal(documental.regla, "titular_vs_solicitante");
+      assert.ok(documental.adjuntos.length >= 1);
+    }
+    assert.equal(escalamiento.accionRecomendada, "revisar_documentos_manualmente");
+    assert.deepEqual(escalamiento.pendientes, ["monto", "plazo", "ingreso_verificado"]);
+  });
+
+  it("los datos extraídos incluyen los documentos no cubiertos y ningún campo trae su texto", () => {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const correlationId = randomUUID();
+    const unico = solicitante(ID_SOLICITANTE_UNICO);
+    core.verificarIdentidad({
+      idSolicitante: unico.idSolicitante,
+      fechaExpedicion: unico.fechaExpedicion,
+      idIntento: "intento-usd",
+      correlationId,
+    });
+    const v = validarSalida(
+      salidaCertificadoUsd(),
+      { contenido: CONTENIDO_CERTIFICADO_USD },
+      HOY_EJEMPLO,
+    );
+    if (!v.ok) assert.fail(JSON.stringify(v.errores));
+    const registro = core.registrarExtraccion({
+      correlationId,
+      adjunto: 1,
+      nombre: "certificado.md",
+      contenido: CONTENIDO_CERTIFICADO_USD,
+      resultado: construirResultado(
+        v.salida,
+        {
+          adjunto: 1,
+          nombre: "certificado.md",
+          contenido: CONTENIDO_CERTIFICADO_USD,
+        },
+        1,
+      ),
+    }).respuesta;
+    assert.ok(registro.ok, JSON.stringify(registro));
+
+    const { escalamiento } = escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          causa: "caso_no_cubierto",
+          motivo: "caso_no_cubierto",
+        }),
+      ),
+    );
+    assert.equal(escalamiento.datosExtraidos.length, 1);
+    assert.equal(escalamiento.datosExtraidos[0]?.estado, "no_cubierto");
+    assert.deepEqual(escalamiento.pendientes, ["monto", "plazo", "ingreso_verificado"]);
+    const texto = JSON.stringify(escalamiento);
+    for (const linea of CONTENIDO_CERTIFICADO_USD.split("\n")) {
+      if (linea.trim().length > 20) assert.equal(texto.includes(linea), false, linea);
+    }
+  });
+});
+
+describe("core simulado: escalarAAnalista, causas y validación de la entrada (#15, US1)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  it("las causas adicionales llevan su acción", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const { escalamiento } = escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          causasAdicionales: [
+            { causa: "caso_no_cubierto", motivo: "caso_no_cubierto" },
+            {
+              causa: "caso_no_cubierto",
+              motivo: "falla_transitoria_persistente",
+            },
+          ],
+        }),
+      ),
+    );
+    assert.deepEqual(escalamiento.causasAdicionales, [
+      {
+        causa: "caso_no_cubierto",
+        motivo: "caso_no_cubierto",
+        accionRecomendada: "revisar_tipo_de_documento_o_moneda",
+      },
+      {
+        causa: "caso_no_cubierto",
+        motivo: "falla_transitoria_persistente",
+        accionRecomendada: "atender_falla_tecnica",
+      },
+    ]);
+  });
+
+  it("una causa adicional que repite la principal es formato_invalido sobre causasAdicionales", () => {
+    const core = crearCore({ ahora });
+    const error = escaladoError(
+      core.escalarAAnalista(
+        entradaEscalamiento(randomUUID(), {
+          causasAdicionales: [{ causa: "peticion_de_persona", motivo: "pide_persona" }],
+        }),
+      ),
+    );
+    assert.equal(error.codigo, "formato_invalido");
+    assert.equal(error.campo, "causasAdicionales");
+  });
+
+  it("una causa que no corresponde al motivo es causa_incoherente", () => {
+    const core = crearCore({ ahora });
+    const error = escaladoError(
+      core.escalarAAnalista(entradaEscalamiento(randomUUID(), { causa: "caso_no_cubierto" })),
+    );
+    assert.equal(error.categoria, "validacion");
+    assert.equal(error.codigo, "causa_incoherente");
+    assert.equal(error.campo, "causa");
+  });
+
+  it("el código solo va con la preaprobación fuera de política, y siempre", () => {
+    const core = crearCore({ ahora });
+    const sobra = escaladoError(
+      core.escalarAAnalista(entradaEscalamiento(randomUUID(), { codigo: "monto_sobre_tope" })),
+    );
+    assert.equal(sobra.codigo, "formato_invalido");
+    assert.equal(sobra.campo, "codigo");
+    const falta = escaladoError(
+      core.escalarAAnalista(
+        entradaEscalamiento(randomUUID(), {
+          causa: "monto_sobre_umbral",
+          motivo: "preaprobacion_fuera_de_politica",
+        }),
+      ),
+    );
+    assert.equal(falta.codigo, "formato_invalido");
+    assert.equal(falta.campo, "codigo");
+  });
+
+  it("un campo de más es formato_invalido y lo nombra", () => {
+    const core = crearCore({ ahora });
+    const error = escaladoError(
+      core.escalarAAnalista(entradaEscalamiento(randomUUID(), { solicitante: "Ana" })),
+    );
+    assert.equal(error.codigo, "formato_invalido");
+    assert.equal(error.campo, "solicitante");
+  });
+
+  it("la falla simulada es core_no_disponible, transitoria y reintentable", () => {
+    const core = crearCore({ ahora, falla: "siempre" });
+    const error = escaladoError(core.escalarAAnalista(entradaEscalamiento(randomUUID())));
+    assert.equal(error.categoria, "transitorio");
+    assert.equal(error.codigo, "core_no_disponible");
+    assert.equal(error.reintentable, true);
+  });
+
+  it("un rechazo no guarda nada ni audita", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const resultado = core.escalarAAnalista(entradaEscalamiento(correlationId, { motivo: "otro" }));
+    assert.equal(resultado.respuesta.ok, false);
+    assert.equal(resultado.auditoria, null);
+    const guardado = core.consultarEscalamiento(correlationId);
+    assert.ok(guardado.ok);
+    if (guardado.ok) assert.equal(guardado.datos.escalamiento, null);
+  });
+});
+
+describe("core simulado: escalarAAnalista es idempotente y consultarEscalamiento lo lee (#15, US1)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  it("repetir con la misma clave devuelve el mismo resumen, repetida y sin auditoría", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const primero = core.escalarAAnalista(entradaEscalamiento(correlationId));
+    assert.notEqual(primero.auditoria, null);
+    const segundo = core.escalarAAnalista(entradaEscalamiento(correlationId));
+    assert.equal(segundo.auditoria, null);
+    const a = escaladoOk(primero);
+    const b = escaladoOk(segundo);
+    assert.equal(b.repetida, true);
+    assert.deepEqual(b.escalamiento, a.escalamiento);
+  });
+
+  it("llegar con otra clave o con otra causa devuelve el primero", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const a = escaladoOk(core.escalarAAnalista(entradaEscalamiento(correlationId)));
+    const b = escaladoOk(
+      core.escalarAAnalista(
+        entradaEscalamiento(correlationId, {
+          claveIdempotencia: "otra-clave",
+          causa: "caso_no_cubierto",
+          motivo: "caso_no_cubierto",
+        }),
+      ),
+    );
+    assert.equal(b.repetida, true);
+    assert.equal(b.escalamiento.idEscalamiento, a.escalamiento.idEscalamiento);
+    assert.equal(b.escalamiento.causa, "peticion_de_persona");
+  });
+
+  it("cada conversación tiene su escalamiento y su identificador", () => {
+    const core = crearCore({ ahora });
+    const una = randomUUID();
+    const otra = randomUUID();
+    const a = escaladoOk(core.escalarAAnalista(entradaEscalamiento(una)));
+    const leida = core.consultarEscalamiento(otra);
+    assert.ok(leida.ok);
+    if (leida.ok) assert.equal(leida.datos.escalamiento, null);
+    const b = escaladoOk(core.escalarAAnalista(entradaEscalamiento(otra)));
+    assert.notEqual(a.escalamiento.idEscalamiento, b.escalamiento.idEscalamiento);
+  });
+
+  it("consultarEscalamiento devuelve null sin escalamiento y el resumen con él", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const vacio = core.consultarEscalamiento(correlationId);
+    assert.ok(vacio.ok);
+    if (vacio.ok) assert.equal(vacio.datos.escalamiento, null);
+    const { escalamiento } = escaladoOk(core.escalarAAnalista(entradaEscalamiento(correlationId)));
+    const leida = core.consultarEscalamiento(correlationId);
+    assert.ok(leida.ok);
+    if (leida.ok) assert.deepEqual(leida.datos.escalamiento, escalamiento);
+  });
+
+  it("consultarEscalamiento con un correlationId que no es UUID es formato_invalido", () => {
+    const core = crearCore({ ahora });
+    const leida = core.consultarEscalamiento("no-es-uuid");
+    assert.equal(leida.ok, false);
+    if (!leida.ok) {
+      assert.equal(leida.error.codigo, "formato_invalido");
+      assert.equal(leida.error.campo, "correlationId");
+    }
+  });
+
+  it("devuelve copias: alterar lo devuelto no cambia lo guardado", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const { escalamiento } = escaladoOk(core.escalarAAnalista(entradaEscalamiento(correlationId)));
+    escalamiento.pendientes.length = 0;
+    const leida = core.consultarEscalamiento(correlationId);
+    assert.ok(leida.ok);
+    if (leida.ok) assert.deepEqual(leida.datos.escalamiento?.pendientes, PENDIENTES_TODOS);
+  });
+
+  it("escalar no cambia el estado de la solicitud registrada", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    escaladoOk(core.escalarAAnalista(entradaEscalamiento(correlationId)));
+    const registrada = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(registrada.ok);
+    if (registrada.ok) {
+      assert.equal(registrada.datos.solicitud?.estado, "en_estudio");
+      assert.equal(registrada.datos.solicitud?.preaprobacion, null);
+    }
+  });
+
+  it("escalar una conversación no toca la de otra", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const otra = randomUUID();
+    escaladoOk(core.escalarAAnalista(entradaEscalamiento(correlationId)));
+    const leida = core.consultarEscalamiento(otra);
+    assert.ok(leida.ok);
+    if (leida.ok) assert.equal(leida.datos.escalamiento, null);
+  });
+});
+
+describe("core simulado: escalarAAnalista audita sin datos del caso (#15, US1 · FR-011 y FR-012)", () => {
+  const ahora = () => HOY_EJEMPLO;
+
+  it("una petición de persona audita la regla, la causa y los pendientes, sin solicitante ni solicitud", () => {
+    const core = crearCore({ ahora });
+    const correlationId = randomUUID();
+    const { auditoria } = core.escalarAAnalista(entradaEscalamiento(correlationId));
+    assert.ok(auditoria);
+    assert.equal(auditoria.resultado, "escalada");
+    assert.equal(auditoria.regla, REGLA_4);
+    assert.equal(auditoria.causa, "peticion_de_persona");
+    assert.equal(auditoria.motivo, "pide_persona");
+    assert.equal(auditoria.causasAdicionales, 0);
+    assert.match(auditoria.idEscalamiento, /^ESC-000\d{7}$/);
+    assert.equal(auditoria.idSolicitud, undefined);
+    assert.equal(auditoria.idSolicitante, undefined);
+    assert.deepEqual(auditoria.pendientes, PENDIENTES_TODOS);
+    assert.equal(auditoria.versionPolitica, VERSION_POLITICA);
+  });
+
+  it("con la solicitud armada trae el identificador de la solicitud y del solicitante, y el código de la Regla 2", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const { auditoria } = core.escalarAAnalista(
+      entradaEscalamiento(correlationId, {
+        causa: "cuota_sobre_porcentaje",
+        motivo: "preaprobacion_fuera_de_politica",
+        codigo: "cuota_sobre_porcentaje",
+        causasAdicionales: [{ causa: "caso_no_cubierto", motivo: "caso_no_cubierto" }],
+      }),
+    );
+    assert.ok(auditoria);
+    assert.equal(auditoria.codigo, "cuota_sobre_porcentaje");
+    assert.equal(auditoria.causasAdicionales, 1);
+    assert.equal(auditoria.idSolicitante, ID_SOLICITANTE_UNICO);
+    assert.match(auditoria.idSolicitud ?? "", /^SOL-000\d{7}$/);
+    assert.deepEqual(auditoria.pendientes, []);
+  });
+
+  it("la auditoría no trae el nombre, el documento, las citas ni el contenido", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const ana = solicitante(ID_SOLICITANTE_UNICO);
+    const { auditoria } = core.escalarAAnalista(entradaEscalamiento(correlationId));
+    const texto = JSON.stringify(auditoria);
+    assert.equal(texto.includes(ana.nombre), false);
+    assert.equal(texto.includes(ana.documento), false);
+    assert.equal(texto.includes("quiero el monto"), false);
+    assert.equal(texto.includes("Industrias Imaginarias"), false);
+  });
+});
+// ---------------------------------------------------------------------------------------------
+// Escalamiento (#15, US3): la decisión explicable de la Regla 2 y la causa de cada código
+// ---------------------------------------------------------------------------------------------
+
+describe("core simulado: escalarAAnalista con la decisión de la Regla 2 (#15, US3)", () => {
+  /** Lo que devuelve la política para la solicitud registrada de la conversación. */
+  function decisionEsperada(core: ReturnType<typeof crearCore>, correlationId: string) {
+    const leida = core.consultarSolicitudRegistrada(correlationId);
+    assert.ok(leida.ok);
+    if (!leida.ok || leida.datos.solicitud === null) throw new Error("falta la solicitud");
+    const solicitud = leida.datos.solicitud;
+    const d = evaluarRegla2({
+      monto: solicitud.monto.valor,
+      plazoMeses: solicitud.plazoMeses.valor,
+      verificacion: solicitud.verificacionIngreso,
+    });
+    return {
+      regla: d.regla,
+      motivo: d.motivo,
+      valores: d.valores,
+      versionPolitica: d.versionPolitica,
+    };
+  }
+
+  const escalar = (
+    core: ReturnType<typeof crearCore>,
+    correlationId: string,
+    cambios: Record<string, unknown>,
+  ) => escaladoOk(core.escalarAAnalista(entradaEscalamiento(correlationId, cambios))).escalamiento;
+
+  it("un monto por encima del tope trae la decisión que devuelve la política para esa solicitud", () => {
+    const { core, correlationId } = prepararPreaprobacion({ monto: 6_000_000 });
+    const resumen = escalar(core, correlationId, {
+      causa: "monto_sobre_umbral",
+      motivo: "preaprobacion_fuera_de_politica",
+      codigo: "monto_sobre_tope",
+    });
+    assert.deepEqual(resumen.decision, decisionEsperada(core, correlationId));
+    assert.equal(resumen.decision?.regla, REGLA_2);
+    assert.equal(resumen.accionRecomendada, "revisar_con_simulacion_de_cuota");
+  });
+
+  it("una cuota por encima del porcentaje trae la decisión con la cuota y el ingreso", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      monto: 4_500_000,
+      plazoMeses: 3,
+    });
+    const resumen = escalar(core, correlationId, {
+      causa: "cuota_sobre_porcentaje",
+      motivo: "preaprobacion_fuera_de_politica",
+      codigo: "cuota_sobre_porcentaje",
+    });
+    assert.deepEqual(resumen.decision, decisionEsperada(core, correlationId));
+    assert.equal(typeof resumen.decision?.valores["cuotaMensual"], "number");
+    assert.equal(typeof resumen.decision?.valores["ingresoVerificado"], "number");
+  });
+
+  it("una discrepancia de ingreso, por la Regla 2 o por la Regla 3, trae la decisión de la política", () => {
+    const { core, correlationId } = prepararPreaprobacion({
+      ingresoDeclarado: 4_300_000,
+    });
+    const esperada = decisionEsperada(core, correlationId);
+    const porRegla2 = escalar(core, correlationId, {
+      causa: "discrepancia_de_ingreso",
+      motivo: "preaprobacion_fuera_de_politica",
+      codigo: "discrepancia_registrada",
+    });
+    assert.deepEqual(porRegla2.decision, esperada);
+
+    const otro = prepararPreaprobacion({ ingresoDeclarado: 4_300_000 });
+    const porRegla3 = escalar(otro.core, otro.correlationId, {
+      causa: "discrepancia_de_ingreso",
+      motivo: "discrepancia_de_ingreso",
+    });
+    assert.deepEqual(porRegla3.decision, decisionEsperada(otro.core, otro.correlationId));
+  });
+
+  it("no rechaza una causa por sustancia: con una solicitud que cumple, la decisión lo muestra", () => {
+    const { core, correlationId } = prepararPreaprobacion();
+    const resumen = escalar(core, correlationId, {
+      causa: "monto_sobre_umbral",
+      motivo: "preaprobacion_fuera_de_politica",
+      codigo: "monto_sobre_tope",
+    });
+    assert.deepEqual(resumen.decision, decisionEsperada(core, correlationId));
+    assert.equal(resumen.causa, "monto_sobre_umbral");
+  });
+
+  it("la decisión no trae más valores que los que ya devuelve la política", () => {
+    const { core, correlationId } = prepararPreaprobacion({ monto: 6_000_000 });
+    const resumen = escalar(core, correlationId, {
+      causa: "monto_sobre_umbral",
+      motivo: "preaprobacion_fuera_de_politica",
+      codigo: "monto_sobre_tope",
+    });
+    assert.deepEqual(
+      Object.keys(resumen.decision?.valores ?? {}).sort(),
+      Object.keys(decisionEsperada(core, correlationId).valores).sort(),
+    );
+  });
+
+  it("con la petición de persona o un caso no cubierto, la decisión es null aunque haya solicitud", () => {
+    for (const cambios of [
+      {},
+      { causa: "caso_no_cubierto", motivo: "caso_no_cubierto" },
+      { causa: "caso_no_cubierto", motivo: "inconsistencia_documental" },
+    ]) {
+      const { core, correlationId } = prepararPreaprobacion({
+        monto: 6_000_000,
+      });
+      assert.equal(escalar(core, correlationId, cambios).decision, null, JSON.stringify(cambios));
+    }
+  });
+
+  it("sin solicitud registrada, la decisión es null aunque la causa sea de la Regla 2", () => {
+    const core = crearCore({ ahora: () => HOY_EJEMPLO });
+    const resumen = escalar(core, randomUUID(), {
+      causa: "monto_sobre_umbral",
+      motivo: "preaprobacion_fuera_de_politica",
+      codigo: "monto_sobre_tope",
+    });
+    assert.equal(resumen.decision, null);
+  });
+
+  it("la decisión no pasa por el log ni la auditoría con los valores del caso", () => {
+    const { core, correlationId } = prepararPreaprobacion({ monto: 6_000_000 });
+    const { auditoria } = core.escalarAAnalista(
+      entradaEscalamiento(correlationId, {
+        causa: "monto_sobre_umbral",
+        motivo: "preaprobacion_fuera_de_politica",
+        codigo: "monto_sobre_tope",
+      }),
+    );
+    const texto = JSON.stringify(auditoria);
+    assert.equal(texto.includes("6000000"), false);
+    assert.equal(texto.includes("cuotaMensual"), false);
+  });
+});
+
+describe("core simulado: escalarAAnalista, la causa y la acción de cada código de la Regla 2 (#15, US3)", () => {
+  const CODIGOS: [string, string, string][] = [
+    ["monto_sobre_tope", "monto_sobre_umbral", "revisar_con_simulacion_de_cuota"],
+    ["cuota_sobre_porcentaje", "cuota_sobre_porcentaje", "revisar_con_simulacion_de_cuota"],
+    ["discrepancia_registrada", "discrepancia_de_ingreso", "verificar_ingresos_con_soporte"],
+    ["ingreso_no_verificado", "caso_no_cubierto", "revisar_documentos_manualmente"],
+    ["cuota_no_calculable", "caso_no_cubierto", "revisar_con_simulacion_de_cuota"],
+  ];
+  for (const [codigo, causa, accion] of CODIGOS) {
+    it(`${codigo} da la causa ${causa} y la acción ${accion}`, () => {
+      const core = crearCore({ ahora: () => HOY_EJEMPLO });
+      const { escalamiento } = escaladoOk(
+        core.escalarAAnalista(
+          entradaEscalamiento(randomUUID(), {
+            causa,
+            motivo: "preaprobacion_fuera_de_politica",
+            codigo,
+          }),
+        ),
+      );
+      assert.equal(escalamiento.causa, causa);
+      assert.equal(escalamiento.codigo, codigo);
+      assert.equal(escalamiento.accionRecomendada, accion);
+      assert.equal(escalamiento.regla, REGLA_2);
+    });
+  }
 });

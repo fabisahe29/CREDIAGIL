@@ -58,24 +58,41 @@ import {
   REGLA_PRINCIPIO_V,
 } from "../politica/documentos.ts";
 import { REGLA_3 } from "../politica/ingreso.ts";
+import {
+  ORDEN_REGLA,
+  REGLA_AMBIGUA,
+  REGLA_NO_EXTRAIBLE,
+  REGLA_NO_VERIFICABLE,
+  REGLA_PIDE_PERSONA,
+  type MotivoEscalamiento,
+} from "../politica/escalamiento.ts";
 import type { VerificacionIngreso } from "../compartido/ingreso.ts";
 
 export const CLAVE_SERVIDOR = "originacion";
 
+// Las reglas de cada motivo viven en la política (specs/013-escalamiento-analista, R14); se reexportan
+// con los mismos nombres para los importadores de antes.
+export { ORDEN_REGLA, REGLA_AMBIGUA, REGLA_NO_EXTRAIBLE, REGLA_NO_VERIFICABLE, REGLA_PIDE_PERSONA };
+
+/** Una señal observada en la conversación: su motivo y, con la Regla 2, el código del bloqueo (#15, R6). */
+export interface SenalObservada {
+  motivo: MotivoEscalamiento;
+  codigo?: string;
+}
+
+/** El monto o el plazo que dijo el solicitante, con la procedencia ya comprobada (#15, R4). */
+export interface DatoDeclarado {
+  valor: number;
+  procedencia: ProcedenciaRegistro;
+}
+
+export interface DeclaradoConversacion {
+  monto?: DatoDeclarado;
+  plazoMeses?: DatoDeclarado;
+}
+
 export interface SenalEscalamiento {
-  motivo:
-    | "falla_transitoria_persistente"
-    | "falla_del_agente"
-    | "limite_de_turnos"
-    | "respuesta_incompleta"
-    | "identidad_ambigua"
-    | "identidad_no_verificable"
-    | "pide_persona"
-    | "caso_no_cubierto"
-    | "documento_no_extraible"
-    | "discrepancia_de_ingreso"
-    | "inconsistencia_documental"
-    | "preaprobacion_fuera_de_politica";
+  motivo: MotivoEscalamiento;
   regla: string;
   resultado: "escalada";
   correlationId: string;
@@ -125,6 +142,10 @@ export interface EstadoConversacion {
   desambiguada: boolean;
   /** Coincidencias de la última búsqueda ambigua contada, para el escalamiento. */
   coincidenciasAmbiguas: number;
+  /** Todas las señales observadas, también las que no prevalecieron; las demás causas del caso (#15, R6). */
+  senales: SenalObservada[];
+  /** Monto y plazo que citó el modelo en `solicitar_analista` y pasaron la comprobación (#15, R4). */
+  declarado: DeclaradoConversacion;
 }
 
 export const crearEstado = (correlationId: string): EstadoConversacion => ({
@@ -135,9 +156,9 @@ export const crearEstado = (correlationId: string): EstadoConversacion => ({
   ambiguaEnTurno: false,
   desambiguada: false,
   coincidenciasAmbiguas: 0,
+  senales: [],
+  declarado: {},
 });
-
-export const REGLA_AMBIGUA = "Regla 1 · coincidencias sin desambiguar";
 
 /**
  * Al cerrar el turno se decide el escalamiento por identidad ambigua (FR-006): escala si la
@@ -267,7 +288,22 @@ const esquemaVerificar = {
 
 const DESCRIPCION_VERIFICAR = `Verifica la identidad de un solicitante encontrado con la fecha de expedición de su documento (AAAA-MM-DD). Si el dato no coincide, informa sin revelar el dato correcto. Tras ${MAX_INTENTOS_VERIFICACION} intentos fallidos la verificación queda bloqueada.`;
 
-export const REGLA_NO_VERIFICABLE = `Regla 1 · ${MAX_INTENTOS_VERIFICACION} intentos fallidos de verificación`;
+/** Una cita del modelo: una frase literal del solicitante o, con `adjunto`, del documento (#13, R3). */
+const esquemaCita = z.object({
+  fragmento: z
+    .string()
+    .describe(
+      "Sin adjunto: una frase LITERAL que dijo el solicitante. Con adjunto: un fragmento literal de ese documento.",
+    ),
+  adjunto: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe("Solo si el dato salió de un documento: su número de adjunto."),
+});
+
+type CitaModelo = z.infer<typeof esquemaCita>;
 
 /**
  * Reglas 4 y 5 (orden 4 → 5 → 1): el modelo solo clasifica el caso con un motivo tipado
@@ -283,14 +319,24 @@ const esquemaSolicitarAnalista = {
     .enum(CAUSAS_NO_CUBIERTO)
     .optional()
     .describe("Solo con caso_no_cubierto: por qué no está cubierto."),
+  monto: z
+    .number()
+    .optional()
+    .describe("Solo si lo dijo el solicitante: el monto en pesos colombianos. No lo inventes."),
+  plazoMeses: z
+    .number()
+    .optional()
+    .describe("Solo si lo dijo el solicitante: el plazo en meses. No lo inventes."),
+  origen: z
+    .object({ monto: esquemaCita.optional(), plazoMeses: esquemaCita.optional() })
+    .optional()
+    .describe("De dónde salió cada dato enviado: una cita literal de lo que dijo el solicitante."),
 };
 
-const DESCRIPCION_SOLICITAR_ANALISTA =
-  "Pasa el caso a un analista de crédito. Úsala antes que cualquier otra herramienta si el solicitante pide hablar con una persona, o si su caso no está cubierto por la política (ingresos en moneda extranjera, documento no soportado). No pide ni envía datos del solicitante.";
+export const DESCRIPCION_SOLICITAR_ANALISTA =
+  "Pasa el caso a un analista de crédito. Úsala antes que cualquier otra herramienta si el solicitante pide hablar con una persona, o si su caso no está cubierto por la política (ingresos en moneda extranjera, documento no soportado). No pide datos al solicitante. Si ya dijo el monto o el plazo, envíalos con una cita literal de lo que dijo en origen; si no los dijo, no los envíes ni los inventes.";
 
-export const REGLA_PIDE_PERSONA = "Regla 4 · el solicitante pide hablar con una persona";
 export const REGLA_NO_CUBIERTO = REGLA_5;
-export const REGLA_NO_EXTRAIBLE = `${REGLA_PRINCIPIO_V} · documento no extraíble`;
 
 const esquemaExtraer = {
   adjunto: z
@@ -337,23 +383,6 @@ const esquemaCapacidadPago = {
       "Ingreso mensual en pesos que dijo el solicitante o que devolvió verificar_ingreso. Omítelo si no lo dijo: no lo inventes.",
     ),
 };
-
-/** Una cita del modelo: una frase literal del solicitante o, con `adjunto`, del documento (#13, R3). */
-const esquemaCita = z.object({
-  fragmento: z
-    .string()
-    .describe(
-      "Sin adjunto: una frase LITERAL que dijo el solicitante. Con adjunto: un fragmento literal de ese documento.",
-    ),
-  adjunto: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe("Solo si el dato salió de un documento: su número de adjunto."),
-});
-
-type CitaModelo = z.infer<typeof esquemaCita>;
 
 /**
  * El modelo solo da lo que oyó y de dónde: el nombre de un documento, la clave de idempotencia, el
@@ -413,17 +442,6 @@ function resultadoDeRegistro(registro: RegistroExtraccion): ResultadoExtraccion 
 
 const dormirDeVerdad = (ms: number) => new Promise<void>((resolver) => setTimeout(resolver, ms));
 
-/** Regla de negocio de cada motivo de escalamiento; los técnicos no tienen. */
-export const ORDEN_REGLA: Partial<Record<SenalEscalamiento["motivo"], 1 | 2 | 3 | 4 | 5>> = {
-  pide_persona: 4,
-  caso_no_cubierto: 5,
-  identidad_ambigua: 1,
-  identidad_no_verificable: 1,
-  discrepancia_de_ingreso: 3,
-  inconsistencia_documental: 3,
-  preaprobacion_fuera_de_politica: 2,
-};
-
 /**
  * Señales de la Regla 3: con ellas la solicitud todavía se registra, para que el analista la reciba
  * con su procedencia (#13, R5). El registro no decide ni anticipa el escalamiento. Con la Regla 4, la 5
@@ -475,6 +493,14 @@ export function dejarSenal(
   estado: EstadoConversacion,
   campos: Pick<SenalEscalamiento, "motivo" | "regla" | "herramienta"> & Partial<SenalEscalamiento>,
 ): void {
+  // Cada señal observada se guarda, también la que pierde: el analista recibe todas las causas (#15, R6).
+  const observada: SenalObservada = {
+    motivo: campos.motivo,
+    ...(campos.codigo !== undefined ? { codigo: campos.codigo } : {}),
+  };
+  if (!estado.senales.some((o) => o.motivo === observada.motivo && o.codigo === observada.codigo)) {
+    estado.senales.push(observada);
+  }
   const anterior = estado.escalamiento;
   if (anterior !== null && !prevalece(campos.motivo, anterior.motivo)) return;
   estado.escalamiento = {
@@ -647,13 +673,37 @@ export function crearAdaptador({
     return aResultadoMcp(respuesta);
   }
 
+  /**
+   * El monto o el plazo que dijo el solicitante, con su cita comprobada contra la conversación. Un dato
+   * sin cita, con un valor que no es un entero positivo o con una cita que no pasa queda pendiente: no
+   * falla ni se reintenta, porque escalar nunca depende de él (#15, R4). Se conserva el primero válido.
+   */
+  function guardarDeclarado(
+    dato: "monto" | "plazoMeses",
+    valor: number | undefined,
+    cita: CitaModelo | undefined,
+  ): void {
+    if (valor === undefined || cita === undefined) return;
+    if (!Number.isInteger(valor) || valor <= 0) return;
+    if (estado.declarado[dato] !== undefined) return;
+    const armada = armarProcedencia(dato, cita);
+    if (!armada.ok || armada.procedencia === undefined) return;
+    estado.declarado[dato] = { valor, procedencia: armada.procedencia };
+  }
+
   /** Reglas 4 y 5: escala por código, sin llamar al core ni pedir datos (FR-011b). */
   function solicitarAnalista({
     motivo,
     causa,
+    monto,
+    plazoMeses,
+    origen,
   }: {
     motivo: "pide_persona" | "caso_no_cubierto";
-    causa?: CausaNoCubierto;
+    causa?: CausaNoCubierto | undefined;
+    monto?: number | undefined;
+    plazoMeses?: number | undefined;
+    origen?: { monto?: CitaModelo | undefined; plazoMeses?: CitaModelo | undefined } | undefined;
   }) {
     senal({
       motivo,
@@ -661,6 +711,8 @@ export function crearAdaptador({
       herramienta: "solicitar_analista",
       ...(motivo === "caso_no_cubierto" && causa !== undefined ? { causa } : {}),
     });
+    guardarDeclarado("monto", monto, origen?.monto);
+    guardarDeclarado("plazoMeses", plazoMeses, origen?.plazoMeses);
     // No llama al core, pero el modo de demostración también la muestra.
     avisarObservador({ herramienta: "solicitar_analista", intento: 1, resultado: "ok" });
     return aResultadoMcp(exito({ escalada: true }));
