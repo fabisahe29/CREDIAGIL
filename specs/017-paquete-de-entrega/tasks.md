@@ -105,7 +105,7 @@ description: "Tareas del paquete de entrega (#19)"
 - [x] T022 [P] [US5] Crear `src/entrega/verificar.test.ts`: un `.zip` válido da `listo`; con un `.env` da `bloqueado` y un hallazgo `nombre-prohibido`; con un archivo que contiene un token construido en ejecución da `bloqueado`, hallazgo `secreto`, y el informe impreso no contiene el valor; sin `.git/` da `falta-git`; de más de 50 MB (simulado con un tamaño declarado, sin escribir 50 MB) da `peso`; sin `origin/main` da `incompleto`. Depende de T021
 - [x] T023 [US5] Crear `src/entrega/principal.ts`: CLI con `armar [--salida <ruta>]` y `verificar [--zip <ruta>] [--json]`, con los códigos de salida de [contracts/comando-entrega.md](contracts/comando-entrega.md) (0 listo, 1 bloqueado, 2 opciones inválidas o `.zip` ilegible, 3 incompleto) y la salida de una línea por comprobación, sin mostrar valores. Depende de T019 y T021
 - [x] T024 [P] [US5] Crear `src/entrega/principal.test.ts`: opciones inválidas dan 2; cada veredicto da su código; la salida de `--json` es el `InformeEntrega`. Depende de T023
-- [ ] T025 [US5] Ejecutar de verdad `npm run entrega:armar` y `npm run entrega:verificar` sobre el repositorio con el árbol limpio y anotar en el PR el veredicto, el tamaño y cualquier hallazgo real; si hay un hallazgo real, no lo ocultes ni reescribas el historial: repórtalo. Depende de T023 y de los commits de las historias anteriores
+- [x] T025 [US5] Ejecutar de verdad `npm run entrega:armar` y `npm run entrega:verificar` sobre el repositorio con el árbol limpio y anotar en el PR el veredicto, el tamaño y cualquier hallazgo real; si hay un hallazgo real, no lo ocultes ni reescribas el historial: repórtalo. Depende de T023 y de los commits de las historias anteriores
 
 **Checkpoint**: US5 verificable con el comando y las pruebas.
 
@@ -136,8 +136,8 @@ description: "Tareas del paquete de entrega (#19)"
 
 **Independent Test**: lista manual del paso 4 de [quickstart.md](quickstart.md). El video lo graba y publica la persona que entrega: ninguna herramienta puede comprobarlo de forma fiable ([research.md](research.md), R9).
 
-- [ ] T029 [US4] Verificación manual del video por el desarrollador: abrir el enlace del README en una ventana de incógnito (se reproduce sin pedir acceso), medir la duración (5:00 o menos) y comprobar que aparecen los siete casos con su número y su resultado, según la numeración del README («Casos obligatorios»). Anotar el resultado en la descripción del PR. Si falla algo, regrabar o cambiar los permisos y actualizar el enlace en `README.md` (una sola fuente, T008)
-- [ ] T030 [US4] Si el video se regraba, actualizar el enlace en `README.md` y volver a ejecutar `npm test` (la prueba T006 comprueba que el enlace sigue presente). Solo si T029 lo exige
+- [ ] T029 [US4] Verificación manual del video por el desarrollador: abrir el enlace del README en una ventana de incógnito (se reproduce sin pedir acceso), medir la duración (5:00 o menos) y comprobar que aparecen los siete casos con su número y su resultado, según la numeración del README («Casos obligatorios»). Anotar el resultado en la descripción del PR. Si falla algo, regrabar o cambiar los permisos y actualizar el enlace en `README.md` (una sola fuente, T008) **Pendiente de la persona que entrega: no lo puede hacer la sesión (no abre Drive sin sesión).**
+- [ ] T030 [US4] Si el video se regraba, actualizar el enlace en `README.md` y volver a ejecutar `npm test` (la prueba T006 comprueba que el enlace sigue presente). Solo si T029 lo exige **No aplica por ahora: depende del resultado de T029.**
 
 **Checkpoint**: US4 verificada y registrada en el PR.
 
@@ -151,9 +151,9 @@ description: "Tareas del paquete de entrega (#19)"
 
 **⚠️ Momento**: esta fase se ejecuta al final, cuando ya está abierto el PR de este ticket y los demás tienen su estado definitivo. Todo por herramientas `mcp__github__*`.
 
-- [ ] T031 [US6] Listar todos los tickets del Project con `mcp__github__projects_list` (`list_project_items`, `owner: fabisahe29`, `project_number: 1`, `query: "is:issue"`, `field_names: ["Status"]`, `perPage: 50`, paginando mientras `pageInfo.hasNextPage`) y construir la tabla ticket → estado. No cambia nada
-- [ ] T032 [US6] Por cada ticket que no esté en Done, leer sus comentarios (`mcp__github__issue_read`, `get_comments`, `perPage: 100`) y, si no tiene el marcador `<!-- crediagil:entrega=estado -->`, publicar con `mcp__github__add_issue_comment` el comentario de [contracts/estado-tickets.md](contracts/estado-tickets.md) con su estado real, lo que falta y el motivo, con enlace al PR si existe. No cambia el estado del ticket. Los tickets conocidos al planificar: #18 (In review, PR #37) y este #19 (en revisión cuando se abra el PR; se cierra con `/ticket-cerrar`). Depende de T031
-- [ ] T033 [US6] Releer el Project y confirmar que 0 tickets están sin Done y sin comentario de estado; dejar la tabla final en la descripción del PR. Depende de T032
+- [x] T031 [US6] Listar todos los tickets del Project con `mcp__github__projects_list` (`list_project_items`, `owner: fabisahe29`, `project_number: 1`, `query: "is:issue"`, `field_names: ["Status"]`, `perPage: 50`, paginando mientras `pageInfo.hasNextPage`) y construir la tabla ticket → estado. No cambia nada
+- [x] T032 [US6] Por cada ticket que no esté en Done, leer sus comentarios (`mcp__github__issue_read`, `get_comments`, `perPage: 100`) y, si no tiene el marcador `<!-- crediagil:entrega=estado -->`, publicar con `mcp__github__add_issue_comment` el comentario de [contracts/estado-tickets.md](contracts/estado-tickets.md) con su estado real, lo que falta y el motivo, con enlace al PR si existe. No cambia el estado del ticket. Los tickets conocidos al planificar: #18 (In review, PR #37) y este #19 (en revisión cuando se abra el PR; se cierra con `/ticket-cerrar`). Depende de T031
+- [x] T033 [US6] Releer el Project y confirmar que 0 tickets están sin Done y sin comentario de estado; dejar la tabla final en la descripción del PR. Depende de T032
 
 **Checkpoint**: US6 verificada.
 
@@ -164,8 +164,8 @@ description: "Tareas del paquete de entrega (#19)"
 - [x] T034 [P] Agregar a `CLAUDE.md` (mapa del repositorio) la fila de `src/entrega/` («Armado y verificación del `.zip` de entrega: `npm run entrega:armar` y `entrega:verificar` (#19)») y a `README.md` («Estructura») la fila equivalente
 - [x] T035 [P] Documentar en `README.md`, sección «Pruebas», los comandos de entrega y cómo leer su veredicto (código de salida 0, 1, 2 y 3), con enlace a [contracts/comando-entrega.md](contracts/comando-entrega.md)
 - [x] T036 Ejecutar `npm test`, `npm run typecheck` y `npm run format:check`, y corregir lo que falle. Ningún cambio se integra con pruebas en rojo
-- [ ] T037 Validar [quickstart.md](quickstart.md) de punta a punta (pasos 1 a 6) y anotar el resultado y el tiempo del paso 1 en la descripción del PR
-- [ ] T038 Preparar los commits de entrega con mensajes `tipo: … (#19)`. No se reescribe el historial (sin `rebase`, `amend` de commits publicados ni `push --force`). El `.zip` final se arma después de fusionar este PR y el #18, desde `main` con el árbol limpio
+- [ ] T037 Validar [quickstart.md](quickstart.md) de punta a punta (pasos 1 a 6) y anotar el resultado y el tiempo del paso 1 en la descripción del PR **Hecho: pasos 1 (clon limpio: 46 s + 49 s + 5 s = 100 s), 2, 3, 5 y 6. Falta el paso 4 (video, T029).**
+- [x] T038 Preparar los commits de entrega con mensajes `tipo: … (#19)`. No se reescribe el historial (sin `rebase`, `amend` de commits publicados ni `push --force`). El `.zip` final se arma después de fusionar este PR y el #18, desde `main` con el árbol limpio
 
 ---
 
