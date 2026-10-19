@@ -9,7 +9,7 @@ import { registrar } from "../compartido/logs.ts";
 import { evaluarRegla1, REGLA_1 } from "../politica/identidad.ts";
 import {
   CLAVE_SERVIDOR,
-  admiteRegistro,
+  admiteTrasEscalar,
   dejarSenal,
   emitirEvento,
   type EstadoConversacion,
@@ -185,7 +185,7 @@ export function crearControlIdentidad({
     // herramienta, tampoco las de identificación, se ejecuta después (orden 4 → 5 → 1). La única
     // excepción es el registro tras una señal de la Regla 3: el analista debe recibir la solicitud
     // con la discrepancia o la inconsistencia guardada (#13, R5); la Regla 1 se sigue comprobando.
-    if (estado.escalamiento !== null && !admiteRegistro(herramienta, estado)) {
+    if (estado.escalamiento !== null && !admiteTrasEscalar(herramienta, estado)) {
       registrar("control_identidad", {
         correlationId: estado.correlationId,
         herramienta,

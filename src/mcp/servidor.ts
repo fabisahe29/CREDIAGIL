@@ -106,6 +106,7 @@ const ENTRADAS = {
       motivo: z.unknown(),
       codigo: z.unknown().optional(),
       causasAdicionales: z.unknown().optional(),
+      asuntosPendientes: z.unknown().optional(),
       declarado: z.unknown().optional(),
     })
     .strict(),
@@ -577,6 +578,9 @@ export function crearServidor(core: Core): McpServer {
         ),
         causasAdicionales: anunciado(
           "Opcional. Hasta 8 causas más del mismo caso, cada una con causa, motivo y código opcional.",
+        ),
+        asuntosPendientes: anunciado(
+          "Opcional. Los asuntos del mensaje del solicitante que quedaron sin atender: una lista sin repetidos de solicitud, documentos o cuota.",
         ),
         declarado: anunciado(
           "Opcional. Monto y plazo que dijo el solicitante, cada uno con valor entero positivo y procedencia; solo se usa si no hay solicitud registrada.",

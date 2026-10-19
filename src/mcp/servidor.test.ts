@@ -1804,3 +1804,59 @@ describe("servidor MCP del core: escalar_a_analista y consultar_escalamiento (#1
     }
   });
 });
+describe("servidor MCP del core: escalar_a_analista con asuntos pendientes (#16, R7)", () => {
+  let conexion: Conexion;
+  beforeEach(async () => {
+    conexion = await conectarServidor({ CREDIAGIL_FALLA: "" });
+  });
+  afterEach(async () => {
+    await conexion.cerrar();
+  });
+
+  const entrada = (correlationId: string, cambios: Record<string, unknown> = {}) => ({
+    correlationId,
+    claveIdempotencia: claveIdempotenciaEscalamiento(correlationId),
+    causa: "peticion_de_persona",
+    motivo: "pide_persona",
+    ...cambios,
+  });
+
+  const escalar = (argumentos: Record<string, unknown>) =>
+    llamarHerramienta(conexion, "escalar_a_analista", argumentos);
+
+  it("anuncia asuntosPendientes como campo opcional de entrada", async () => {
+    const { tools } = await conexion.cliente.listTools();
+    const herramienta = tools.find((t) => t.name === "escalar_a_analista");
+    assert.ok(herramienta, "falta escalar_a_analista");
+    assert.ok(Object.keys(herramienta.inputSchema.properties ?? {}).includes("asuntosPendientes"));
+    assert.equal((herramienta.inputSchema.required ?? []).includes("asuntosPendientes"), false);
+  });
+
+  it("devuelve en el resumen los asuntos pendientes que recibió", async () => {
+    const r = await escalar(entrada(randomUUID(), { asuntosPendientes: ["cuota"] }));
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    const datos = r.contenido.datos as {
+      escalamiento: { asuntosPendientes: string[] };
+    };
+    assert.deepEqual(datos.escalamiento.asuntosPendientes, ["cuota"]);
+  });
+
+  it("sin el campo, el resumen trae la lista vacía", async () => {
+    const r = await escalar(entrada(randomUUID()));
+    assert.equal(r.isError, false, JSON.stringify(r.contenido));
+    const datos = r.contenido.datos as {
+      escalamiento: { asuntosPendientes: string[] };
+    };
+    assert.deepEqual(datos.escalamiento.asuntosPendientes, []);
+  });
+
+  it("rechaza del lado del servidor un asunto fuera del catálogo o repetido", async () => {
+    for (const asuntosPendientes of [["hipoteca"], ["cuota", "cuota"]]) {
+      const r = await escalar(entrada(randomUUID(), { asuntosPendientes }));
+      assert.equal(r.isError, true, JSON.stringify(asuntosPendientes));
+      const error = (r.contenido as { error: { codigo: string; campo?: string } }).error;
+      assert.equal(error.codigo, "formato_invalido");
+      assert.equal(error.campo, "asuntosPendientes");
+    }
+  });
+});

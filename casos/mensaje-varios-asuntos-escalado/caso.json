@@ -1,0 +1,9 @@
+{
+  "nombre": "mensaje-varios-asuntos-escalado",
+  "descripcion": "Un asunto escalado no bloquea a otro (#16): el sueldo en dólares escala la solicitud por la Regla 5 y la cuota, que la política sí cubre, se resuelve en la misma respuesta con el ingreso en pesos que dijo el solicitante",
+  "pasos": [
+    {
+      "mensaje": "Quiero pedir un crédito de 4 millones a 24 meses. Mi sueldo me lo pagan en dólares, pero igual dime en cuánto me quedaría la cuota si cuento con 5 millones de pesos al mes."
+    }
+  ]
+}

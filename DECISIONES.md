@@ -4,6 +4,54 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 ---
 
+## 2026-10-18 · Atención de mensajes con varias preocupaciones
+
+**Issue**: [#16 — Atención de mensajes con varias preocupaciones](https://github.com/fabisahe29/CREDIAGIL/issues/16)
+
+**Detalle**: [specs/014-atencion-mensajes-varios-asuntos/research.md](specs/014-atencion-mensajes-varios-asuntos/research.md), decisiones R1 a R12
+
+### Decisión 1: un asunto es una categoría cerrada de tres, con un estado cerrado de tres
+
+Los asuntos son `solicitud`, `documentos` y `cuota`; el estado es `resuelto`, `pendiente` o `escalado`. Viven en la política, como las causas y las acciones del #15.
+
+**Motivo**: la spec limita los asuntos a lo que el agente ya sabe atender y exige un estado por asunto. Un catálogo cerrado se prueba fila por fila y no admite texto libre del modelo.
+
+**Alternativas descartadas**: asuntos como texto libre que redacta el modelo, porque no se puede verificar que ninguno se pierda; un cuarto asunto «petición de persona», porque esa petición es la causa que escala todo el caso y no algo que se resuelva.
+
+### Decisión 2: el código detecta los asuntos esperados y los une a los que muestran las herramientas
+
+`detectarAsuntos` reconoce por código, con listas cerradas y de forma conservadora, lo que plantea el mensaje. Un asunto esperado sin resultado sale `pendiente`; no desaparece.
+
+**Motivo**: si solo contaran las herramientas que llamó el modelo, un asunto olvidado se perdería sin rastro. La detección también sirve en la Regla 4, donde no hay modelo.
+
+**Alternativas descartadas**: una herramienta `declarar_asuntos`, porque depende de que el modelo la llame y no sirve en la Regla 4; clasificar el mensaje con una llamada previa al modelo, que no es determinista ni «sin investigar».
+
+### Decisión 3: el estado de cada asunto y el bloque de la respuesta los compone el código
+
+El adaptador registra qué pasó con cada llamada; una función pura deduce el estado de cada asunto. Con dos o más asuntos, la respuesta lleva al final un bloque «Estado de tus asuntos»; con uno solo no cambia.
+
+**Motivo**: en una escalada el texto del modelo se descarta, y con él la cuota que ya se había calculado. El estado es una decisión sobre el caso y debe ser reproducible.
+
+**Alternativas descartadas**: que el modelo escriba el estado de cada asunto, porque puede decir «resuelto» sin haberlo estado; reemplazar siempre el texto del modelo por el bloque, que cambia la respuesta de los mensajes de un solo asunto; una respuesta por asunto, que incumple la respuesta única.
+
+### Decisión 4: tras escalar sigue permitida la simulación de cuota
+
+Una señal vigente sigue negando toda herramienta, salvo `calcular_capacidad_pago` cuando la señal no es de la Regla 4 ni una falla técnica.
+
+**Motivo**: la simulación es de solo lectura: no decide, no registra y no cambia la causa. Sin ella, un asunto escalado deja sin respuesta a la pregunta por la cuota, que la política sí cubre.
+
+**Alternativas descartadas**: permitir todas las herramientas, que rompería la Regla 1 y el orden de evaluación; negar la cuota también tras la Regla 5; resolver la cuota antes de escalar con un orden fijo, que depende del modelo.
+
+### Decisión 5: con la Regla 4, los demás asuntos quedan pendientes para el analista
+
+La petición de persona sigue escalando sin modelo ni herramientas. Los demás asuntos detectados salen `pendiente` y viajan al analista en `asuntosPendientes`, un campo opcional y aditivo de `escalar_a_analista`.
+
+**Motivo**: es la aclaración de la spec (Regla 4 prevalece, la pregunta por la cuota no se calcula) y evita que el analista ignore que el solicitante preguntó algo.
+
+**Alternativas descartadas**: calcular la cuota antes de escalar, que contradice «sin investigar primero»; no dejar rastro de la pregunta; mezclar los asuntos en `pendientes`, que son datos que faltan del caso y no preguntas del solicitante.
+
+---
+
 ## 2026-10-18 · Escalamiento con criterio y handoff al analista
 
 **Issue**: [#15 — Escalamiento con criterio y handoff al analista](https://github.com/fabisahe29/CREDIAGIL/issues/15)

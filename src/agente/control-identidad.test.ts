@@ -2,7 +2,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
-import { crearEstado, dejarSenal, MOTIVOS_QUE_ADMITEN_REGISTRO } from "./adaptador.ts";
+import {
+  crearEstado,
+  dejarSenal,
+  MOTIVOS_QUE_ADMITEN_REGISTRO,
+  MOTIVOS_QUE_LO_IMPIDEN,
+} from "./adaptador.ts";
+import { MOTIVOS_ESCALAMIENTO, type MotivoEscalamiento } from "../politica/escalamiento.ts";
 import type { ClienteCore, RespuestaIdentidad } from "./cliente-core.ts";
 import { crearControlIdentidad, HERRAMIENTAS_CON_IDENTIDAD } from "./control-identidad.ts";
 import { errorTransitorio, exito, fallo, fueraDeContrato } from "../compartido/errores.ts";
@@ -699,14 +705,13 @@ describe("control de identidad: registrar_solicitud, sin el modelo (#13, US2 · 
     assert.equal(llamadas(), 1);
   });
 
-  it("la excepción de la Regla 3 es solo del registro: las demás herramientas siguen denegadas", async (t) => {
+  it("la excepción de la Regla 3 es solo del registro y de la simulación (#16): las demás herramientas siguen denegadas", async (t) => {
     capturarStderr(t);
     for (const herramienta of [
       "solicitar_analista",
       "extraer_documento",
       "verificar_ingreso",
       "buscar_solicitante",
-      "calcular_capacidad_pago",
     ]) {
       const { invocar, estado, llamadas } = control([verificadaComo(ID_ANA)]);
       dejarSenal(estado, {
@@ -774,5 +779,74 @@ describe("control de identidad: preaprobar_credito (#14, US2)", () => {
     });
     assert.equal(decision(salida), "deny");
     assert.equal(llamadas(), 0);
+  });
+});
+describe("control de identidad: qué sigue tras escalar (#16, R5)", () => {
+  const SIMULAR = "mcp__originacion__calcular_capacidad_pago";
+
+  function conSenal(motivo: MotivoEscalamiento, verificada = false) {
+    const estado = crearEstado(randomUUID());
+    dejarSenal(estado, {
+      motivo,
+      regla: "regla de prueba",
+      herramienta: "prueba",
+    });
+    const { core, llamadas } = coreCon([identidad(estado.correlationId, verificada)]);
+    const control = crearControlIdentidad({
+      core,
+      estado,
+      dormir: async () => {},
+      azar: () => 0.5,
+    });
+    const invocar = (herramienta: string) =>
+      control(entrada(`mcp__originacion__${herramienta}`), "uso-1", {
+        signal: new AbortController().signal,
+      });
+    return { estado, llamadas, invocar };
+  }
+
+  for (const motivo of MOTIVOS_ESCALAMIENTO) {
+    const impedido = MOTIVOS_QUE_LO_IMPIDEN.some((m) => m === motivo);
+    it(`tras ${motivo} la simulación ${impedido ? "se niega" : "pasa sin consultar al core"}`, async (t) => {
+      capturarStderr(t);
+      const { invocar, llamadas } = conSenal(motivo);
+      const salida = await invocar("calcular_capacidad_pago");
+      if (impedido) assert.equal(decision(salida), "deny");
+      else assert.deepEqual(salida, {});
+      assert.equal(llamadas(), 0);
+    });
+  }
+
+  it("tras una señal que permite la simulación, las demás herramientas siguen negadas", async (t) => {
+    capturarStderr(t);
+    for (const motivo of [
+      "caso_no_cubierto",
+      "discrepancia_de_ingreso",
+      "identidad_ambigua",
+    ] as const) {
+      const { invocar } = conSenal(motivo);
+      for (const herramienta of [
+        "buscar_solicitante",
+        "verificar_identidad",
+        "extraer_documento",
+        "verificar_ingreso",
+        "preaprobar_credito",
+      ]) {
+        assert.equal(decision(await invocar(herramienta)), "deny", `${herramienta} tras ${motivo}`);
+      }
+    }
+  });
+
+  it("el registro sigue la regla de antes: pasa solo bajo una señal de la Regla 3", async (t) => {
+    capturarStderr(t);
+    const bajoRegla3 = conSenal("discrepancia_de_ingreso", true);
+    assert.notEqual(decision(await bajoRegla3.invocar("registrar_solicitud")), "deny");
+    const bajoRegla5 = conSenal("caso_no_cubierto");
+    assert.equal(decision(await bajoRegla5.invocar("registrar_solicitud")), "deny");
+  });
+
+  it("la simulación tras escalar no está en la lista de herramientas que exigen identidad", () => {
+    assert.ok(!HERRAMIENTAS_CON_IDENTIDAD.includes("calcular_capacidad_pago"));
+    assert.equal(SIMULAR, "mcp__originacion__calcular_capacidad_pago");
   });
 });

@@ -424,3 +424,14 @@ describe("presentación: formatearHandoff (#15, US5)", () => {
     );
   });
 });
+
+describe("presentación: asuntos pendientes del resumen (#16, R7)", () => {
+  it("con asuntos pendientes agrega la línea, en el orden recibido", () => {
+    const texto = formatearHandoff(resumen({ asuntosPendientes: ["solicitud", "cuota"] }), false);
+    assert.match(texto, /^Asuntos pendientes: solicitud, cuota$/m);
+  });
+
+  it("sin asuntos pendientes no agrega la línea", () => {
+    assert.doesNotMatch(formatearHandoff(resumen(), false), /Asuntos pendientes/);
+  });
+});

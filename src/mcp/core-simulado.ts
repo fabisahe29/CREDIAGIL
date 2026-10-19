@@ -52,6 +52,7 @@ import {
   type MotivoEscalamiento,
   type Pendiente,
 } from "../politica/escalamiento.ts";
+import type { Asunto } from "../politica/asuntos.ts";
 import {
   calcularPendientes,
   esquemaResumenAnalista,
@@ -281,6 +282,8 @@ export interface AuditoriaEscalamiento {
   idSolicitud?: string;
   idSolicitante?: string;
   pendientes: Pendiente[];
+  /** Los asuntos del mensaje que quedaron sin atender, como los entregó el agente (#16). */
+  asuntosPendientes: Asunto[];
   versionPolitica: string;
 }
 
@@ -1459,6 +1462,8 @@ export function crearCore({
             ? decisionDeLaRegla2(solicitud)
             : null,
         pendientes: calcularPendientes(base),
+        // Lo que el agente observó del mensaje: el core no lo sabe, solo lo guarda y lo valida (#16, R7).
+        asuntosPendientes: forma.entrada.asuntosPendientes ?? [],
       };
       const analisis = esquemaResumenAnalista.safeParse(structuredClone(candidato));
       if (!analisis.success) {
@@ -1487,6 +1492,7 @@ export function crearCore({
             ? { idSolicitante: resumen.solicitante.idSolicitante }
             : {}),
           pendientes: [...resumen.pendientes],
+          asuntosPendientes: [...resumen.asuntosPendientes],
           versionPolitica: VERSION_POLITICA,
         },
       };
