@@ -36,9 +36,9 @@ Decisiones de diseño del proyecto, con su motivo y las alternativas descartadas
 
 Comprueba nombres prohibidos, `.git`, peso (50 MB), secretos, historial y artefactos de Spec Kit. Un hallazgo bloquea, y el informe da el tipo y la ubicación, nunca el valor.
 
-**Motivo**: el criterio habla del `.zip` que se sube, no del árbol de trabajo.
+**Motivo**: el criterio habla del `.zip` que se sube, no del árbol de trabajo. En la primera ejecución real, los detectores de variable y de URL marcaron 6 falsos positivos (valores como `valor-de-prueba` en pruebas del #5 y marcadores como `usuario:token@`). Esos dos detectores descartan lo que se reconoce como ficticio o como marcador de plantilla, igual que pide la constitución; los tokens y las claves privadas nunca se descartan.
 
-**Alternativas descartadas**: una herramienta externa de escaneo de secretos, que es una dependencia fuera del enunciado; revisar solo el árbol, que no ve `.git/config`.
+**Alternativas descartadas**: una herramienta externa de escaneo de secretos, que es una dependencia fuera del enunciado; revisar solo el árbol, que no ve `.git/config`; reescribir las pruebas y el historial del #5 para esquivar el detector, porque el historial no se reescribe; una lista de archivos exentos, porque un secreto real en un archivo exento pasaría sin avisar.
 
 ### Decisión 5: el historial se revisa con `git log` y no se reescribe
 

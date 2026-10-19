@@ -9,7 +9,29 @@ export interface Deteccion {
   linea: number;
 }
 
-const DETECTORES: ReadonlyArray<{ tipo: string; patron: RegExp }> = [
+/**
+ * Valor que se reconoce como ficticio a simple vista (constitución, Principio II): empieza por una
+ * palabra de ficticio seguida de `-` o `_`, o la contiene. Un secreto real no se escribe así. Solo lo
+ * usan los detectores de variables y de URL, que no tienen un prefijo propio como los tokens.
+ */
+export function esMarcadorFicticio(valor: string): boolean {
+  return (
+    /^(?:valor|ficticio|falso|ejemplo|prueba|demo|test|dummy|fake|xxx+)[-_]/i.test(valor) ||
+    /ficticio/i.test(valor)
+  );
+}
+
+/** Un valor que es un marcador de posición de plantilla (`${…}`, `<…>`, `{…}`, `[…]`), no un valor. */
+const ES_PLANTILLA = /^[$<{[]/;
+
+interface Detector {
+  tipo: string;
+  patron: RegExp;
+  /** Descarta una coincidencia que no es un secreto (marcador ficticio o de plantilla). */
+  descartar?: (coincidencia: RegExpExecArray) => boolean;
+}
+
+const DETECTORES: readonly Detector[] = [
   {
     tipo: "token de GitHub",
     patron: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/,
@@ -21,18 +43,25 @@ const DETECTORES: ReadonlyArray<{ tipo: string; patron: RegExp }> = [
   },
   {
     tipo: "variable de secreto con valor",
-    patron: /\b(?:GIT_HUB|ANTHROPIC_API_KEY)\s*=\s*["']?[A-Za-z0-9_-]{8,}/,
+    patron: /\b(?:GIT_HUB|ANTHROPIC_API_KEY)\s*=\s*["']?([A-Za-z0-9_-]{8,})/,
+    descartar: (c) => esMarcadorFicticio(c[1]!),
   },
   { tipo: "clave privada", patron: /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----/ },
-  { tipo: "credenciales dentro de una URL", patron: /\bhttps?:\/\/[^\s/:@]+:[^\s/@]+@/ },
+  {
+    tipo: "credenciales dentro de una URL",
+    patron: /\bhttps?:\/\/[^\s/:@]+:([^\s/@]{8,})@/,
+    descartar: (c) => ES_PLANTILLA.test(c[1]!) || esMarcadorFicticio(c[1]!),
+  },
 ];
 
 /** Tipos de secreto que aparecen en el texto, con su línea. Sin duplicar un tipo en la misma línea. */
 export function detectarSecretos(texto: string): Deteccion[] {
   const detecciones: Deteccion[] = [];
   texto.split(/\r?\n/).forEach((contenidoLinea, indice) => {
-    for (const { tipo, patron } of DETECTORES) {
-      if (patron.test(contenidoLinea)) detecciones.push({ tipo, linea: indice + 1 });
+    for (const { tipo, patron, descartar } of DETECTORES) {
+      const coincidencia = patron.exec(contenidoLinea);
+      if (coincidencia !== null && !descartar?.(coincidencia))
+        detecciones.push({ tipo, linea: indice + 1 });
     }
   });
   return detecciones;

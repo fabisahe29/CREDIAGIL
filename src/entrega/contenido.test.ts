@@ -87,6 +87,28 @@ describe("detectores de secretos", () => {
     assert.deepEqual(detectarSecretos("GIT_HUB="), []);
   });
 
+  it("no se dispara con un valor ficticio reconocible ni con un marcador de plantilla", () => {
+    assert.deepEqual(detectarSecretos("GIT_HUB=valor-de-prueba"), []);
+    assert.deepEqual(detectarSecretos('ANTHROPIC_API_KEY="ficticio-1234567890"'), []);
+    assert.deepEqual(detectarSecretos("url = https://usuario:token@github.example/r.git"), []);
+    assert.deepEqual(
+      detectarSecretos("url = https://usuario:${CLAVE_DEL_ENTORNO}@github.example/r.git"),
+      [],
+    );
+    assert.deepEqual(
+      detectarSecretos("url = https://usuario:<tu-clave-larga>@github.example/r.git"),
+      [],
+    );
+  });
+
+  it("sigue detectando un valor con forma real aunque la variable lleve un prefijo parecido", () => {
+    const real = relleno(20);
+    const variable = ["GIT", "HUB"].join("_");
+    assert.equal(detectarSecretos([variable, real].join("=")).length, 1);
+    assert.equal(detectarSecretos([variable, "valorreal" + real].join("=")).length, 1);
+    assert.equal(detectarSecretos(`url = https://usuario:${real}@github.example/r.git`).length, 1);
+  });
+
   it("no se dispara con una URL sin credenciales", () => {
     assert.deepEqual(detectarSecretos("https://github.com/fabisahe29/CREDIAGIL.git"), []);
   });

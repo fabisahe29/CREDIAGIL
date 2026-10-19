@@ -34,7 +34,7 @@ Revisa el `.zip` y el repositorio, e imprime un informe con una línea por compr
 
 ### Detectores de secreto
 
-Token de GitHub (`ghp_…`, `github_pat_…`), clave de la API de Claude (`sk-ant-…`), `Authorization: Bearer` con valor literal, `GIT_HUB=` o `ANTHROPIC_API_KEY=` con valor no vacío, bloque de clave privada y credenciales dentro de una URL. La plantilla `.env.example` (variables sin valor) no dispara ninguno.
+Token de GitHub (`ghp_…`, `github_pat_…`), clave de la API de Claude (`sk-ant-…`), `Authorization: Bearer` con valor literal, `GIT_HUB=` o `ANTHROPIC_API_KEY=` con valor no vacío, bloque de clave privada y credenciales dentro de una URL. La plantilla `.env.example` (variables sin valor) no dispara ninguno. Los detectores de variable y de URL descartan un valor reconocible como ficticio (empieza por `valor-`, `ficticio-`, `ejemplo-`, `prueba-`, `demo-`, `test-`, `dummy-` o `fake-`, o contiene «ficticio») y un marcador de plantilla (`${…}`, `<…>`, `{…}`, `[…]`); los tokens y las claves privadas nunca se descartan ([research.md](../research.md), R4).
 
 ### Código de salida
 
