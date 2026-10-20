@@ -9,6 +9,8 @@
     "test": "node --test \".claude/**/*.test.ts\" \"scripts/**/*.test.ts\" \"src/**/*.test.ts\"",
     "chat": "node src/chat/principal.ts",
     "casos": "node src/e2e/principal.ts",
+    "entrega:armar": "node src/entrega/principal.ts armar",
+    "entrega:verificar": "node src/entrega/principal.ts verificar",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
