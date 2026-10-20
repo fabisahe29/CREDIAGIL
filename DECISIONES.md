@@ -110,4 +110,4 @@ Para cada una de las 11 necesidades del enunciado: el mecanismo elegido, por qu√
 
 **Descartado**: un repositorio aparte solo para el plugin, que a√±ade otro lugar donde la copia puede derivar.
 
-**Detalle**: [issue #18](https://github.com/fabisahe29/CREDIAGIL/issues/18)
+**Detalle**: [specs/016-plugin-reutilizable-equipos/research.md](specs/016-plugin-reutilizable-equipos/research.md)

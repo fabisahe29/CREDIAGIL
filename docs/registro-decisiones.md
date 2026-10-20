@@ -72,6 +72,60 @@ Cada ticket que no esté en Done recibe un comentario con el marcador `crediagil
 
 ---
 
+## 2026-10-19 · Plugin reutilizable para otros equipos
+
+**Issue**: [#18 — Plugin reutilizable para otros equipos](https://github.com/fabisahe29/CREDIAGIL/issues/18)
+
+**Detalle**: [specs/016-plugin-reutilizable-equipos/research.md](../specs/016-plugin-reutilizable-equipos/research.md), decisiones R1 a R14
+
+### Decisión 1: viajan solo los controles genéricos; lo propio de originación y del flujo se queda
+
+El plugin lleva el guardián de secretos y de datos con forma real, la convención de datos ficticios, el solo lectura de los revisores, un revisor que lee las reglas del equipo y una skill de uso. No llevan `spec-primero`, `puerta-pr`, los `/ticket-*`, las skills `speckit-*`, `revisor-cumplimiento` ni nada de `src/`.
+
+**Motivo**: lo que viaja no puede depender de las reglas de crédito ni de los tickets de este proyecto, o deja de ser reutilizable. `revisor-cumplimiento` tiene las reglas 1 a 5 escritas dentro, por eso el plugin trae un revisor nuevo que lee las del equipo.
+
+**Alternativas descartadas**: llevar también `puerta-pr`, porque depende de `.git/crediagil/` y del flujo de tickets; llevar solo un hook, un subagente y una skill sin detección de secretos, porque deja fuera un control que el ticket nombra como riesgo común.
+
+### Decisión 2: este repositorio es la fuente y el plugin es una copia generada
+
+Un generador copia las piezas desde `.claude/` a `plugins/crediagil-controles/` sin transformarlas. Las pruebas fallan si una copia difiere de su fuente o si el plugin contiene una referencia propia de este repositorio.
+
+**Motivo**: lo que se prueba en otros equipos es lo mismo que se usa aquí, y la deriva se detecta en cada ejecución de las pruebas.
+
+**Riesgo aceptado**: hay dos copias. La deriva se detecta, no se evita; la prueba de sincronía es la única defensa.
+
+**Alternativas descartadas**: que el plugin sea la fuente y este repositorio lo consuma, que da una sola copia pero aleja el control de donde se desarrolla; que convivan ambas copias con prioridad al repositorio, que no garantiza que el plugin se pruebe con lo que se usa aquí; enlaces simbólicos, porque `init-options.json` fija `allow_symlinks: false` y en Windows exigen permisos.
+
+### Decisión 3: las fuentes genéricas se dejan neutras y el guardián se parte en una base y dos entradas
+
+Los mensajes, los comentarios y el tipo `Control` de los archivos que viajan pierden las referencias a la constitución, a las specs y a `docs/datos-ficticios.md`. El guardián se parte en `guardian-base.ts` y dos entradas: la de este repositorio (5 controles) y la del plugin (3 controles genéricos).
+
+**Motivo**: la copia es idéntica a la fuente (decisión 2), así que la fuente tiene que estar limpia. El plugin no arrastra `spec-primero` ni `puerta-pr`.
+
+**Alternativas descartadas**: reescribir referencias al copiar, que oculta en el generador lo que debe estar bien en la fuente; copiar `guardian.ts` completo con una bandera que apague controles, que deja código propio dentro del plugin.
+
+### Decisión 4: la configuración del equipo vive en su repositorio, no en el plugin
+
+Las reglas del revisor van en `.claude/reglas-equipo.md` y el único ajuste del hook, `prefijoFicticio`, en `.claude/controles-equipo.json`. Sin ellos, el revisor informa que falta la configuración y el hook usa la convención por defecto y lo dice.
+
+**Ajuste tras la revisión de código**: el prefijo permitía que el propio agente relajara el control de datos con forma real escribiendo la configuración con un prefijo de un dígito. Ahora el prefijo exige de 3 a 6 dígitos y el control `configuracion-protegida` bloquea toda escritura del agente en `.claude/controles-equipo.json`, sea con herramientas de edición o con un comando de shell: la edita una persona fuera de la sesión. La configuración se lee solo cuando la acción trae texto que revisar, así que un archivo inválido no bloquea acciones sin texto, como un `Read`.
+
+**Motivo**: una actualización del plugin no puede borrar lo que el equipo declaró, y el plugin no puede suponer reglas ajenas.
+
+**Alternativas descartadas**: un solo archivo con reglas y ajustes mezclados; exponer también las palabras clave y los patrones de detección, que ningún equipo ha pedido.
+
+### Decisión 5: lo que no se pudo confirmar se verifica antes de construir
+
+El nombre con el que un subagente de plugin llega al hook, el diff entregado por la skill, los comandos de la CLI y la ejecución de TypeScript desde la carpeta del plugin quedaron como cuatro puntos con plan B (R9), y se probaron en la primera tarea con la CLI real. Un punto que no se pueda confirmar en una máquina concreta se marca «no verificable» y nunca aprobado.
+
+**Resultado**: los cuatro puntos pasaron y ninguno necesitó su plan B, pero la prueba encontró un fallo que el plan no había previsto. Con `agent: revisor-reglas` la skill no encontró el subagente del plugin y corrió como un agente genérico, sin la restricción de solo lectura. La skill declara ahora `agent: crediagil-controles:revisor-reglas`. También se agregó `onFailure: "block"` al hook, y se comprobó que un guardián que falla bloquea la acción.
+
+**Motivo**: la CLI no estaba disponible al planificar. Marcar como aprobado algo no probado daría una evidencia falsa, y aquí la prueba real descubrió un revisor sin restricciones.
+
+**Alternativas descartadas**: dar por buenos los nombres de campo y comandos según la documentación leída de memoria; omitir la verificación automática y dejar solo la manual.
+
+---
+
 ## 2026-10-19 · Casos de prueba obligatorios de extremo a extremo
 
 **Issue**: [#17 — Casos de prueba obligatorios de extremo a extremo](https://github.com/fabisahe29/CREDIAGIL/issues/17)

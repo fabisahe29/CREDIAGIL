@@ -74,7 +74,7 @@ describe("secretos: comandos que nombran el archivo (FR-006)", () => {
     it(`bloquea: ${comando}`, () => {
       const bloqueos = shell(comando, herramienta);
       assert.ok(bloqueos.length > 0, "debía bloquearse");
-      assert.match(bloqueos[0]!.regla, /FR-006/);
+      assert.match(bloqueos[0]!.regla, /nombrar un archivo \.env/);
     });
   }
 
@@ -108,7 +108,7 @@ describe("secretos: comandos recursivos (FR-006a)", () => {
     it(`bloquea: ${comando}`, () => {
       const bloqueos = shell(comando);
       assert.ok(bloqueos.length > 0, "debía bloquearse");
-      assert.match(bloqueos[0]!.regla, /FR-006a/);
+      assert.match(bloqueos[0]!.regla, /recursivo no puede alcanzar/);
       assert.match(bloqueos[0]!.correccion, /--exclude='\.env\*'/);
     });
   }

@@ -1,0 +1,12 @@
+{
+  "name": "crediagil",
+  "description": "Piezas reutilizables de los equipos de Crediágil para Claude Code.",
+  "owner": { "name": "Equipo Crediágil" },
+  "plugins": [
+    {
+      "name": "crediagil-controles",
+      "source": "./plugins/crediagil-controles",
+      "description": "Controles reutilizables: bloqueo de secretos y datos con forma real, revisor de solo lectura y revisión de reglas del equipo."
+    }
+  ]
+}

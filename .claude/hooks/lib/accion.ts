@@ -1,4 +1,4 @@
-// Entrada normalizada del guardián (data-model.md, "Acción"; research.md, R6).
+// Entrada normalizada del guardián.
 // Se valida con guardas de tipo propias, sin Zod, para no depender de node_modules.
 import { posix } from "node:path";
 
@@ -36,7 +36,7 @@ function esObjeto(valor: unknown): valor is Record<string, unknown> {
 
 /**
  * Ruta relativa a la raíz, con `/` y con los segmentos `.` y `..` resueltos, para que
- * `src/../.git/x` no esquive un control que compara prefijos. Las rutas fuera de la raíz
+ * `app/../.git/x` no esquive un control que compara prefijos. Las rutas fuera de la raíz
  * quedan absolutas.
  */
 export function normalizarRuta(ruta: string, raiz: string): string {
